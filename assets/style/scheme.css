@@ -1,0 +1,30 @@
+
+#target div {
+    display: inline-block;
+    border: 1px solid black;
+    padding: 5px;
+}
+
+
+#target .define {
+    display: -webkit-flex;
+    -webkit-flex-flow: row wrap;
+}
+
+#target .define > div {
+    -webkit-flex: 1 100%;
+}
+
+#target .define > :first-child {
+    -webkit-flex: 0 auto;
+}
+
+#target .define > :nth-child(2) {
+    -webkit-flex: 1;
+}
+
+#target .focus {
+    border: 1px solid red;
+    background-color: yellow;
+}
+
