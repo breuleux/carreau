@@ -14,7 +14,7 @@ function setEndOfContenteditable(contentEditableElement)
         selection.addRange(range);
     }
     else if(document.selection)
-    { 
+    {
         range = document.body.createTextRange();
         range.moveToElementText(contentEditableElement);
         range.collapse(false);
@@ -97,12 +97,6 @@ function relayout(node, classes, init, addchild) {
 }
 
 function chain(node, members) {
-    // node.holes[0]._active = false;
-    // for (var i = 0; i < node.children.length; i++) {
-    // }
-    // if (!members) {
-    //     return;
-    // }
     node.first = members[0];
     node.last = members[members.length - 1];
     if (node.isatom) {
@@ -117,8 +111,13 @@ function chain(node, members) {
         m.left = members[i - 1];
         m.right = members[i + 1];
         m.up = node.element;
-        m.backup = m.left || (node.children.length == 1 ? node.holes[0] : members[i + 2]);
-        // m._active = true;
+        m.backup = m.left; // || (node.children.length == 1 ? node.holes[0] : members[i + 2]);
+        if (m.insertion_point !== m) {
+            if (m.right.insertion_point === m.right)
+                m.insertion_point = m.right;
+            else
+                m.insertion_point = undefined;
+        }
     }
 }
 
@@ -135,82 +134,187 @@ function natural_navigation(f, h, e) {
     return f;
 }
 
-function woop(event) {
-    console.log(event);
+
+function insert_tagged(hole, tag) {
+    var parent = hole.parent_node;
+    var f = parent.framework;
+    var newnode = Node(f, tag);
+    parent.insert(hole.parent_index, newnode);
+    f.switch_focus(newnode.holes[0]);
+}
+
+function insert_untagged(hole) {
+    var parent = hole.parent_node;
+    var f = parent.framework;
+    var newnode = Node(f, '');
+    parent.insert(hole.parent_index, newnode);
+    f.switch_focus(newnode.tagelem);
+}
+
+function insert_symbol(hole, text) {
+    var parent = hole.parent_node;
+    var f = parent.framework;
+    var newnode = Node(f, 'sym');
+    newnode.append(text || '');
+    parent.insert(hole.parent_index, newnode);
+    f.switch_focus(newnode.element);
+    setEndOfContenteditable(f.focused.true_focus);
+}
+
+function symbol_character(e) {
+    var k = e.which;
+    return ((k >= 60 && k <= 90)
+            || (k >= 97 && k <= 122)
+            || (k >= 48 && k <= 57)
+            || [36, 37, 38, 42, 43, 45, 47, 94, 95, 33, 124, 126].indexOf(k) != -1)
 }
 
 
-function navigate(framework) {
-    // Standard navigation
-    return function(event) {
-        var focused = framework.focused;
+var nav_bindings = {
+    Up: 'up',
+    Down: 'down',
+    "C-Left": 'left',
+    "C-Right": 'right',
+    Left: 'deep_left',
+    Right: 'deep_right',
 
-        function go(direction) {
-            prevent(event);
-            framework.go(direction);
-            return true;
+    Space: 'right',
+    Enter: 'right',
+
+    "=All": function (f, e) {
+        var target = f.focused.insertion_point;
+        if (target && symbol_character(e)) {
+            insert_symbol(target, String.fromCharCode(e.which));
+            return 'break';
         }
+    },
+    "=#": function (f) {
+        var target = f.focused.insertion_point;
+        if (target)
+            insert_untagged(target);
+    },
+    "=(": function (f) {
+        var target = f.focused.insertion_point;
+        if (target)
+            insert_tagged(target, '');
+    },
 
-        var code;
-        if (event.type == 'keydown') {
-            code = event.keyCode;
+    "=)": ['up', 'right'],
+};
+
+function check_empty(framework) {
+    var elem = framework.focused;
+    var box = elem.true_focus || elem;
+    // console.log([box, elem.backup])
+    if (elem.backup &&
+        (box.innerHTML == ''
+         || box.innerHTML == '<br>')) {
+        var newelem = elem.backup;
+        var node = elem.node;
+        framework.switch_focus(newelem);
+        var parent = node.parent_node;
+        parent.remove(node);
+    }
+    return true;
+}
+
+var symbol_bindings = {
+    Left: function (framework) {
+        var box = framework.focused.true_focus || framework.focused;
+        if (!check_start(box)) {
+            return "default";
+        }
+    },
+    Right: function (framework) {
+        var box = framework.focused.true_focus || framework.focused;
+        if (!check_end(box)) {
+            return "default";
+        }
+    },
+    Esc: {
+        "All": 'stick',
+        "^All": 'stick',
+        "=All": function (f, e) {
+            return 'default';
+        },
+    },
+
+    "=All": function (f, e) {
+        if (symbol_character(e)) {
+            return 'default';
+        }
+    },
+
+    "^Backspace": check_empty,
+    "Backspace": check_empty,
+    "^Delete": check_empty,
+    "Delete": check_empty,
+};
+
+
+var hole_bindings = {
+
+    Backspace: function (f) {
+        var foc = f.focused;
+        var node = foc.parent_node;
+        if (node.children.length == 0 && node.parent_node) {
+            // a (<) b ==> a< b
+            f.switch_focus(node.element.backup);
+            node.parent_node.remove(node);
+        }
+        else if (node.children.length == 1 && foc.parent_index == 0) {
+            // a (<x) b ==> a< x b
+            f.switch_focus(node.element.backup);
+            node.parent_node.replace(node, node.children[0]);
         }
         else {
-            code = -event.charCode;
-        }
-
-        console.log(code);
-
-        switch (code) {
-
-        case -40:
-            var newnode = Node(framework);
-            var target = focused.right;
-            target.parent_node.insert(target.parent_index, newnode);
-            target.parent_node.framework.switch_focus(newnode.holes[0]);
-            return true;
-
-        case -41:
-            framework.go('up');
-            return go('right');
-
-        // case 8:
-        //     eee;
-
-        case 13:
-            return go('right');
-
-        case 32:
-            return go('right');
-
-        case 37:
-            if (event.ctrlKey)
-                return go('left');
-            else
-                return go('deep_left');
-
-        case 39:
-            if (event.ctrlKey)
-                return go('right');
-            else
-                return go('deep_right');
-
-        case 38:
-            return go('up');
-
-        case 40:
-            return go('down');
+            f.go("deep_left");
+            return "default";
         }
     }
+};
+
+
+
+
+
+function merge_bindings() {
+    var results = {};
+    for (var i = arguments.length - 1; i >= 0; i--) {
+        var bindings = arguments[i];
+        for (key in bindings) {
+            var new_binding = bindings[key];
+            var existing = results[key];
+
+            if (typeof new_binding == 'string'
+                || typeof new_binding == 'function') {
+                new_binding = [new_binding];
+            }
+
+            if ((!(new_binding instanceof Array))
+                || (!(existing instanceof Array))
+                || existing === undefined) {
+                results[key] = new_binding;
+            }
+            else {
+                results[key] = new_binding.concat(existing);
+            }
+        }
+    }
+    return results;
 }
+
 
 
 function plain_layout(node) {
     var ch = node.children;
     var ho = node.holes;
+    var tag = node.tagelem;
     relayout(
         node, ['node-' + node.name],
         function (e) {
+            e.appendChild(tag);
+            // e.appendChild(document.createTextNode(node.tag));
             // if (ch.length == 0) {
                 e.appendChild(ho[0]);
                 return [ho[0]];
@@ -225,71 +329,128 @@ function plain_layout(node) {
             return [elem, hole];
         }
     );
+    tag.right = ho[0];
 }
 
-function atom_layout(node) {
+
+function create_plain(framework, tag) {
+    var result = document.createElement(tag || 'div');
+    result.onclick = function(event) {
+        framework.switch_focus(result);
+        prevent(event);
+    };
+    result._focus = function () {
+        $(result).addClass('focus').focus();
+    };
+    result._unfocus = function () {
+        $(result).removeClass('focus').blur();
+    };
+    result.bindings = nav_bindings;
+    return result;
+}
+
+
+function create_editable(framework) {
+    var result = create_plain(framework, 'div');
+    result.contentEditable = true;
+    var old_focus = result._focus;
+    result._focus = function (fromright) {
+        if (fromright) {
+            setEndOfContenteditable(result);
+        }
+        old_focus();
+    };
+    result.bindings = [symbol_bindings, nav_bindings];
+    return result;
+}
+
+
+function symbol_layout(node) {
     var ch = node.children;
     relayout(
         node, ['node-' + node.name],
         function (e) {},
         function (e, i) {
             var child = ch[i];
-            e.appendChild(get_element(child));
+            var box = create_editable(node.framework);
+            box.appendChild(get_element(child));
+            e.appendChild(box);
+            e._focus = box._focus;
+            e._unfocus = box._unfocus;
+            box.onclick = e.onclick;
+            e.bindings = box.bindings; //[box.bindings, nav_bindings];
+            e.true_focus = box;
             return [];
         }
     );
 }
 
-function major(n) {
-    return function (node) {
-        var one = document.createElement('div');
-        var two = document.createElement('div');
-        one.className = 'major';
-        two.className = 'minor';
-        var ch = node.children;
-        var ho = node.holes;
-        relayout(
-            node, ['node-' + node.name],
-            function (e) {
-                e.appendChild(one);
-                e.appendChild(two);
-                // one.appendChild(Hole(node, 0));
-            },
-            function (e, i) {
-                var child = ch[i];
-                var hole = ho[i + 1];
-                var elem = get_element(child);
-                if (i < n) {
-                    one.appendChild(elem);
-                    if (i < n - 1) {
-                        one.appendChild(hole);
-                    }
-                    else {
-                        two.appendChild(hole);
-                    }
-                }
-                else {
-                    two.appendChild(elem);
-                    two.appendChild(hole);
-                }
-                return [elem, hole];
-            }
-        )
-    }
-}
+// function atom_layout(node) {
+//     var ch = node.children;
+//     relayout(
+//         node, ['node-' + node.name],
+//         function (e) {},
+//         function (e, i) {
+//             var child = ch[i];
+//             e.appendChild(get_element(child));
+//             return [];
+//         }
+//     );
+// }
+
+
+
+// function major(n) {
+//     return function (node) {
+//         var one = document.createElement('div');
+//         var two = document.createElement('div');
+//         one.className = 'major';
+//         two.className = 'minor';
+//         var ch = node.children;
+//         var ho = node.holes;
+//         relayout(
+//             node, ['node-' + node.name],
+//             function (e) {
+//                 e.appendChild(one);
+//                 e.appendChild(two);
+//                 // one.appendChild(Hole(node, 0));
+//             },
+//             function (e, i) {
+//                 var child = ch[i];
+//                 var hole = ho[i + 1];
+//                 var elem = get_element(child);
+//                 if (i < n) {
+//                     one.appendChild(elem);
+//                     if (i < n - 1) {
+//                         one.appendChild(hole);
+//                     }
+//                     else {
+//                         two.appendChild(hole);
+//                     }
+//                 }
+//                 else {
+//                     two.appendChild(elem);
+//                     two.appendChild(hole);
+//                 }
+//                 return [elem, hole];
+//             }
+//         )
+//     }
+// }
 
 
 layouts = {
     // The various layouts associated to plain_layout differ by the
     // CSS associated to the class name.
-    atom: atom_layout,
+
+    atom: symbol_layout,
     plain: plain_layout,
-    major1: major(1),
-    major2: major(2),
+    // major1: major(1),
+    // major2: major(2),
 
     horizontal: plain_layout,
     vertical: plain_layout,
-    side: major(1),
+    // side: major(1),
 
     define: plain_layout,
 };
@@ -297,67 +458,39 @@ layouts = {
 wheels = {
     normal: ['horizontal', 'vertical', 'side'],
     define: ['define'],
-    "-": ['side'],
+    // "-": ['side'],
     atom: ['atom'],
+    sym: ['atom'],
 };
 
 
 function Hole(node, i) {
     var framework = node.framework;
-    var result = node.framework.create(); //document.createElement('div');
+    var result = create_plain(node.framework); //node.framework.create();
     result.className = 'insertion-point';
     result.parent_node = node;
     result.parent_index = i;
     result.element = result;
-    var prev_kp = result.element._keypress;
-    result.element._keypress = function (event) {
-        // console.log(event.keyCode);
-
-        if (event.charCode == 40) {
-            var newnode = Node(framework);
-            node.insert(i, newnode);
-            node.framework.switch_focus(newnode.holes[0]);
-            return true;
-        }
-
-        if (prev_kp(event)) {
-            return true;
-        }
-
-        var newnode = Atom(framework, '');
-        node.insert(i, newnode);
-        node.framework.switch_focus(newnode.element);
-        return true;
-    };
-
-    // result.onclick = function () {
-    //     node.framework.switch_focus(result);
-    // }
+    result.insertion_point = result;
+    result.bindings = [hole_bindings, nav_bindings];
     return result;
 }
 
-function Node(framework) {
+function Node(framework, tag) {
 
     var self = {
+        tag: tag,
         changed: false,
         framework: framework,
         isatom: false,
         children: [],
         holes: [],
-        element: framework.create(), //document.createElement('div'),
+        element: create_plain(framework), //framework.create(),
         name: '',
         wheel: wheels.normal,
         wheel_index: 0,
-        // layout: 'plain',
         update_wheel: function() {
-            var c = self.children[0];
-            var name;
-            if (c !== undefined && c.isatom) {
-                name = c.children[0];
-            }
-            else {
-                name = '';
-            }
+            var name = self.tag;
             self.name = name;
             var wheel = wheels[name];
             if (wheel === undefined) {
@@ -391,6 +524,13 @@ function Node(framework) {
             self.holes.pop();
             self.build();
         },
+        replace: function(node, newnode) {
+            var i = self.children.indexOf(node);
+            self.children[i] = newnode;
+            newnode.parent_node = self;
+            node.parent_node = undefined;
+            self.build();
+        },
         append: function(node) {
             node.parent_node = self;
             self.children.push(node);
@@ -398,69 +538,20 @@ function Node(framework) {
             self.build();
         }
     };
+
+    var tagelem = create_editable(self.framework);
+    tagelem.appendChild(document.createTextNode(self.tag));
+    var old_unfocus = tagelem._unfocus;
+    tagelem._unfocus = function (framework) {
+        self.tag = tagelem.innerHTML;
+        old_unfocus();
+        self.build();
+    }
+
+    self.tagelem = tagelem;
     self.element.node = self;
     self.holes.splice(0, 0, Hole(self, 0));
     self.build();
-    return self;
-}
-
-function Atom(framework, s) {
-    var self = Node(framework);
-    // self.element = document.createElement('textarea');
-    self.element.contentEditable = true;
-
-    var prev_kd = self.element._keydown;
-    self.element._keydown = function (event) {
-        var focused = framework.focused;
-
-        if (event.ctrlKey) {
-            prev_kd(event);
-            return;
-        }
-
-        // console.log(event.keyCode);
-
-        switch (event.keyCode) {
-
-        case 37:
-            if (check_start(focused))
-                prev_kd(event);
-            break;
-
-        case 39:
-            if (check_end(focused))
-                prev_kd(event);
-            break;
-
-        default:
-            prev_kd(event);
-        }
-    };
-
-    self.element._keyup = function (event) {
-        if (self.element.innerHTML == '') {
-            var newelem = self.element.backup;
-            self.framework.switch_focus(newelem);
-            var parent = self.parent_node;
-            parent.remove(self);
-        }
-    };
-
-    self.element._unfocus = function () {
-        self.children[0] = self.element.innerHTML;
-        self.parent_node.build();
-    };
-
-    self.element._focus = function (fromright) {
-        if (fromright) {
-            setEndOfContenteditable(self.element);
-        }
-    }
-
-    self.isatom = true;
-    self.wheel = wheels.atom;
-    self.update_wheel = function() {};
-    self.append(s);
     return self;
 }
 
@@ -470,22 +561,7 @@ function Framework(root) {
 
     var framework = {
 
-        Node: function() { return Node(framework); },
-        Atom: function(s) { return Atom(framework, s); },
-
-        create: function(tag) {
-            var result = document.createElement(tag || 'div');
-            result.onclick = function(event) {
-                framework.switch_focus(result);
-                prevent(event);
-            };
-            result._keydown = navigate(framework);
-            result._keyup = function () {};
-            result._keypress = navigate(framework);
-            result._focus = function () {};
-            result._unfocus = function () {};
-            return result;
-        },
+        Node: function(s) { return Node(framework, s); },
 
         go: function(direction) {
             var focused = framework.focused;
@@ -518,30 +594,45 @@ function Framework(root) {
             framework.switch_focus(newfocus, fromright);
         },
 
+        interactor_functions: {
+            deep_left: function () { framework.go('deep_left'); },
+            deep_right: function () { framework.go('deep_right'); },
+            left: function () { framework.go('left'); },
+            right: function () { framework.go('right'); },
+            up: function () { framework.go('up'); },
+            down: function () { framework.go('down'); },
+        },
+
         switch_focus: function(x, fromright) {
             if (x === undefined)
                 return
 
-            $(framework.focused).removeClass('focus').blur();
             if (framework.focused) {
                 framework.focused._unfocus();
             }
-
-            $(x).addClass('focus').focus();
-            x._focus(fromright);
             framework.focused = x;
+            x._focus(fromright);
+
+            var new_bindings = x.bindings;
+            if (new_bindings instanceof Array) {
+                new_bindings = merge_bindings.apply(
+                    null,
+                    new_bindings.map(function (x) {return x.bindings || x;})
+                )
+            }
+            framework.interact.set_bindings(new_bindings);
         },
 
         create_structure: function(data) {
             var t = typeof data;
             var result;
             if (t == 'string' || t == 'number') {
-                result = framework.Atom(data);
+                result = '' + data; //framework.Atom(data);
             }
             else {
-                result = framework.Node();
+                result = framework.Node(data[0]);
                 var i;
-                for (i = 0; i < data.length; i++) {
+                for (i = 1; i < data.length; i++) {
                     result.append(framework.create_structure(data[i]));
                 }
             }
@@ -551,121 +642,12 @@ function Framework(root) {
         init: function(root) {
             framework.root = framework.create_structure(root);
         },
-
-        _keydown: function(event) {
-            if (framework.focused._keydown) {
-                framework.focused._keydown(event);
-            }
-        },
-
-        _keyup: function(event) {
-            if (framework.focused._keyup) {
-                framework.focused._keyup(event);
-            }
-        },
-
-        _keypress: function(event) {
-            if (framework.focused._keypress) {
-                framework.focused._keypress(event);
-            }
-        }
     }
 
+    var interact = Interactor(framework);
+    interact.set_bindings(nav_bindings);
+    framework.interact = interact;
     framework.init(root);
     framework.switch_focus(framework.root.element);
     return framework;
 }
-
-function event_kp(node) {
-
-    function switch_focus(x, fromright) {
-        if (x === undefined)
-            return
-        $(focused).removeClass('focus').blur();
-        $(x).addClass('focus').focus();
-        focused = x;
-        if (fromright && focused.contentEditable == 'true') {
-            setEndOfContenteditable(focused);
-        }
-    }
-
-    var focused;
-    switch_focus(node.element);
-
-    return function(event) {
-        switch (event.keyCode) {
-        case 65:
-            console.log("== " + focused.innerHTML.length);
-            console.log("== " + window.getSelection().extentOffset);
-            break;
-
-        case 37:
-            if (event.ctrlKey) {
-                prevent(event);
-                switch_focus(focused.left, true);
-            }
-            else if (focused.contentEditable == 'true') {
-                var sel = window.getSelection();
-                if (sel.extentOffset == 0) {
-                    prevent(event);
-                    switch_focus(focused.left, true);
-                }
-            }
-            else {
-                prevent(event);
-                switch_focus(focused.left, true);
-            }
-            break;
-
-        case 39:
-            if (event.ctrlKey) {
-                prevent(event);
-                switch_focus(focused.right);
-            }
-            else if (focused.contentEditable == 'true') {
-                var sel = window.getSelection();
-                if (sel.extentOffset == focused.innerHTML.length) {
-                    prevent(event);
-                    switch_focus(focused.right);
-                }
-            }
-            else {
-                prevent(event);
-                switch_focus(focused.right);
-            }
-            break;
-
-        case 38:
-            switch_focus(focused.up);
-            break;
-
-        case 40:
-            switch_focus(focused.down);
-            break;
-        }
-        console.log(event);
-    }
-}
-
-
-// function create_structure2(data) {
-//     var result = document.createElement('div');
-//     if (typeof data == 'string') {
-//         result.className = 'symbol';
-//         result.appendChild(document.createTextNode(data))
-//     }
-//     else if (typeof data == 'number') {
-//         result.className = 'number';
-//         result.appendChild(document.createTextNode(data))
-//     }
-//     else {
-//         if ((typeof data[0]) == 'string')
-//             result.className = data[0];
-//         var i;
-//         for (i = 0; i < data.length; i++) {
-//             result.appendChild(create_structure(data[i]))
-//         }
-//     }
-//     return result;
-// }
-

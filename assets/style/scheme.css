@@ -1,4 +1,21 @@
 
+#target input {
+    background-color: inherit;
+    border: 1px solid black;
+    display: inline-block;
+    width: none;
+    overflow: none;
+}
+
+/* #target textarea { */
+/*     background-color: inherit; */
+/*     border: 1px solid black; */
+/*     height: 1em; */
+/*     width: inherit; */
+/* } */
+
+
+
 #target div {
     display: inline-block;
     border: 1px solid black;
