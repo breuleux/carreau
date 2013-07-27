@@ -540,6 +540,7 @@ function Node(framework, tag) {
     };
 
     var tagelem = create_editable(self.framework);
+    tagelem.className = 'tag';
     tagelem.appendChild(document.createTextNode(self.tag));
     var old_unfocus = tagelem._unfocus;
     tagelem._unfocus = function (framework) {

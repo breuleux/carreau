@@ -1,19 +1,4 @@
 
-#target input {
-    background-color: inherit;
-    border: 1px solid black;
-    display: inline-block;
-    width: none;
-    overflow: none;
-}
-
-/* #target textarea { */
-/*     background-color: inherit; */
-/*     border: 1px solid black; */
-/*     height: 1em; */
-/*     width: inherit; */
-/* } */
-
 
 
 #target div {
@@ -22,23 +7,27 @@
     padding: 5px;
 }
 
-
-#target .define {
-    display: -webkit-flex;
-    -webkit-flex-flow: row wrap;
+#target .tag:before {
+    content: "#";
 }
 
-#target .define > div {
-    -webkit-flex: 1 100%;
-}
 
-#target .define > :first-child {
-    -webkit-flex: 0 auto;
-}
+/* #target .define { */
+/*     display: -webkit-flex; */
+/*     -webkit-flex-flow: row wrap; */
+/* } */
 
-#target .define > :nth-child(2) {
-    -webkit-flex: 1;
-}
+/* #target .define > div { */
+/*     -webkit-flex: 1 100%; */
+/* } */
+
+/* #target .define > :first-child { */
+/*     -webkit-flex: 0 auto; */
+/* } */
+
+/* #target .define > :nth-child(2) { */
+/*     -webkit-flex: 1; */
+/* } */
 
 #target .focus {
     border: 1px solid red;
