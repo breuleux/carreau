@@ -131,6 +131,9 @@ function Interactor(target) {
                     else if (result == 'default') {
                         break;
                     }
+                    else if (result == 'ignore') {
+                        continue;
+                    }
                     else if (result === undefined) {
                         prevent(e);
                     }
@@ -193,7 +196,7 @@ function Interactor(target) {
                     return;
                 }
             }
-
+            
             var result = self.execute(commands, e);
             if (result === undefined || (result.match && result.match('break'))) {
                 prevent(e);
@@ -219,19 +222,19 @@ function Interactor(target) {
         },
 
         keyup: function(e) {
-            self.process_codes(['^' + self.getcode(e), "^All"], e);
+            self.process_codes(["!^All", '^' + self.getcode(e), "^All"], e);
             // self.process_codes("^All", e);
         },
 
         keydown: function(e) {
-            self.process_codes([self.getcode(e), "All"], e);
+            self.process_codes(["!All", self.getcode(e), "All"], e);
             // self.process_codes("All", e);
         },
 
         keypress: function(e) {
             var key = e.which;
             var code = '=' + String.fromCharCode(key);
-            self.process_codes([code, "=All"], e);
+            self.process_codes(["!=All", code, "=All"], e);
             // self.process_codes("=All", e);
         },
 

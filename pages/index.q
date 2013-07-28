@@ -15,8 +15,10 @@
     );
 
     var data = (
-        ["define", ["_", ["sym", "add"], ["sym", "x"], ["sym", "y"]],
-         ["_", ["sym", "+"], ["sym", "x"], ["sym", "y"]]]
+       ["body",
+        ["define", ["", ["sym", "add"], ["sym", "x"], ["sym", "y"]],
+         ["let", ["", ["", ["sym", "z"], ["num", 10]], ["", ["sym", "w"], ["str", "hello, my friends!"]]],
+          ["", ["sym", "+"], ["sym", "x"], ["sym", "y"], ["sym", "z"], ["sym", "w"]]]]]
     );
 
     var data0 = (

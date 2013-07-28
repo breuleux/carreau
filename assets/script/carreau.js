@@ -123,15 +123,28 @@ function chain(node, members) {
 
 
 function natural_navigation(f, h, e) {
+    // h = 'left' or 'right'
+    // e = 'first' or 'last'
+
+    if (f.node && f.node[e] !== undefined) {
+        return f.node[e];
+    }
     while (f[h] === undefined && f.up !== undefined) {
         f = f.up;
     }
     if (f[h] !== undefined)
         f = f[h];
-    while (f.node && f.node[e] !== undefined) {
-        f = f.node[e];
-    }
     return f;
+
+    // while (f[h] === undefined && f.up !== undefined) {
+    //     f = f.up;
+    // }
+    // if (f[h] !== undefined)
+    //     f = f[h];
+    // while (f.node && f.node[e] !== undefined) {
+    //     f = f.node[e];
+    // }
+    // return f;
 }
 
 
@@ -151,10 +164,10 @@ function insert_untagged(hole) {
     f.switch_focus(newnode.tagelem);
 }
 
-function insert_symbol(hole, text) {
+function insert_leaf(type, hole, text) {
     var parent = hole.parent_node;
     var f = parent.framework;
-    var newnode = Node(f, 'sym');
+    var newnode = Node(f, type);
     newnode.append(text || '');
     parent.insert(hole.parent_index, newnode);
     f.switch_focus(newnode.element);
@@ -166,8 +179,56 @@ function symbol_character(e) {
     return ((k >= 60 && k <= 90)
             || (k >= 97 && k <= 122)
             || (k >= 48 && k <= 57)
-            || [36, 37, 38, 42, 43, 45, 47, 94, 95, 33, 124, 126].indexOf(k) != -1)
+            || [36, 37, 38, 42, 43, 45, 46, 47, 94, 95, 33, 124, 126].indexOf(k) != -1)
 }
+
+
+var functionality = {
+    insert_string: function (f) {
+        var target = f.focused.insertion_point;
+        if (target) {
+            insert_leaf('str', target);
+            return 'break';
+        }
+    },
+    insert_symbol: function (f, e) {
+        var target = f.focused.insertion_point;
+        if (target && symbol_character(e)) {
+            insert_leaf('sym', target, String.fromCharCode(e.which));
+            return 'break';
+        }
+    },
+    insert_hash: function (f) {
+        var target = f.focused.insertion_point;
+        if (target)
+            insert_untagged(target);
+    },
+    insert_call: function (f) {
+        var target = f.focused.insertion_point;
+        if (target)
+            insert_tagged(target, '');
+    },
+    wrap_current: function (f) {
+        var node = f.focused.node;
+        var newnode = Node(f, '');
+        node.parent_node.replace(node, newnode);
+        newnode.append(node);
+        f.switch_focus(newnode.holes[0]);
+    },
+    rotate_wheel: function (f) {
+        var foc = f.focused;
+        var node;
+        if (foc.is_hole) {
+            node = foc.parent_node;
+        }
+        else {
+            node = foc.node;
+        }
+        node.rotate_wheel();
+        f.switch_focus(foc);
+    }
+}
+
 
 
 var nav_bindings = {
@@ -181,25 +242,24 @@ var nav_bindings = {
     Space: 'right',
     Enter: 'right',
 
-    "=All": function (f, e) {
-        var target = f.focused.insertion_point;
-        if (target && symbol_character(e)) {
-            insert_symbol(target, String.fromCharCode(e.which));
-            return 'break';
-        }
-    },
-    "=#": function (f) {
-        var target = f.focused.insertion_point;
-        if (target)
-            insert_untagged(target);
-    },
-    "=(": function (f) {
-        var target = f.focused.insertion_point;
-        if (target)
-            insert_tagged(target, '');
-    },
+    "C-l": functionality.rotate_wheel,
+    "C-o": functionality.wrap_current,
+
+    "=All": functionality.insert_symbol,
+    '="': functionality.insert_string,
+    "=#": functionality.insert_hash,
+    "=(": functionality.insert_call,
 
     "=)": ['up', 'right'],
+
+    "C-Backspace": function (f) {
+        var node = f.focused.node;
+        var bk = f.focused.backup;
+        if (bk) {
+            node.parent_node.remove(node);
+            f.switch_focus(bk);
+        }
+    }
 };
 
 function check_empty(framework) {
@@ -211,67 +271,124 @@ function check_empty(framework) {
          || box.innerHTML == '<br>')) {
         var newelem = elem.backup;
         var node = elem.node;
-        framework.switch_focus(newelem);
+        // framework.switch_focus(newelem);
         var parent = node.parent_node;
         parent.remove(node);
+        framework.switch_focus(newelem);
     }
     return true;
 }
 
-var symbol_bindings = {
-    Left: function (framework) {
-        var box = framework.focused.true_focus || framework.focused;
-        if (!check_start(box)) {
-            return "default";
+function symbol_character_policy(e) {
+    if (e.type == "keydown") {
+        return 'ignore';
+    }
+    else if (symbol_character(e)) {
+        return "default";
+    }
+}
+
+function string_character_policy(e) {
+    if (e.type == "keypress" && e.which == 34) {
+        return "finish";
+    }
+    else if (e.type == "keydown" && (e.which == 37 || e.which == 39)) {
+        return "ignore";
+    }
+    else {
+        return "default";
+    }
+}
+
+function leaf_bindings_for(character_policy) {
+    function ev(f, e) {
+        var result = character_policy(e);
+        if (result == "finish") {
+            f.go("right");
+            return "break";
         }
-    },
-    Right: function (framework) {
-        var box = framework.focused.true_focus || framework.focused;
-        if (!check_end(box)) {
-            return "default";
+        else {
+            return result;
         }
-    },
-    Esc: {
-        "All": 'stick',
-        "^All": 'stick',
-        "=All": function (f, e) {
-            return 'default';
+    }
+    return {
+        Left: function (framework) {
+            var box = framework.focused.true_focus || framework.focused;
+            if (!check_start(box)) {
+                return "default";
+            }
         },
-    },
+        Right: function (framework) {
+            var box = framework.focused.true_focus || framework.focused;
+            if (!check_end(box)) {
+                return "default";
+            }
+        },
+        Esc: {
+            "All": 'stick',
+            "^All": 'stick',
+            "=All": function (f, e) {
+                return 'default';
+            },
+        },
 
-    "=All": function (f, e) {
-        if (symbol_character(e)) {
-            return 'default';
-        }
-    },
+        "!=All": ev,
+        "!All": ev,
 
-    "^Backspace": check_empty,
-    "Backspace": check_empty,
-    "^Delete": check_empty,
-    "Delete": check_empty,
-};
+        "^Backspace": check_empty,
+        "Backspace": check_empty,
+        "^Delete": check_empty,
+        "Delete": check_empty,
+    };
+}
+
+var leaf_bindings = {
+    sym: leaf_bindings_for(symbol_character_policy),
+    num: leaf_bindings_for(symbol_character_policy),
+    str: leaf_bindings_for(string_character_policy),
+}
+
 
 
 var hole_bindings = {
-
     Backspace: function (f) {
         var foc = f.focused;
         var node = foc.parent_node;
         if (node.children.length == 0 && node.parent_node) {
             // a (<) b ==> a< b
-            f.switch_focus(node.element.backup);
+            var bk = node.element.backup;
+            // f.switch_focus(node.element.backup);
             node.parent_node.remove(node);
+            f.switch_focus(bk);
         }
         else if (node.children.length == 1 && foc.parent_index == 0) {
             // a (<x) b ==> a< x b
-            f.switch_focus(node.element.backup);
+            var bk = node.element.backup;
+            // f.switch_focus(node.element.backup);
             node.parent_node.replace(node, node.children[0]);
+            f.switch_focus(bk);
         }
         else {
             f.go("deep_left");
             return "default";
         }
-    }
+    },
+
+    "C-o": function (f) {
+        if (f.focused.right) {
+            f.switch_focus(f.focused.right);
+        }
+        else {
+            return "break";
+        }
+    },
+
+    "C-Backspace": 'left'
+};
+
+var node_bindings = {
+    Backspace: 'deep_left',
+    Delete: 'deep_right'
 };
 
 
@@ -310,8 +427,9 @@ function plain_layout(node) {
     var ch = node.children;
     var ho = node.holes;
     var tag = node.tagelem;
+    tag.className = 'tag tag-' + node.tag;
     relayout(
-        node, ['node-' + node.name],
+        node, ['node', 'node-' + node.name],
         function (e) {
             e.appendChild(tag);
             // e.appendChild(document.createTextNode(node.tag));
@@ -340,17 +458,25 @@ function create_plain(framework, tag) {
         prevent(event);
     };
     result._focus = function () {
+        var up = framework.focused.up;
+        if (up) {
+            $(up).addClass('focus2');
+        }
         $(result).addClass('focus').focus();
     };
     result._unfocus = function () {
+        var up = framework.focused.up;
+        if (up) {
+            $(up).removeClass('focus2');
+        }
         $(result).removeClass('focus').blur();
     };
-    result.bindings = nav_bindings;
+    result.bindings = [node_bindings, nav_bindings];
     return result;
 }
 
 
-function create_editable(framework) {
+function create_editable(framework, type) {
     var result = create_plain(framework, 'div');
     result.contentEditable = true;
     var old_focus = result._focus;
@@ -360,7 +486,7 @@ function create_editable(framework) {
         }
         old_focus();
     };
-    result.bindings = [symbol_bindings, nav_bindings];
+    result.bindings = [leaf_bindings[type], nav_bindings];
     return result;
 }
 
@@ -368,11 +494,11 @@ function create_editable(framework) {
 function symbol_layout(node) {
     var ch = node.children;
     relayout(
-        node, ['node-' + node.name],
+        node, ['node', 'node-' + node.name],
         function (e) {},
         function (e, i) {
             var child = ch[i];
-            var box = create_editable(node.framework);
+            var box = create_editable(node.framework, node.tag);
             box.appendChild(get_element(child));
             e.appendChild(box);
             e._focus = box._focus;
@@ -380,63 +506,80 @@ function symbol_layout(node) {
             box.onclick = e.onclick;
             e.bindings = box.bindings; //[box.bindings, nav_bindings];
             e.true_focus = box;
+            e.parent_node = node.parent_node;
+            box.parent_node = node.parent_node;
             return [];
         }
     );
 }
 
-// function atom_layout(node) {
+
+// function plain_layout(node) {
 //     var ch = node.children;
+//     var ho = node.holes;
+//     var tag = node.tagelem;
+//     tag.className = 'tag tag-' + node.tag;
 //     relayout(
-//         node, ['node-' + node.name],
-//         function (e) {},
+//         node, ['node', 'node-' + node.name],
+//         function (e) {
+//             e.appendChild(tag);
+//             e.appendChild(ho[0]);
+//             return [ho[0]];
+//         },
 //         function (e, i) {
 //             var child = ch[i];
-//             e.appendChild(get_element(child));
-//             return [];
+//             var hole = ho[i + 1];
+//             var elem = get_element(child);
+//             e.appendChild(elem);
+//             e.appendChild(hole);
+//             return [elem, hole];
 //         }
 //     );
+//     tag.right = ho[0];
 // }
 
-
-
-// function major(n) {
-//     return function (node) {
-//         var one = document.createElement('div');
-//         var two = document.createElement('div');
-//         one.className = 'major';
-//         two.className = 'minor';
-//         var ch = node.children;
-//         var ho = node.holes;
-//         relayout(
-//             node, ['node-' + node.name],
-//             function (e) {
-//                 e.appendChild(one);
-//                 e.appendChild(two);
-//                 // one.appendChild(Hole(node, 0));
-//             },
-//             function (e, i) {
-//                 var child = ch[i];
-//                 var hole = ho[i + 1];
-//                 var elem = get_element(child);
-//                 if (i < n) {
-//                     one.appendChild(elem);
-//                     if (i < n - 1) {
-//                         one.appendChild(hole);
-//                     }
-//                     else {
-//                         two.appendChild(hole);
-//                     }
-//                 }
-//                 else {
-//                     two.appendChild(elem);
-//                     two.appendChild(hole);
-//                 }
-//                 return [elem, hole];
-//             }
-//         )
-//     }
-// }
+function major(n) {
+    return function (node) {
+        var one = document.createElement('div');
+        var two = document.createElement('div');
+        one.className = 'major';
+        two.className = 'minor';
+        var ch = node.children;
+        var ho = node.holes;
+        var tag = node.tagelem;
+        tag.className = 'tag tag-' + node.tag;
+        relayout(
+            node, ['node', 'node-' + node.name],
+            function (e) {
+                e.appendChild(one);
+                e.appendChild(two);
+                one.appendChild(tag);
+                one.appendChild(ho[0]);
+                return [ho[0]];
+            },
+            function (e, i) {
+                var child = ch[i];
+                var hole = ho[i + 1];
+                var elem = get_element(child);
+                if (i < n) {
+                    one.appendChild(elem);
+                    if (i < n - 1) {
+                        one.appendChild(hole);
+                    }
+                    else {
+                        two.appendChild(hole);
+                    }
+                }
+                else {
+                    two.appendChild(elem);
+                    two.appendChild(hole);
+                }
+                return [elem, hole];
+            }
+        )
+        tag.right = ho[0];
+    }
+}
 
 
 layouts = {
@@ -444,23 +587,31 @@ layouts = {
     // CSS associated to the class name.
 
     atom: symbol_layout,
+    num: symbol_layout,
+    str: symbol_layout,
+
     plain: plain_layout,
-    // major1: major(1),
-    // major2: major(2),
+    major1: major(1),
+    major2: major(2),
 
     horizontal: plain_layout,
     vertical: plain_layout,
-    // side: major(1),
+    side: major(1),
 
-    define: plain_layout,
+    define: major(1),
+    "let": major(1),
 };
 
 wheels = {
     normal: ['horizontal', 'vertical', 'side'],
     define: ['define'],
+    "let": ['let'],
     // "-": ['side'],
     atom: ['atom'],
     sym: ['atom'],
+    num: ['num'],
+    str: ['str'],
+    body: ['vertical'],
 };
 
 
@@ -473,7 +624,17 @@ function Hole(node, i) {
     result.element = result;
     result.insertion_point = result;
     result.bindings = [hole_bindings, nav_bindings];
+    result.is_hole = true;
     return result;
+}
+
+function set_parent(node, parent) {
+    if (node.set_parent) {
+        node.set_parent(parent)
+    }
+    else {
+        node.parent = parent;
+    }
 }
 
 function Node(framework, tag) {
@@ -489,6 +650,18 @@ function Node(framework, tag) {
         name: '',
         wheel: wheels.normal,
         wheel_index: 0,
+        rotate_wheel: function() {
+            self.wheel_index++;
+            self.wheel_index %= self.wheel.length;
+            if (self.wheel_index < 0) {
+                self.wheel_index += self.wheel.length;
+            }
+            self.build();
+        },
+        set_parent: function(parent) {
+            self.parent_node = parent;
+            self.element.parent_node = parent;
+        },
         update_wheel: function() {
             var name = self.tag;
             self.name = name;
@@ -512,7 +685,7 @@ function Node(framework, tag) {
             self.layout()(self);
         },
         insert: function(i, node) {
-            node.parent_node = self;
+            set_parent(node, self);
             self.children.splice(i, 0, node);
             self.holes.push(Hole(self, self.children.length));
             self.build();
@@ -520,27 +693,26 @@ function Node(framework, tag) {
         remove: function(node) {
             var i = self.children.indexOf(node);
             self.children.splice(i, 1);
-            node.parent_node = undefined;
+            set_parent(node, undefined);
             self.holes.pop();
             self.build();
         },
         replace: function(node, newnode) {
             var i = self.children.indexOf(node);
             self.children[i] = newnode;
-            newnode.parent_node = self;
-            node.parent_node = undefined;
+            set_parent(newnode, self);
+            set_parent(node, undefined);
             self.build();
         },
         append: function(node) {
-            node.parent_node = self;
+            set_parent(node, self);
             self.children.push(node);
             self.holes.push(Hole(self, self.children.length));
             self.build();
         }
     };
 
-    var tagelem = create_editable(self.framework);
-    tagelem.className = 'tag';
+    var tagelem = create_editable(self.framework, 'sym');
     tagelem.appendChild(document.createTextNode(self.tag));
     var old_unfocus = tagelem._unfocus;
     tagelem._unfocus = function (framework) {
