@@ -7,30 +7,45 @@
 {use_asset}: script/carreau.js
 
 {js}:
-    var data = (
-        ["define", ["fib", "n"],
-         ["cond",
-          [["<=", "n", 1], 0],
-          ["t", ["+", ["fib", ["-", "n", 1]], ["fib", ["-", "n", 2]]]]]]
-    );
 
-    var data = (
-       ["body",
-        ["define", ["", ["sym", "add"], ["sym", "x"], ["sym", "y"]],
-         ["let", ["", ["", ["sym", "z"], ["num", 10]], ["", ["sym", "w"], ["str", "hello, my friends!"]]],
-          ["", ["sym", "+"], ["sym", "x"], ["sym", "y"], ["sym", "z"], ["sym", "w"]]]]]
-    );
+    var data = ["define",["",["sym","some-function"],["sym","x"],["sym","y"],["sym","z"]],["let",["",["",["sym","number"],["num","100"]],["",["sym","string"],["str","Caution!\nThe stove is extremely hot!\n"]]],["",["sym","display"],["",["sym","string-append"],["str","This is my warning:"],["sym","string"],["str","\\n"]]],["",["sym","+"],["sym","x"],["sym","y"],["sym","z"],["",["sym","*"],["sym","number"],["sym","n"]]]]];
 
-    var data0 = (
-        ["sym", "bloblo"]
-    );
+    // var data = (
+    //     ["define", ["fib", "n"],
+    //      ["cond",
+    //       [["<=", "n", 1], 0],
+    //       ["t", ["+", ["fib", ["-", "n", 1]], ["fib", ["-", "n", 2]]]]]]
+    // );
+
+    // var data = (
+    //    ["body",
+    //     ["define", ["", ["sym", "add"], ["sym", "x"], ["sym", "y"]],
+    //      ["let", ["", ["", ["sym", "z"], ["num", 10]], ["", ["sym", "w"], ["str", "hello, my friends!"]]],
+    //       ["", ["sym", "+"], ["sym", "x"], ["sym", "y"], ["sym", "z"], ["sym", "w"]]]]]
+    // );
+
+    // var data0 = (
+    //     ["sym", "bloblo"]
+    // );
 
     //var n = create_structure(data);
     //var s = n.element;
-    var framework = Framework(data);
-    var root = framework.root;
-    var s = root.element;
-    $('#target').append(s);
+
+    function show(where, data, report) {
+        var framework = Framework(data, report);
+        var root = framework.root;
+        var s = root.element;
+        $(where).empty().append(s);
+        return framework;
+    }
+
+    // var framework = Framework(data, report);
+    // var root = framework.root;
+    // var s = root.element;
+    // $('#target').append(s);
+
+    var data2 = [];
+    var framework = show('#target', data, report);
 
     framework.interact.install(document);
 
@@ -52,5 +67,14 @@
     // $(document).keyup(interact.keyup);
     // $(document).keypress(interact.keypress);
 
+__[edit area]
 
-#target ..
+.carreau #target ..
+
+__[reconstruction from edition events]
+
+.carreau #show ..
+
+__[textual description]
+
+#json ..
