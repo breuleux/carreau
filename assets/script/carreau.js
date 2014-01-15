@@ -84,7 +84,8 @@ function relayout(node, classes, init, addchild) {
     var e = node.element;
     while (e.firstChild)
         e.removeChild(e.firstChild);
-    classes.splice(0, 0, 'layout-' + node.layout_name);
+    // classes.splice(0, 0, 'layout-' + node.layout_name);
+    classes = classes.concat(compute_classes(['node', 'node-' + node.tag]));
     e.className = classes.join(' ');
     var order = init(e) || [];
     var ch = node.children;
@@ -136,6 +137,7 @@ function natural_navigation(f, h, e) {
         f = f[h];
     return f;
 
+    // // Previous version
     // while (f[h] === undefined && f.up !== undefined) {
     //     f = f.up;
     // }
@@ -430,31 +432,38 @@ function merge_bindings() {
 
 
 
-function plain_layout(node) {
-    var ch = node.children;
-    var ho = node.holes;
-    var tag = node.tagelem;
-    tag.className = 'tag tag-' + node.tag;
-    relayout(
-        node, ['node', 'node-' + node.name],
-        function (e) {
-            e.appendChild(tag);
-            // e.appendChild(document.createTextNode(node.tag));
-            // if (ch.length == 0) {
+function plain_layout() {
+
+    var classes = compute_classes(arguments);
+
+    return function(node) {
+        var ch = node.children;
+        var ho = node.holes;
+        var tag = node.tagelem;
+        // var ntag = 'node-' + node.tag
+        tag.className = 'tag tag-' + node.tag;
+        relayout(
+            node, // [ntag].concat(entailments[ntag] || []).concat(classes),
+            classes, //.concat(compute_classes([ntag])),
+            function (e) {
+                e.appendChild(tag);
+                // e.appendChild(document.createTextNode(node.tag));
+                // if (ch.length == 0) {
                 e.appendChild(ho[0]);
                 return [ho[0]];
-            // }
-        },
-        function (e, i) {
-            var child = ch[i];
-            var hole = ho[i + 1];
-            var elem = get_element(child);
-            e.appendChild(elem);
-            e.appendChild(hole);
-            return [elem, hole];
-        }
-    );
-    tag.right = ho[0];
+                // }
+            },
+            function (e, i) {
+                var child = ch[i];
+                var hole = ho[i + 1];
+                var elem = get_element(child);
+                e.appendChild(elem);
+                e.appendChild(hole);
+                return [elem, hole];
+            }
+        );
+        tag.right = ho[0];
+    }
 }
 
 
@@ -506,94 +515,123 @@ function create_editable(framework, type) {
 }
 
 
-function symbol_layout(node) {
-    var ch = node.children;
-    relayout(
-        node, ['node', 'node-' + node.name],
-        function (e) {},
-        function (e, i) {
-            var child = ch[i];
-            var box = create_editable(node.framework, node.tag);
-            box.appendChild(get_element(child));
-            e.appendChild(box);
-            e._focus = box._focus;
-            e._unfocus = box._unfocus;
-            box.onclick = e.onclick;
-            e.bindings = box.bindings; //[box.bindings, nav_bindings];
-            e.true_focus = box;
-            e.parent_node = node.parent_node;
-            box.parent_node = node.parent_node;
-            box.change = function (x) {
-                node.replace(child, x);
-                child = x;
-                // ch[i] = x;
-            };
-            return [];
-        }
-    );
+
+var entailments = {
+    // Extra classes to attach to certain nodes
+    "node-sym": ["atom"],
+    "node-num": ["atom"],
+    "node-str": ["atom"],
+}
+
+function compute_classes(classes) {
+    var results = [];
+    for (var i = 0; i < classes.length; i++) {
+        var cls = classes[i];
+        results.push(cls);
+        var ent = entailments[cls];
+        if (ent)
+            results = results.concat(ent)
+    }
+    return results;
 }
 
 
-// function plain_layout(node) {
-//     var ch = node.children;
-//     var ho = node.holes;
-//     var tag = node.tagelem;
-//     tag.className = 'tag tag-' + node.tag;
-//     relayout(
-//         node, ['node', 'node-' + node.name],
-//         function (e) {
-//             e.appendChild(tag);
-//             e.appendChild(ho[0]);
-//             return [ho[0]];
-//         },
-//         function (e, i) {
-//             var child = ch[i];
-//             var hole = ho[i + 1];
-//             var elem = get_element(child);
-//             e.appendChild(elem);
-//             e.appendChild(hole);
-//             return [elem, hole];
-//         }
-//     );
-//     tag.right = ho[0];
-// }
+function symbol_layout() {
 
-function major(n) {
+    var classes = compute_classes(arguments);
+
+    // var classes = ['node'];
+    // for (var i = 0; i < arguments.length; i++) {
+    //     var cls = arguments[i];
+    //     classes.push(cls);
+    //     var ent = entailments[cls];
+    //     if (ent)
+    //         classes = classes.concat(ent)
+    // }
+
     return function (node) {
-        var one = document.createElement('div');
-        var two = document.createElement('div');
-        one.className = 'major';
-        two.className = 'minor';
+        // var ntag = 'node-' + node.tag
+        var ch = node.children;
+        relayout(
+            // node, [ntag].concat(entailments[ntag] || []).concat(classes),
+            node,
+            classes, //.concat(compute_classes([ntag])),
+            function (e) {},
+            function (e, i) {
+                var child = ch[i];
+                var box = create_editable(node.framework, node.tag);
+                box.appendChild(get_element(child));
+                e.appendChild(box);
+                e._focus = box._focus;
+                e._unfocus = box._unfocus;
+                box.onclick = e.onclick;
+                e.bindings = box.bindings; //[box.bindings, nav_bindings];
+                e.true_focus = box;
+                e.parent_node = node.parent_node;
+                box.parent_node = node.parent_node;
+                box.change = function (x) {
+                    node.replace(child, x);
+                    child = x;
+                    // ch[i] = x;
+                };
+                return [];
+            }
+        );
+    };
+}
+
+
+function structural() {
+    var groups = [];
+    var nums = [];
+    for (var i = 0; i < arguments.length; i++) {
+        var ai = arguments[i];
+        if (i) nums.push(ai[0]);
+        groups.push(compute_classes(ai.slice(i && 1)));
+    }
+
+    return function (node) {
+        var divs = [];
+        for (var i = 0; i < nums.length; i++) {
+            var div = document.createElement('div');
+            divs.push(div);
+            div.className = groups[i + 1].join(" ");
+        }
+
         var ch = node.children;
         var ho = node.holes;
         var tag = node.tagelem;
         tag.className = 'tag tag-' + node.tag;
+        var current = 0;
+        var counter = 0;
+
         relayout(
-            node, ['node', 'node-' + node.name],
+            node, // ['node', ],
+            groups[0], //.concat(compute_classes([ntag])),
             function (e) {
-                e.appendChild(one);
-                e.appendChild(two);
-                one.appendChild(tag);
-                one.appendChild(ho[0]);
+                for (var i = 0; i < nums.length; i++) {
+                    e.appendChild(divs[i])
+                }
+                divs[current].appendChild(tag);
+                counter++;
+                while (counter >= nums[current]) {
+                    current++;
+                    counter = 0;
+                }
+                divs[current].appendChild(ho[0]);
                 return [ho[0]];
             },
             function (e, i) {
                 var child = ch[i];
                 var hole = ho[i + 1];
                 var elem = get_element(child);
-                if (i < n) {
-                    one.appendChild(elem);
-                    if (i < n - 1) {
-                        one.appendChild(hole);
-                    }
-                    else {
-                        two.appendChild(hole);
-                    }
+                divs[current].appendChild(elem);
+                counter++;
+                while (counter >= nums[current]) {
+                    current++;
+                    counter = 0;
                 }
-                else {
-                    two.appendChild(elem);
-                    two.appendChild(hole);
-                }
+                divs[current].appendChild(hole);
                 return [elem, hole];
             }
         )
@@ -606,32 +644,38 @@ layouts = {
     // The various layouts associated to plain_layout differ by the
     // CSS associated to the class name.
 
-    atom: symbol_layout,
-    num: symbol_layout,
-    str: symbol_layout,
+    atom: symbol_layout(),
 
-    plain: plain_layout,
-    major1: major(1),
-    major2: major(2),
+    plain: plain_layout(),
 
-    horizontal: plain_layout,
-    vertical: plain_layout,
-    side: major(1),
+    horizontal: plain_layout('horizontal'),
+    vertical: plain_layout('vertical'),
+    side: structural(['horizontal', 'centered'],
+                     [2, 'horizontal'],
+                     [Infinity, 'vertical']),
 
-    define: major(1),
-    "let": major(1),
+    hcall: plain_layout('horizontal', 'call'),
+    vcall: plain_layout('vertical', 'call'),
+    sidecall: structural(['horizontal', 'centered'],
+                         [2, 'horizontal', 'call'],
+                         [Infinity, 'vertical']),
+
+    control: structural(['vertical', 'stretched'],
+                        [2, 'spec', 'horizontal', 'centered'],
+                        [Infinity, 'vertical', 'body']),
 };
 
 wheels = {
     normal: ['horizontal', 'vertical', 'side'],
-    define: ['define'],
-    "let": ['let'],
-    // "-": ['side'],
-    atom: ['atom'],
-    sym: ['atom'],
-    num: ['num'],
-    str: ['str'],
+    "": ['hcall', 'vcall', 'sidecall'],
+
     body: ['vertical'],
+    define: ['control'],
+    "let": ['control'],
+
+    sym: ['atom'],
+    num: ['atom'],
+    str: ['atom'],
 };
 
 

@@ -1,6 +1,4 @@
 
-
-
 .carreau {
     background-color: #eef;
 }
@@ -18,24 +16,37 @@
     border: 1px solid #888;
     border-bottom: 3px solid black;
     border-radius: 5px;
-    padding: 2px;
-    margin: 5px;
+    padding: 1px;
+    margin-left: 3px;
+    margin-right: 3px;
 }
 
-.carreau .layout-horizontal {
+/* Horizontal/vertical layouts */
+
+.carreau .horizontal {
     min-height: 1em;
     display: -webkit-flex;
     -webkit-flex-flow: row;
     -webkit-align-items: baseline;
 }
 
-.carreau .layout-vertical {
+.carreau .vertical {
     min-height: 1em;
     display: -webkit-flex;
     -webkit-flex-flow: column;
     -webkit-align-items: baseline;
 }
 
+.carreau .centered {
+    -webkit-align-items: center;
+}
+
+.carreau .stretched {
+    -webkit-align-items: stretch;
+}
+
+
+/* Tags */
 
 .carreau .tag:before {
     content: "#";
@@ -49,24 +60,24 @@
     display: inline-block;
 }
 
-.carreau .node-str,
-.carreau .node-num,
-.carreau .node-sym {
+
+/* Atom */
+
+.carreau .atom {
     border: 0;
 }
 
-.carreau .node-str > div,
-.carreau .node-num > div,
-.carreau .node-sym > div {
+.carreau .atom > div {
     border-bottom: 1px solid transparent;
 }
 
-.carreau .node-str > .focus,
-.carreau .node-num > .focus,
-.carreau .node-sym > .focus {
+.carreau .atom > .focus {
     background-color: inherit;
     border-bottom: 1px solid black;
 }
+
+
+/* Specific atoms */
 
 .carreau .node-num {
     color: #a0a;
@@ -84,117 +95,67 @@
 }
 
 
-/* .carreau .node-sym > .focus { */
-/*     border-bottom: 1px solid #888; */
-/* } */
-
-/* .carreau .node-sym > div, .carreau .tag { */
-/*     border: 0; */
-/* } */
-
-.carreau .insertion-point.focus {
-    color: red;
-    border: 0;
-}
-
-/* .carreau .insertion-point:before { */
-/*     content: "."; */
-/* } */
+/* Insertion point */
 
 .carreau .insertion-point {
-    position: relative;
     vertical-align: middle;
-    /* position: absolute; */
     border: 0px;
     padding: 0px;
     margin: 0px;
-    /* width: 5px; */
-    background-color: #000;
-    opacity: 0.05;
-    /* border-radius: 15px; */
     margin-left: -3px;
     margin-right: -3px;
     min-height: 5px;
     min-width: 5px;
+    background-color: #000;
+    opacity: 0.05;
 }
 
 .carreau .insertion-point:hover {
     opacity: 0.2;
 }
 
-.carreau .node- > .node-sym:nth-child(3) {
-    font-weight: bold;
-}
-
-.carreau .layout-horizontal > .insertion-point {
-    -webkit-align-self: stretch;
-}
-
-.carreau .layout-horizontal > .insertion-point:last-child {
-    width: 20px;
-}
-
-.carreau .layout-vertical > .insertion-point {
-    -webkit-align-self: stretch;
-}
-
-.carreau .layout-vertical > .insertion-point:last-child {
-    height: 20px;
-}
-
-
-
-.carreau .layout-side {
-    display: -webkit-flex;
-    -webkit-flex-flow: row nowrap;
-    -webkit-align-items: center;
-}
-
-.carreau .layout-side > .major {
-    display: -webkit-flex;
-    -webkit-flex-flow: row nowrap;
-}
-
-.carreau .layout-side > .major > .insertion-point {
-    -webkit-align-self: stretch;
-}
-
-.carreau .node-.layout-side > .major > .node-sym:nth-child(3) {
-    font-weight: bold;
-}
-
-.carreau .layout-side > .minor {
-    display: -webkit-flex;
-    -webkit-flex-flow: column nowrap;
-}
-
-
-
-/* .carreau .layout-horizontal > .insertion-point:last-child { */
-/*     -webkit-flex: 1; */
-/* } */
-
-/* .carreau .layout-vertical > .insertion-point:last-child { */
-/*     -webkit-flex: 1; */
-/*     max-height: 20px; */
-/* } */
-
 .carreau .insertion-point.focus {
     background-color: tomato;
     opacity: 1.0;
-    /* height: 5px; */
 }
 
-/* .carreau .node-define { */
-/*     border: 3px solid green; */
+.carreau .horizontal > .insertion-point {
+    -webkit-align-self: stretch;
+}
+
+.carreau .vertical > .insertion-point {
+    -webkit-align-self: stretch;
+}
+
+.carreau .horizontal > .insertion-point:last-child {
+    width: 10px;
+}
+
+.carreau .vertical > .insertion-point:last-child {
+    height: 10px;
+}
+
+
+/* Bolding function names */
+
+.carreau .call > .node-sym:nth-child(3) {
+    font-weight: bold;
+}
+
+
+/* Some control structures */
+
+/* .carreau .spec > .tag { */
+/*     margin-left: 10px; */
+/*     margin-right: 10px; */
+/*     background-color: #88f; */
+/*     color: #fff; */
+/*     font-weight: bold; */
+/*     border-radius: 15px; */
+/*     padding: 5px; */
 /* } */
 
-/* .carreau .node-define > div { */
-/*     border: 3px solid blue; */
-/* } */
-
-.carreau .node-define > .major > .tag,
-.carreau .node-let > .major > .tag {
+.carreau .spec > .tag {
     margin-left: 10px;
     margin-right: 10px;
     background-color: #88f;
@@ -202,79 +163,23 @@
     font-weight: bold;
     border-radius: 15px;
     padding: 5px;
-}
-
-.carreau .node-define > .major,
-.carreau .node-let > .major {
-    display: -webkit-flex;
-    -webkit-flex-flow: row nowrap;
-    -webkit-align-items: center;
-}
-
-.carreau .node-define > .minor,
-.carreau .node-let > .minor {
-    display: -webkit-flex;
-    -webkit-flex-flow: column nowrap;
-    -webkit-align-items: flex-start;
-}
-
-.carreau .node-let > .major > .insertion-point,
-.carreau .node-define > .major > .insertion-point {
     -webkit-align-self: stretch;
 }
 
-.carreau .node-let > .minor > .insertion-point,
-.carreau .node-define > .minor > .insertion-point {
-    -webkit-align-self: stretch;
-}
-.carreau .node-define > .minor > .insertion-point:first-child,
-.carreau .node-let > .minor > .insertion-point:first-child,
-.carreau .node-define > .minor > .insertion-point:last-child,
-.carreau .node-let > .minor > .insertion-point:last-child {
-    height: 20px;
+.carreau .body {
+    margin-left: 10px;
+    border-left: 5px solid #000;
+    padding-left: 10px;
 }
 
-/* .carreau .node-let > .major > :nth-child(3) { */
-/*     border: 0; */
-/*     border-radius: 0; */
-/* } */
 
-/* .carreau .node-let > .major > :nth-child(3) > * > .insertion-point { */
-/*     max-width: 5px; */
-/* } */
-
-
-
-
-
-/* .carreau .node-define > div { */
-/*     -webkit-flex: 1 100%; */
-/* } */
-
-/* .carreau .node-define > :first-child { */
-/*     -webkit-flex: 0 auto; */
-/* } */
-
-/* .carreau .node-define > :nth-child(2) { */
-/*     -webkit-flex: 0 auto; */
-/* } */
-
-/* .carreau .node-define > :nth-child(3) { */
-/*     -webkit-flex: 1; */
-/* } */
-
-
+/* Focus */
 
 .carreau .focus {
-    /* border-bottom: 3px solid red; */
     background-color: #ccf;
 }
 
 .carreau .focus2 {
     border-bottom: 3px solid blue;
-    /* background-color: #ddf; */
 }
-
-
-
 
