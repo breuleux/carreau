@@ -19,6 +19,7 @@ The prototype consists of:
   * `kinds.ts`: the **node kinds registry**. Each node type knows its children, axis, whether it scrolls, whether things can be inserted beside it, whether it is a navigation step, and the context it gives its children. Panes decide their own display from that context (see [Node kinds and contexts](#node-kinds-and-contexts)).
   * `tree.ts`: generic walks (`walk`, `find`, `pathTo`, `panes`, `findTab`), all through `kind(n).children`; `computeRects`; and `LayoutIndex`, a one-pass index of parents, roots, holders and contexts.
   * `model.ts`: re-exports the above, plus constructors, (de)serialization, normalization, insertion, swapping, and drop logic across several trees.
+* `cells.ts`: handles for hosts: `Cell` (a node, with `cellAt`) and `Placer` (see [Relative addressing and placement](#relative-addressing-and-placement)).
 * `workspace.ts`: the state on top of the trees and the command set. No DOM, no key bindings. It holds:
   * the main tree;
   * the floating windows;
@@ -34,7 +35,13 @@ The prototype consists of:
 * `dnd.ts`: drag and drop: the `DragDrop` controller, hit testing, choices, and the SVG overlay. It only needs a small `DndHost` interface from the view (elements and rects by id, the layers). The view exposes the current drag as `view.drag`.
 * `colors.ts`: cell accents, drop line level colors.
 * `keyboard.ts`: the keyboard navigation mode controller, configured with an activation chord and bindings.
-* A demo page:
+* `style.css`: the library's styles.
+
+The library is `src/` and has nothing demo-specific. The demo lives in `demo/` (`index.html`, at the root, loads `demo/main.ts`); test scripts are in `testscripts/` (not committed).
+
+* A demo page (`demo/`):
+  * `main.ts`: the page, the keyboard configuration, the demo lifecycle (closing delays, cell spawning); `demo.css`: the page's styles and the demo's tab contents;
+  * `examples.ts`: the example layouts; `cellclasses.ts`: what each kind of cell creates when a new cell is inserted from it;
   * examples to pick from, including iframe embeds, a scroll column, a scroll row, and sticky scroll splits;
   * the keyboard configuration, with a legend;
   * a live JSON view with a "Load JSON" button;
@@ -173,7 +180,12 @@ interface Ctx {
 ### Colors
 
 * **Colors are mostly neutral greys.** Panes, splits, selection outlines, previews, icons, tab dots and window title bars carry no accent color.
-* **Each tab has an accent color**, from a hash of its id into a small palette of oklch hues (L 0.74, C 0.13). Duplicates are fine.
+* **Light and dark modes**, with CSS `light-dark(light, dark)` for every color (the dark side is the reference design; light mirrors it: white panes on a light grey page, dark text, dark drop lines). The library sets no `color-scheme`: it follows the one it inherits, so the host decides (`:root { color-scheme: light dark }` follows the system). The demo has an Auto / Light / Dark switch in its header, setting `color-scheme` on the root (remembered in localStorage).
+  * Colors shared by several rules are custom properties: `--carreau-pane-bg` (also mixed into the cells' `long` strips) and `--carreau-group-bg` (the gaps inside a group). They are defined on `.carreau` and on the elements appended to the body (drag ghost, hold ring).
+  * Colors computed in TypeScript (`colors.ts`) are `light-dark()` strings too: derived accents, and drop-line levels (in light mode, the dark-mode lightness L becomes 0.25 + 0.9·(1−L), with a little more chroma). The center icons and tab dots are light chips with a dark outline, the same in both modes.
+  * SVG presentation attributes don't take `light-dark()`: the overlay sets `fill`, `stroke` and `stop-color` through `style`.
+  * The demo's stateful iframe page declares `color-scheme: light dark` itself (an iframe's document doesn't inherit styles).
+* **Each tab has an accent color**, from a hash of its id into a small palette of oklch hues (L 0.74, C 0.13 in dark mode; L 0.62, C 0.15 in light mode). Duplicates are fine.
   * The accent appears **only** on the line of the active tab of the focused pane. That line is the focus indicator for panes.
 * **Selection outline**: a selected row, column or range gets a dim grey dashed outline over the union of the selected nodes' (visible) DOM rects, with a very faint fill. A selected *pane* gets no outline; its tab line shows it. The outline is hidden while dragging. When the selection is inside a floating window, draw it above the window layer.
 
@@ -208,12 +220,17 @@ All keyboard navigation happens in a **navigation mode**:
 * **Prefix keys**: the config may define prefixes, each with its own table (same chord syntax). After a prefix key, the next key is looked up in the prefix's table. The demo uses S → arrows/H/J/K/L for **swap** (Alt+Q, S, ←).
   * **One-shot**: press and release the prefix, then a key.
   * **Held**: while the prefix key is down, every key pressed uses its table, which allows repeated swaps. Releasing it ends the prefix if it was used; if not, it stays pending for the next key.
+  * Modifiers that are part of the prefix's own chord are ignored on the next key: e.g. Shift+X, then Shift+← would look up ←.
+  * A modifier key pressed on its own (Shift before Shift+←) is not a key: it neither runs nor cancels anything.
   * Any key not in the table cancels the prefix, and so does leaving the mode. The pending prefix is exposed, so a status display can show it.
 * **Actions** are the workspace commands plus three extras:
   * `toggleMaximize`: restore if anything is maximized, else maximize;
   * `float`: float the selected pane, as the ⋯ menu does;
   * `closeTab`: close the selected pane's active tab;
-  * `closePane`: close the selected pane.
+  * `closePane`: close the selected pane;
+  * `insertLeft` / `Right` / `Up` / `Down`: `ws.spawn({split: side})`;
+  * `insertIntoLeft` / …: `ws.spawn({split: "tab", base: direction, force: true})`;
+  * `moveLeft` / …, `moveIntoLeft` / …: the same with `ws.moveTab(spec)`.
 * **Demo bindings**:
 
   | Keys | Action |
@@ -232,6 +249,10 @@ All keyboard navigation happens in a **navigation mode**:
   | F | float |
   | W, X | close the selected tab |
   | Shift+W, Shift+X | close the selected pane |
+  | I, then ←→↑↓ / HJKL | insert a new cell into the tabs of the cell on that side (if none, where it would be) |
+  | I, then Shift+←→↑↓ / Shift+HJKL | insert a new cell beside the selected one, on that side |
+  | A, then ←→↑↓ / HJKL | move the focused tab into the tabs of the cell on that side (if none, where it would be) |
+  | A, then Shift+←→↑↓ / Shift+HJKL | move the focused tab beside the selected pane, on that side |
 
   Since bindings leave the activation modifier out of the chord, no binding can use that modifier itself. Prefixes, like S for swap, avoid piling more modifiers on top of the held Alt.
   * Avoid chords the browser reserves (Ctrl+W, Ctrl+T, Ctrl+N, Ctrl+Tab), which can't be prevented.
@@ -575,6 +596,47 @@ A tab can hold **a whole layout** instead of content. The pane holding it then s
   * Maximization works through groups, since `pathTo` descends into them. When the maximization passes **through** a holder (the maximized node is inside its group), the holder's tab bar and outline are hidden, so only the maximized part shows. Maximizing the holder itself keeps its tabs.
 * **Drop lines**: when the walk up reaches a group's root, it continues from the **holder pane** (`LayoutIndex.holder`), as long as their borders coincide. Lines from inside a group can thus also insert beside the holder and further out.
 
+## Relative addressing and placement
+
+For hosts (e.g. "open the new terminal below the focused cell"). Nodes are plain data, so a **`Cell`** is a handle on a node (a pane or a split) by id: `ws.cell(id)`, `ws.focused()` (the selected node; for a range, its split). `cell.node` is the node, or null once it's gone.
+
+**`cell.cellAt(path)`**: the cell at a relative location, **exactly where the navigation shortcuts would go** from that cell, without moving the focus; or null.
+
+```ts
+type Direction = "left" | "right" | "up" | "down" | "parent" | "child";
+type Path = Direction | { id: string } /* an explicit cell */ | Path[] /* in sequence */;
+```
+
+* The sideways moves use the same neighbour search as focus (logical rects, the pane facing the center, boundary memory; a remembered *range* isn't a cell, so it's skipped). `parent` and `child` are the navigation steps (slots and groups' root splits skipped; `child` picks the most recently focused child).
+* An explicit cell jumps there; the following moves start from it. A sequence fails as soon as one move does.
+* Unlike the shortcuts, a sideways move from a split moves from the split's rect (the shortcuts first fall back to the last single pane).
+* To share it, the shortcuts' logic is written as queries on any selection: `neighbour(side, only, sel)`, `parentOf(sel)`, `childOf(sel)`.
+
+**`ws.placer(spec).apply(what)`**: place something relative to the focused cell (at the time of `apply`). Returns the `Cell` (pane) that holds it, or null.
+
+```ts
+interface PlaceSpec {
+  split: Side | "tab";   // beside the base, on that side; or into its tabs
+  base?: Path;           // from the focused cell; default: the focused cell itself
+  force?: boolean;       // if the base doesn't exist, put it where the base would be
+  focus?: boolean;       // focus what was placed (default true)
+}
+type Placeable = Tab | Node | Cell | { id };  // new, or already in the layout (then it moves)
+```
+
+* **Placing is dropping.** The spec becomes a drop target, `what` a drag subject, and it goes through `tryDrop` / `commitDrop`: same rules (sizes, insertable sides, no-ops refused), one undo step.
+  * Subjects: a tab or pane already in the layout moves (`tab` / `pane`); a new tab comes in a new pane, a new node as is (`external`). Splits already in the layout can't be placed (no drag moves them either).
+  * `split: side`: `{side, base, side}`: beside the base (half of it), or at a split base's start/end (1/N). `split: "tab"`: appended to the base's tabs; for a split base, its most recently focused pane's.
+* **`force`, when the base's path fails**: the thing goes where the base would have been. Take the side of the failed move (`right` for a failed "right"), or `split`'s side if that move wasn't sideways (`parent` of a root). Walking up from where the path got to, the first parent that takes insertions on that side (kind `sides`; slots skipped, holders count) gets a new pane on that side, holding the thing. With no such parent, the node reached itself.
+  * E.g. `{split: "left", base: "right", force: true}` from the rightmost pane of the main row: a new pane at the end of the row (1/N). From a cell of a scroll-column: the scroll-column takes nothing on its right, so beside its group's holder.
+* With `focus: false`, the selection is put back afterwards.
+
+**`ws.spawn(spec)`**: insert a **new cell**, placed as `spec` says. What the new cell is, **the cell it's done on decides** (not the base): the host's `lifecycle.spawn(from: Tab): Tab | null`, called with the selected pane's active tab (for a split, its most recently focused pane's). Null: nothing is inserted. Without the hook, an empty "New tab". Demo keys: I, then a direction: into the tabs of the cell there (with Shift: beside the focused cell, on that side).
+
+**`ws.moveTab(spec)`**: move the focused tab (the selected pane's active tab) as `spec` says; it goes through the placer like anything else. A lone tab beside its own pane is a no-op (null). Demo keys: A, then a direction: into the tabs of the cell there (with Shift: beside the selected pane).
+
+* The demo has **cell classes** (`demo/cellclasses.ts`), each matching some tabs and spawning a sensible new one: a shell cell spawns another command (a random one, in its accent), a prompt a follow-up prompt, a video another video, a stateful page a new counter, anything else (groups included) an "Untitled" text tab.
+
 ## Closing
 
 Closing a tab or a pane first **closes its contents**, which can take time (ending a process, saving a file) or never finish (an unresponsive process). Only the host knows how, so:
@@ -583,6 +645,7 @@ Closing a tab or a pane first **closes its contents**, which can take time (endi
 interface Lifecycle {
   closeTab(tab: Tab): Promise<void>;       // resolves once closed; rejecting refuses the close
   forceCloseTab(tab: Tab): Promise<void>;  // close now, whatever the state; not waited for
+  spawn?(from: Tab): Tab | null;           // the new cell a cell creates (see ws.spawn)
 }
 ws.lifecycle = { … };                       // default: instant (`instantLifecycle`)
 ```

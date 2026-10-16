@@ -1,4 +1,11 @@
 /* ---------- carreau ---------- */
+/* Colors: light-dark(light, dark) everywhere, following the inherited `color-scheme` (set it on
+   the page, e.g. :root { color-scheme: light dark } to follow the system). Two colors are
+   shared: the panes' background, and the color of the gaps inside a group. */
+.carreau, .carreau-ghost, .carreau-hold {
+  --carreau-pane-bg: light-dark(#ffffff, #191a20);
+  --carreau-group-bg: light-dark(#c3c7d1, #3f4250);
+}
 .carreau { position: relative; flex: 1; display: flex; min-width: 0; min-height: 0; user-select: none; }
 .carreau-root { flex: 1; display: flex; min-width: 0; min-height: 0; }
 .carreau-root > * { flex: 1 1 0 !important; }
@@ -8,18 +15,18 @@
 .carreau-splitter { flex: 0 0 4px; }
 .carreau-row > .carreau-splitter { cursor: col-resize; }
 .carreau-column > .carreau-splitter { cursor: row-resize; }
-.carreau-splitter:hover { background: #3a3d4a; }
+.carreau-splitter:hover { background: light-dark(#c3c6cf, #3a3d4a); }
 
 .carreau-pane {
   display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden;
-  background: #191a20; border: 1px solid #2c2e38; border-radius: 4px;
+  background: var(--carreau-pane-bg); border: 1px solid light-dark(#d3d6de, #2c2e38); border-radius: 4px;
 }
 /* Header, at the bottom of the pane: tabs (scrollable), the empty handle area, the ⋯ button;
    a grey line separates it from the content above. */
 .carreau-tabbar {
   display: flex; align-items: stretch; height: 27px; flex: 0 0 27px; box-sizing: border-box;
-  background: #191a20; overflow: hidden; padding-left: 4px;
-  box-shadow: inset 0 1px 0 #3a3d48; order: 1;
+  background: var(--carreau-pane-bg); overflow: hidden; padding-left: 4px;
+  box-shadow: inset 0 1px 0 light-dark(#d3d6de, #3a3d48); order: 1;
 }
 .carreau-tabs-wrap { position: relative; display: flex; flex: 0 1 auto; min-width: 0; }
 .carreau-tabs { display: flex; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
@@ -28,25 +35,25 @@
   content: ""; position: absolute; top: 1px; bottom: 0; width: 14px; pointer-events: none;
   opacity: 0; transition: opacity 120ms; z-index: 1;
 }
-.carreau-tabs-wrap::before { left: 0; background: linear-gradient(to right, #000c, transparent); }
-.carreau-tabs-wrap::after { right: 0; background: linear-gradient(to left, #000c, transparent); }
+.carreau-tabs-wrap::before { left: 0; background: linear-gradient(to right, light-dark(#0002, #000c), transparent); }
+.carreau-tabs-wrap::after { right: 0; background: linear-gradient(to left, light-dark(#0002, #000c), transparent); }
 .carreau-tabs-wrap.more-left::before, .carreau-tabs-wrap.more-right::after { opacity: 1; }
 .carreau-tabspace { flex: 1 0 24px; cursor: grab; }
 /* Every tab's text is faded except the selected one (active tab of the focused pane). The
    active tab of each pane has a line on the header's grey line: mid grey, or the tab's
    accent when its pane is focused. */
 .carreau-tab {
-  padding: 0 10px; line-height: 26px; color: #8a8d96; cursor: pointer; white-space: nowrap; flex: none;
+  padding: 0 10px; line-height: 26px; color: light-dark(#80838c, #8a8d96); cursor: pointer; white-space: nowrap; flex: none;
 }
-.carreau-tab:hover { color: #b8bac0; }
+.carreau-tab:hover { color: light-dark(#3f4148, #b8bac0); }
 .carreau-tab { display: flex; align-items: center; gap: 6px; padding-right: 6px; }
 .carreau-tab-close {
   width: 16px; height: 16px; border-radius: 3px; display: flex; align-items: center; justify-content: center;
-  color: #5c5f69; cursor: pointer; font-size: 14px; line-height: 1;
+  color: light-dark(#a5a8b0, #5c5f69); cursor: pointer; font-size: 14px; line-height: 1;
 }
 .carreau-tab-close::before { content: "×"; }
-.carreau-tab:hover .carreau-tab-close, .carreau-pane.selected .carreau-tab.active .carreau-tab-close { color: #8a8d96; }
-.carreau-tab-close:hover { color: #eee !important; background: #3a3d48; }
+.carreau-tab:hover .carreau-tab-close, .carreau-pane.selected .carreau-tab.active .carreau-tab-close { color: light-dark(#6c6f78, #8a8d96); }
+.carreau-tab-close:hover { color: light-dark(#1d1e22, #eee) !important; background: light-dark(#e3e5ea, #3a3d48); }
 /* Closing (waiting for the contents to close): a rotating arc where the × was; hovered, a red ×
    inside it forces the close. */
 .carreau-closing {
@@ -54,21 +61,21 @@
 }
 .carreau-closing::before {
   content: ""; position: absolute; inset: 2px; border-radius: 50%;
-  background: conic-gradient(from 0deg, transparent 0 15%, var(--tab-accent, var(--cell-accent, #9aa)) 100%);
+  background: conic-gradient(from 0deg, transparent 0 15%, var(--tab-accent, var(--cell-accent, #889)) 100%);
   -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px));
   mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px));
   animation: carreau-spin 0.9s linear infinite; animation-delay: var(--phase, 0ms);
 }
 .carreau-closing::after {
   content: "×"; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-  font-size: 11px; font-weight: 700; line-height: 1; color: #ff5a5a; opacity: 0; transition: opacity 0.1s;
+  font-size: 11px; font-weight: 700; line-height: 1; color: light-dark(#e03131, #ff5a5a); opacity: 0; transition: opacity 0.1s;
 }
 .carreau-closing:hover::after { opacity: 1; }
 @keyframes carreau-spin { to { transform: rotate(360deg); } }
 .carreau-tab.closing .carreau-tab-short, .carreau-tab.closing .carreau-tab-icon { opacity: 0.55; }
 .carreau-long .carreau-closing { position: absolute; right: 6px; top: 50%; margin-top: -8px; }
-.carreau-tab.active { box-shadow: inset 0 2px 0 #6f727c; }
-.carreau-pane.selected > .carreau-tabbar .carreau-tab.active { color: #eee; box-shadow: inset 0 2px 0 var(--tab-accent); }
+.carreau-tab.active { box-shadow: inset 0 2px 0 light-dark(#a3a6af, #6f727c); }
+.carreau-pane.selected > .carreau-tabbar .carreau-tab.active { color: light-dark(#1d1e22, #eee); box-shadow: inset 0 2px 0 var(--tab-accent); }
 .carreau-body { flex: 1; padding: 10px; overflow: auto; }
 
 /* maximization: CSS only */
@@ -78,10 +85,10 @@
 /* selection */
 .carreau-selection {
   position: absolute; pointer-events: none; display: none; border-radius: 5px;
-  outline: 1.5px dashed #6a6d78; outline-offset: -1px; z-index: 5;
+  outline: 1.5px dashed light-dark(#8a8d98, #6a6d78); outline-offset: -1px; z-index: 5;
 }
 .carreau-selection[data-kind="row"], .carreau-selection[data-kind="column"], .carreau-selection[data-kind="range"] {
-  background: #ffffff08;
+  background: light-dark(#0000000a, #ffffff08);
 }
 
 /* drag & drop */
@@ -90,11 +97,11 @@
 .carreau.is-dragging, .carreau.is-dragging * { cursor: grabbing !important; }
 .carreau-ghost {
   position: fixed; pointer-events: none; z-index: 1000; padding: 3px 10px; border-radius: 4px;
-  background: #2d3040; color: #fff; box-shadow: 0 4px 14px #0008; font-size: 12px;
+  background: light-dark(#ffffff, #2d3040); color: light-dark(#1d1e22, #fff); box-shadow: 0 4px 14px light-dark(#0003, #0008); font-size: 12px;
 }
 .carreau-preview {
-  fill: #ffffff14;
-  stroke: #7d808b; stroke-width: 1.5; stroke-dasharray: 6 4;
+  fill: light-dark(#0000000f, #ffffff14);
+  stroke: light-dark(#8a8d98, #7d808b); stroke-width: 1.5; stroke-dasharray: 6 4;
 }
 .carreau-indicator { transition: fill 80ms; }
 .carreau.is-dragging .carreau-selection { display: none !important; }
@@ -104,7 +111,7 @@
 .carreau-scroll-row { overflow-x: auto; overflow-y: hidden; }
 /* A scroll split always occupies its whole allocation: give it a panel of its own, so that
    the space left after short content reads as part of it (padding), not as a gap. */
-.carreau-scroll { background: #141519; border-radius: 4px; box-shadow: inset 0 0 0 1px #2c2e38; }
+.carreau-scroll { background: light-dark(#eef0f4, #141519); border-radius: 4px; box-shadow: inset 0 0 0 1px light-dark(#d3d6de, #2c2e38); }
 .carreau-gap { flex: 0 0 4px; }
 /* Sticky scroll splits: short content sits at the end. (An auto margin, not justify-content:
    flex-end, which would make overflowing content unreachable at the start.) */
@@ -118,26 +125,26 @@
 .carreau-body { display: flex; flex-direction: column; }
 .carreau-content { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .carreau-content[hidden] { display: none; }
-.carreau-content > iframe { flex: 1; width: 100%; min-height: 0; border: 0; border-radius: 3px; background: #000; }
+.carreau-content > iframe { flex: 1; width: 100%; min-height: 0; border: 0; border-radius: 3px; background: light-dark(#fff, #000); }
 /* iframes would swallow pointer events during drags and splitter resizes */
 .carreau.is-dragging iframe, .carreau.is-resizing iframe { pointer-events: none; }
 
 /* pane menu */
 .carreau-menu {
   position: absolute; z-index: 30; display: flex; flex-direction: column; min-width: 110px; padding: 4px;
-  background: #2a2c36; border: 1px solid #3a3d4a; border-radius: 6px; box-shadow: 0 6px 20px #0009;
+  background: light-dark(#ffffff, #2a2c36); border: 1px solid light-dark(#d3d6de, #3a3d4a); border-radius: 6px; box-shadow: 0 6px 20px light-dark(#0003, #0009);
 }
 .carreau-menu button {
-  all: unset; padding: 4px 10px; border-radius: 4px; color: #ddd; cursor: pointer; font-size: 12px;
+  all: unset; padding: 4px 10px; border-radius: 4px; color: light-dark(#222, #ddd); cursor: pointer; font-size: 12px;
 }
-.carreau-menu button:hover:not(:disabled) { background: #3a3e4e; }
-.carreau-menu button:disabled { color: #666; cursor: default; }
+.carreau-menu button:hover:not(:disabled) { background: light-dark(#eceef3, #3a3e4e); }
+.carreau-menu button:disabled { color: light-dark(#aaa, #666); cursor: default; }
 
 /* floating windows */
 .carreau-floats { position: absolute; inset: 0; pointer-events: none; z-index: 7; overflow: hidden; }
 .carreau-float {
   position: absolute; display: flex; pointer-events: auto; border-radius: 6px;
-  box-shadow: 0 12px 36px #000c, 0 0 0 1px #3a3d4a;
+  box-shadow: 0 12px 36px light-dark(#0004, #000c), 0 0 0 1px light-dark(#c3c6cf, #3a3d4a);
 }
 .carreau-float.docking { opacity: 0.35; pointer-events: none; }
 /* Resize handles: 4 edges and 4 corners, overhanging the window's border a little. */
@@ -159,36 +166,36 @@
 /* hold-to-dock progress ring */
 .carreau-hold { position: fixed; width: 40px; height: 40px; margin: -20px 0 0 -20px; pointer-events: none; z-index: 1000; }
 .carreau-hold circle {
-  fill: none; stroke: #c8cad0; stroke-width: 4; stroke-linecap: round;
+  fill: none; stroke: light-dark(#55575e, #c8cad0); stroke-width: 4; stroke-linecap: round;
   stroke-dasharray: 100.5; stroke-dashoffset: 100.5; transform: rotate(-90deg); transform-origin: center;
   animation: carreau-hold 850ms linear forwards;
 }
 @keyframes carreau-hold { to { stroke-dashoffset: 0; } }
 .carreau-more {
   width: 24px; flex: none; display: flex; align-items: center; justify-content: center; margin-right: 2px;
-  color: #777; cursor: pointer; font-size: 15px; border-radius: 4px;
+  color: light-dark(#999, #777); cursor: pointer; font-size: 15px; border-radius: 4px;
 }
-.carreau-more:hover, .carreau-more.open { color: #eee; background: #2c2e38; }
-.carreau-float { flex-direction: column; background: #16171c; }
+.carreau-more:hover, .carreau-more.open { color: light-dark(#1d1e22, #eee); background: light-dark(#e6e8ee, #2c2e38); }
+.carreau-float { flex-direction: column; background: light-dark(#f6f7f9, #16171c); }
 .carreau-float-bar {
   flex: 0 0 12px; cursor: grab; border-radius: 6px 6px 0 0;
-  background: linear-gradient(#3a3d48, #262830);
+  background: linear-gradient(light-dark(#e4e6eb, #3a3d48), light-dark(#d2d5dc, #262830));
 }
-.carreau-float-bar:hover { background: linear-gradient(#4a4e5a, #2c2e37); }
+.carreau-float-bar:hover { background: linear-gradient(light-dark(#d8dbe2, #4a4e5a), light-dark(#c4c7cf, #2c2e37)); }
 .carreau-selection.in-float { z-index: 8; }
 
 /* navigation mode: the selected pane gets a brighter thin outline; panes can be dragged
    from anywhere (iframes must not swallow the press) */
-.carreau.nav-mode .carreau-pane.selected { outline: 1px solid #d6d8de; outline-offset: -1px; }
-.carreau.nav-mode .carreau-selection { outline: 1px solid #d6d8de; }
+.carreau.nav-mode .carreau-pane.selected { outline: 1px solid light-dark(#3a3c43, #d6d8de); outline-offset: -1px; }
+.carreau.nav-mode .carreau-selection { outline: 1px solid light-dark(#3a3c43, #d6d8de); }
 .carreau.nav-mode iframe { pointer-events: none; }
 .carreau.nav-mode .carreau-pane, .carreau.nav-mode .carreau-float { cursor: grab; }
 
 /* group tabs: a whole layout inside a pane */
 /* A group fills its holder's body entirely; its background is lighter than the normal gaps,
    so the group shows through the gaps between its parts. */
-.carreau-body.shows-group { padding: 0; background: #3f4250; }
-.carreau-group { flex: 1; display: flex; min-width: 0; min-height: 0; background: #3f4250; }
+.carreau-body.shows-group { padding: 0; background: var(--carreau-group-bg); }
+.carreau-group { flex: 1; display: flex; min-width: 0; min-height: 0; background: var(--carreau-group-bg); }
 .carreau-group[hidden] { display: none; }
 .carreau-group > * { flex: 1 1 0 !important; }
 /* cells: [icon][short][×]; the status changes the icon */
@@ -203,16 +210,16 @@
 /* a cell's "long" (e.g. the command or prompt behind it), at the top, tinted by its accent */
 .carreau-long {
   position: relative; margin: -10px -10px 10px; padding: 6px 10px; flex: none; cursor: grab;
-  font: 12px ui-monospace, monospace; color: #d7d9de; white-space: pre-wrap; overflow-wrap: anywhere;
-  background: color-mix(in oklch, var(--cell-accent) 24%, #191a20);
-  border-bottom: 1px solid color-mix(in oklch, var(--cell-accent) 40%, #191a20);
+  font: 12px ui-monospace, monospace; color: light-dark(#23252b, #d7d9de); white-space: pre-wrap; overflow-wrap: anywhere;
+  background: color-mix(in oklch, var(--cell-accent) 24%, var(--carreau-pane-bg));
+  border-bottom: 1px solid color-mix(in oklch, var(--cell-accent) 40%, var(--carreau-pane-bg));
 }
 /* a cell with no tab bar: its border shows focus, in its accent */
 .carreau-pane.no-tabbar.selected { border-color: color-mix(in oklch, var(--focus-accent, #8a8d96) 70%, transparent); }
 
 /* editing a tab's title in place */
 .carreau-tab-edit {
-  font: inherit; color: #eee; background: #15161b; border: 1px solid #5a5f78; border-radius: 3px;
+  font: inherit; color: light-dark(#1d1e22, #eee); background: light-dark(#fff, #15161b); border: 1px solid light-dark(#9aa0b8, #5a5f78); border-radius: 3px;
   padding: 0 4px; margin: 0; height: 18px; outline: none;
 }
 /* maximizing something inside a group: the holder's tabs and outline go away */

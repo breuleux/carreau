@@ -102,6 +102,16 @@ const navConfig: NavConfig = {
   },
 };
 
+// Theme: follow the system (color-scheme: light dark), or force light or dark. Remembered.
+const theme = document.querySelector<HTMLSelectElement>("#theme")!;
+const applyTheme = (v: string) => {
+  document.documentElement.style.colorScheme = v;
+  theme.value = v;
+  localStorage.setItem("carreau-theme", v);
+};
+applyTheme(localStorage.getItem("carreau-theme") ?? "light dark");
+theme.addEventListener("change", () => applyTheme(theme.value));
+
 const params = new URLSearchParams(location.search);
 const exIndex = Math.max(0, examples.findIndex((e) => e.name === params.get("example")));
 const example = examples[exIndex];

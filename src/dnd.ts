@@ -485,7 +485,10 @@ export class DragDrop {
     if (!d.hoverPane) return;
     const mk = (tag: string, attrs: Record<string, string | number>, parent: Element = svg) => {
       const e = document.createElementNS(SVGNS, tag);
-      for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, String(v));
+      for (const [k, v] of Object.entries(attrs))
+        // Colors go through CSS (presentation attributes don't take light-dark()).
+        if (k === "fill" || k === "stroke" || k === "stop-color") (e as SVGElement).style.setProperty(k, String(v));
+        else e.setAttribute(k, String(v));
       parent.append(e);
       return e;
     };

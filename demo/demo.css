@@ -1,19 +1,22 @@
 /* The demo page, and the demo's tab contents. (The library's styles: src/style.css.) */
-html, body { margin: 0; height: 100%; background: #2c2e38; color: #ddd; font: 13px system-ui, sans-serif; }
+/* Light or dark, following the system unless the theme switch says otherwise (main.ts sets
+   color-scheme on the root). The library follows the inherited color-scheme. */
+:root { color-scheme: light dark; }
+html, body { margin: 0; height: 100%; background: light-dark(#dfe1e7, #2c2e38); color: light-dark(#222, #ddd); font: 13px system-ui, sans-serif; }
 body { display: flex; flex-direction: column; }
-header { display: flex; gap: 12px; align-items: center; padding: 6px 10px; border-bottom: 1px solid #2a2c35; }
-header #description { color: #999; }
-header #status { margin-left: auto; color: #8a8; font-family: ui-monospace, monospace; font-size: 11px; }
+header { display: flex; gap: 12px; align-items: center; padding: 6px 10px; border-bottom: 1px solid light-dark(#c9ccd4, #2a2c35); }
+header #description { color: light-dark(#666, #999); }
+header #status { margin-left: auto; color: light-dark(#4a7a4a, #8a8); font-family: ui-monospace, monospace; font-size: 11px; }
 main { flex: 1; display: flex; min-height: 0; }
 #host { flex: 1; min-width: 0; padding: 6px; display: flex; }
-aside { width: 280px; padding: 8px 12px; border-left: 1px solid #2a2c35; display: flex; flex-direction: column; overflow: auto; }
-aside h3 { margin: 8px 0 4px; font-size: 12px; text-transform: uppercase; color: #888; }
+aside { width: 280px; padding: 8px 12px; border-left: 1px solid light-dark(#c9ccd4, #2a2c35); display: flex; flex-direction: column; overflow: auto; }
+aside h3 { margin: 8px 0 4px; font-size: 12px; text-transform: uppercase; color: light-dark(#777, #888); }
 aside ul { list-style: none; margin: 0; padding: 0; }
 aside li { display: flex; justify-content: space-between; padding: 1px 0; }
-kbd { background: #3c3f4b; border-radius: 3px; padding: 0 4px; font-size: 11px; }
-.hint { color: #888; }
-#json { flex: 1; min-height: 200px; background: #101115; color: #bbb; border: 1px solid #2a2c35; font: 10px ui-monospace, monospace; }
-.demo-content h2 { margin: 0 0 4px; font-weight: 500; color: #ddd; }
-.demo-content .meta { margin: 0; color: #777; font-size: 11px; font-family: ui-monospace, monospace; }
-.demo-content .text { margin: 8px 0 0; white-space: pre-wrap; color: #bbb; line-height: 1.45; }
+kbd { background: light-dark(#fff, #3c3f4b); box-shadow: light-dark(inset 0 0 0 1px #c9ccd4, none); border-radius: 3px; padding: 0 4px; font-size: 11px; }
+.hint { color: light-dark(#777, #888); }
+#json { flex: 1; min-height: 200px; background: light-dark(#fff, #101115); color: light-dark(#333, #bbb); border: 1px solid light-dark(#c9ccd4, #2a2c35); font: 10px ui-monospace, monospace; }
+.demo-content h2 { margin: 0 0 4px; font-weight: 500; color: light-dark(#222, #ddd); }
+.demo-content .meta { margin: 0; color: light-dark(#888, #777); font-size: 11px; font-family: ui-monospace, monospace; }
+.demo-content .text { margin: 8px 0 0; white-space: pre-wrap; color: light-dark(#444, #bbb); line-height: 1.45; }
 .carreau-natural-row .demo-content .text { white-space: pre; }

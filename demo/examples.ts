@@ -18,7 +18,7 @@ function lines(n: number, width: number): string[] {
 }
 
 /** A self-contained page with visible state, to see whether an iframe got reloaded. */
-const STATEFUL = `<!doctype html><html><body style="font:14px system-ui;color:#ddd;background:#16171c;margin:12px">
+const STATEFUL = `<!doctype html><html><body style="font:14px system-ui;color-scheme:light dark;color:light-dark(#222,#ddd);background:light-dark(#fff,#16171c);margin:12px">
 <div>Loaded <b id="age">0</b>s ago</div>
 <p><button id="b" style="font-size:16px">Clicked <span id="n">0</span> times</button></p>
 <p><input placeholder="type something" style="width:90%;font-size:14px"></p>
