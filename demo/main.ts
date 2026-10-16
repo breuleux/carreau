@@ -3,11 +3,11 @@
 import "../src/style.css";
 import "./demo.css";
 import { examples } from "./examples";
-import { spawnCell } from "./cellclasses";
+import { commitCellFocus, spawnCell } from "./cellclasses";
 import { deserialize, serialize } from "../src/model";
 import { hasMoveBefore, View } from "../src/view";
 import { Workspace } from "../src/workspace";
-import { KeyboardNav, NavConfig } from "../src/keyboard";
+import { bridgeFrameKeys, KeyboardNav, NavConfig } from "../src/keyboard";
 
 // Navigation mode: hold Alt after Alt+Q (or Alt+Q, Q for sticky mode), then use these.
 const navConfig: NavConfig = {
@@ -133,6 +133,8 @@ ws.lifecycle = {
   forceCloseTab: async (t) => console.log(`force closed ${t.title}`),
   // What a new cell inserted from a cell is (Alt+Q, I, then a direction): see cellclasses.ts.
   spawn: spawnCell,
+  // Leaving navigation mode on a cell: it takes the keyboard focus, as its class sees fit.
+  commitFocus: commitCellFocus,
 };
 const view = new View(ws, document.querySelector("#host")!, {
   renderTab: (tab) => {
@@ -147,6 +149,8 @@ const view = new View(ws, document.querySelector("#host")!, {
         f.referrerPolicy = "strict-origin-when-cross-origin";
       } else {
         f.srcdoc = data.srcdoc as string;
+        // Same origin: Alt+Q (and the navigation keys) work from inside it.
+        bridgeFrameKeys(f);
       }
       if (typeof data.height === "number") f.style.height = `${data.height}px`;
       f.style.flex = typeof data.height === "number" ? "none" : "1";

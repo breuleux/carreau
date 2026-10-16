@@ -624,6 +624,17 @@ export class View implements DndHost {
     input.select();
   }
 
+  /**
+   * Leaving navigation mode: let the focused cell (the selected pane's active tab) take the
+   * keyboard focus, through the host's `lifecycle.commitFocus`.
+   */
+  commitFocus(): void {
+    const n = this.ws.node(this.ws.selection.id);
+    if (n?.type !== "pane" || this.ws.selection.range) return;
+    const tab = n.tabs[n.active];
+    if (tab) this.ws.lifecycle.commitFocus?.(tab, this.contents.get(tab.id) ?? null);
+  }
+
   /** Enter or leave navigation mode (see keyboard.ts). */
   setNavMode(mode: "off" | "held" | "sticky"): void {
     this.navMode = mode;

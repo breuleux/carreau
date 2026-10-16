@@ -40,6 +40,12 @@ export interface Lifecycle {
    * from it (`Workspace.spawn`). Null: it creates none. Default: an empty tab.
    */
   spawn?(from: Tab): Tab | null;
+  /**
+   * Leaving navigation mode with this cell focused: give it the keyboard focus, if it wants it
+   * (e.g. focus the iframe it contains). `content`: its persistent content element (null for
+   * a group tab). Default: nothing.
+   */
+  commitFocus?(tab: Tab, content: HTMLElement | null): void;
 }
 
 /** A lifecycle with nothing to wait for. */

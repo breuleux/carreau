@@ -646,6 +646,7 @@ interface Lifecycle {
   closeTab(tab: Tab): Promise<void>;       // resolves once closed; rejecting refuses the close
   forceCloseTab(tab: Tab): Promise<void>;  // close now, whatever the state; not waited for
   spawn?(from: Tab): Tab | null;           // the new cell a cell creates (see ws.spawn)
+  commitFocus?(tab: Tab, content: HTMLElement | null): void;  // see "Committing the focus"
 }
 ws.lifecycle = { … };                       // default: instant (`instantLifecycle`)
 ```
@@ -710,7 +711,19 @@ Tab contents must survive any relayout: moves, drops between trees, floating, do
   * set `pointer-events: none` on all iframes in the workspace;
   * call `setPointerCapture` on the element that started the gesture.
 * **Focus.** A click inside an iframe fires no event in the host document. Instead, on window `blur`, check on the next tick whether `document.activeElement` is an iframe inside the workspace, including in windows. If it is, select its pane.
-* **Keyboard.** Keys typed while focus is inside an iframe go to that iframe's window, so the host's key bindings don't see them. Same-origin frames can forward them; cross-origin frames cannot without the embedded page's cooperation.
+* **Keyboard.** Keys typed while focus is inside an iframe go to that iframe's window, so the host's key bindings don't see them. Same-origin frames can forward them (`bridgeFrameKeys`, below); cross-origin frames cannot without the embedded page's cooperation.
+
+### Committing the focus
+
+Navigation mode moves the *selection*; the keyboard focus stays in the host page. **Leaving navigation mode commits the focus to the focused cell**: the view calls the host's `lifecycle.commitFocus(tab, content)` with the selected pane's active tab and its persistent content element (null for a group tab). The cell decides what to do; by default, nothing.
+
+* It is called when the mode ends by the user's action (releasing the modifier in held mode, the activation key or Esc in sticky mode), not when it ends because the window lost focus (the focus went elsewhere: taking it back would steal it).
+* Not for a range or split selection (`clearMultiSelection` runs first, so usually it's a pane).
+* **Getting back out of an iframe**: `bridgeFrameKeys(iframe)` (keyboard.ts) forwards a same-origin iframe's `keydown`/`keyup` events to the host window as synthetic events, in the capture phase of the iframe's document. If the host cancels one (the controller handled it: Alt+Q, then navigation keys), the original is cancelled too, so it doesn't type into the iframe. The bridge is re-installed on every `load` (each new document; marked on the document, since an iframe's initial window object can be reused).
+  * The keyboard controller ignores a synthetic event's target (the window) for its "typing in a text field" check, so Alt+Q works even from a text field inside the iframe: that's the way out.
+  * **Entering navigation mode takes the focus back** from an iframe (`blur()` it, focus the window), so the following keys reach the host directly.
+  * Cross-origin iframes (YouTube) can't be bridged: once focused, Alt+Q can't get out of them; click outside.
+* Demo: the cell classes (`demo/cellclasses.ts`) implement it. A stateful page (same origin, bridged) focuses its text field: leave navigation mode on it and type, Alt+Q to get out. A video focuses the player. Text cells do nothing.
 
 
 ## Scroll splits

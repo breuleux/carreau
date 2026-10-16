@@ -62,6 +62,43 @@ export interface NavConfig {
 
 export type NavMode = "off" | "held" | "sticky";
 
+/**
+ * Forward a same-origin iframe's key events to the host window, so that the navigation keys
+ * work while the focus is inside it (e.g. Alt+Q to get out). A forwarded key the host handles
+ * (cancels) is cancelled in the iframe too. Re-installed whenever the iframe loads a new
+ * document. Cross-origin iframes can't be bridged (their keys never reach the host).
+ */
+export function bridgeFrameKeys(frame: HTMLIFrameElement): void {
+  const host = frame.ownerDocument.defaultView!;
+  const install = () => {
+    let doc: Document | null | undefined;
+    try {
+      doc = frame.contentDocument; // null, or throws, when cross-origin
+    } catch {
+      return;
+    }
+    const d = doc as (Document & { carreauBridged?: boolean }) | null | undefined;
+    if (!d || d.carreauBridged) return;
+    d.carreauBridged = true;
+    for (const type of ["keydown", "keyup"] as const)
+      d.addEventListener(
+        type,
+        (e) => {
+          const { key, code, altKey, ctrlKey, metaKey, shiftKey, repeat, location } = e;
+          const copy = new KeyboardEvent(type, { key, code, altKey, ctrlKey, metaKey, shiftKey, repeat, location, bubbles: true, cancelable: true });
+          host.dispatchEvent(copy);
+          if (copy.defaultPrevented) {
+            e.preventDefault();
+            e.stopPropagation();
+          }
+        },
+        { capture: true },
+      );
+  };
+  frame.addEventListener("load", install);
+  install();
+}
+
 const MOD_FLAG: Record<Modifier, "ctrlKey" | "altKey" | "metaKey" | "shiftKey"> = {
   Control: "ctrlKey",
   Alt: "altKey",
@@ -91,7 +128,8 @@ export class KeyboardNav {
     // A modifier released while the window had no focus never sends keyup.
     target.addEventListener("blur", () => {
       this.heldMods.clear();
-      if (this.mode === "held") this.setMode("off");
+      // (The focus went elsewhere: don't let the cell take it back.)
+      if (this.mode === "held") this.setMode("off", false);
     });
   }
 
@@ -99,14 +137,28 @@ export class KeyboardNav {
     this.listeners.push(fn);
   }
 
-  private setMode(mode: NavMode): void {
+  /**
+   * Change mode. Leaving navigation mode commits the focus to the focused cell (see
+   * `Lifecycle.commitFocus`), unless `commit` is false. Entering it takes the keyboard focus
+   * back from an iframe (the keys were forwarded from it: see `bridgeFrameKeys`).
+   */
+  private setMode(mode: NavMode, commit = true): void {
     if (mode === "off") this.clearPrefix();
     if (mode === this.mode) return;
+    const was = this.mode;
     // Multi-selections only live within navigation mode.
     if (mode === "off") this.ws.clearMultiSelection();
     this.mode = mode;
     this.view.setNavMode(mode);
+    if (was === "off") {
+      const a = document.activeElement;
+      if (a instanceof HTMLIFrameElement) {
+        a.blur();
+        window.focus();
+      }
+    }
     for (const fn of this.listeners) fn(mode);
+    if (mode === "off" && commit) this.view.commitFocus();
   }
 
   /** Whether the activation modifier is held, on the configured side. */
