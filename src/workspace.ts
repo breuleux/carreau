@@ -111,24 +111,16 @@ export type Placeable = Tab | LayoutNode | { id: string };
 
 const DIRECTION_SIDES: Record<string, Side> = { left: "left", right: "right", up: "top", down: "bottom" };
 
-/** How the workspace treats a selected node of some type, where it differs from the default. */
-export interface NodeBehavior {
-  /**
-   * What cell operations (close, swap, move, insert, float, rename, group) act on, instead of
-   * the node (see `Workspace.operand`). Null: on nothing.
-   */
-  operand?(ws: Workspace, node: LayoutNode): Selection | null;
-  /**
-   * What maximizing it maximizes instead of the node; the selection then moves there (see
-   * `Workspace.maximize`). Null: nothing is maximized.
-   */
-  maximize?(ws: Workspace, node: LayoutNode): Selection | null;
-}
-const BEHAVIORS: Record<string, NodeBehavior> = {};
+/** What cell operations act on when a node of some type is selected (see `Workspace.operand`). */
+export type OperandOf = (ws: Workspace, node: LayoutNode) => Selection | null;
+const OPERANDS: Record<string, OperandOf> = {};
 
-/** Customize how the workspace treats selected nodes of a type (merged with what was set). */
-export function registerBehavior(type: LayoutNode["type"], b: NodeBehavior): void {
-  BEHAVIORS[type] = { ...BEHAVIORS[type], ...b };
+/**
+ * Make cell operations (close, swap, move, insert, float, rename, group, maximize) act on
+ * something else than a selected node of this type. Null: on nothing.
+ */
+export function registerOperand(type: LayoutNode["type"], fn: OperandOf): void {
+  OPERANDS[type] = fn;
 }
 
 /** A pending close: of a tab, or of a pane (with all its tabs). */
@@ -763,19 +755,14 @@ export class Workspace {
   // Operand: what cell operations act on
 
   /**
-   * What cell operations (close, swap, move, insert, float, rename, group) act on: the
-   * selection, unless the selected node's type redirects them (`NodeBehavior.operand`).
-   * Null: nothing.
+   * What cell operations (close, swap, move, insert, float, rename, group, maximize) act on:
+   * the selection, unless the selected node's type redirects them (`registerOperand`). Null:
+   * nothing.
    */
   operand(): Selection | null {
-    return this.redirect("operand");
-  }
-
-  /** The selection, or what the selected node's type redirects it to for some purpose. */
-  private redirect(what: keyof NodeBehavior): Selection | null {
     const n = this.selection.range ? null : this.node(this.selection.id);
-    const fn = n && BEHAVIORS[n.type]?.[what];
-    return fn ? fn(this, n) : this.selection;
+    const of = n && OPERANDS[n.type];
+    return of ? of(this, n) : this.selection;
   }
 
   /**
@@ -1125,11 +1112,11 @@ export class Workspace {
   }
 
   /**
-   * Maximize the selection. Its node's type may maximize something else instead
-   * (`NodeBehavior.maximize`): the selection then moves there (null: nothing happens).
+   * Maximize the operand (usually the selection: see `operand`). If it isn't the selection,
+   * the selection moves to it (null: nothing happens).
    */
   maximize(): void {
-    const target = this.redirect("maximize");
+    const target = this.operand();
     if (!target) return;
     const moved = !sameSel(target, this.selection);
     if (moved) this.select(target, false); // the focus goes to what is maximized

@@ -6,7 +6,7 @@
 import { kind, leafKind, registerKind, splitKind } from "./kinds";
 import { genId } from "./model";
 import { LayoutNode, PaneNode, SplitNode, Tab } from "./types";
-import { Workspace, registerBehavior } from "./workspace";
+import { Workspace, registerOperand } from "./workspace";
 
 /**
  * The input field of a prompt-column: always its last child, fixed at its bottom. It can be
@@ -67,13 +67,12 @@ export function secondaryOf(ws: Workspace, promptId: string): string | null {
   return above ? ws.descend(above) : null;
 }
 
-// From a focused prompt, cell operations act on the secondary focus, and maximizing
-// maximizes it (the focus then goes there: a maximized prompt alone would show nothing).
-const secondary = (ws: Workspace, n: LayoutNode) => {
+// From a focused prompt, cell operations act on the secondary focus. (Maximizing it also moves
+// the focus there: a maximized prompt alone would show nothing.)
+registerOperand("prompt", (ws, n) => {
   const id = secondaryOf(ws, n.id);
   return id ? { id } : null;
-};
-registerBehavior("prompt", { operand: secondary, maximize: secondary });
+});
 
 // ---------------------------------------------------------------------------
 // Submitting

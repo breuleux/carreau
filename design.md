@@ -155,9 +155,7 @@ The set of node types is open, so that a feature like prompt columns lives in a 
 * **Renderers** (`registerRenderer(type, renderer)`, view.ts), for leaves other than panes: `fill(el, node, view, ctx)` fills the element the view made (with the node's `data-id`, flex, natural-size classes, and `carreau-cell` for cells); `attached(el, node, view)` runs once the new tree is attached, to place **persistent elements** (`view.persist(key, parent, create)`, `view.persisted(key)`: created once, moved with `moveBefore`, removed after a render that doesn't place them); `commitFocus(node, view)` takes the keyboard focus when navigation mode is left on the node. Splits are rendered by the view itself.
   * A split whose kind has `lastFixed` renders as a **frame** (`.carreau-framed`, `data-id`) that doesn't scroll, holding an inner scroller (`.carreau-frame-inner`, the actual `.carreau-scroll`, keyed by `data-scroll` = the split's id for scroll memory) with all children but the last, and the last child below it, outside. The DOM then differs from the tree, but navigation, rects and drops go by the tree.
   * Renderers' focus handlers must ignore focus events while `view.rendering` (see the pitfalls).
-* **Behaviours** (`registerBehavior(type, behavior)`, workspace.ts): how the workspace treats a selected node of that type, where it differs from the default. Each hook returns a selection (null: nothing):
-  * `operand(ws, node)`: what cell operations act on instead (see `ws.operand()` in [Prompt columns](#prompt-columns));
-  * `maximize(ws, node)`: what maximizing it maximizes instead; the selection moves there (`ws.maximize()`, hence `toggleMaximize` and the `maximize` command).
+* **Operand redirection** (`registerOperand(type, fn)`, workspace.ts): when a node of that type is selected, cell operations, maximizing included, act on something else (see `ws.operand()` in [Prompt columns](#prompt-columns)).
 
 
 ## Rendering
@@ -677,11 +675,11 @@ It is an **optional module**, entirely outside the core, which only knows it thr
   * The host configures prompts per workspace: `configurePrompts(ws, { submit(text): Tab | null, placeholder })`. Default: a text tab.
 * **Leaving navigation mode on the prompt focuses its field** (its renderer's `commitFocus`). Alt+Q from the field enters navigation mode and takes the focus from it.
 * **Secondary focus**: when the prompt is focused, its secondary focus is **the cell just above it** (`secondaryOf(ws, promptId)`; for a split there, its most recently focused cell). In navigation mode it shows with a **dimmer dotted outline** (`.secondary`).
-  * **Cell operations act on it**: the module registers it as the prompt's **operand** (`registerBehavior("prompt", { operand, maximize })`). Generically, `ws.operand()` is the selection, unless the selected node's type redirects it; the view marks the operand `.secondary` when it isn't the selection.
+  * **Cell operations act on it**: the module registers it as the prompt's **operand** (`registerOperand("prompt", …)`). Generically, `ws.operand()` is the selection, unless the selected node's type redirects it; the view marks the operand `.secondary` when it isn't the selection.
   * Close tab / pane (W, Shift+W), float (F), rename (%): the keyboard controller acts on `ws.operand()`.
   * Swap (S), move tab (A), insert (I): the workspace runs them through `ws.withOperand(fn)`: the selection is set to the operand, the operation runs, and **the selection goes back**, all as one undo step (restoring the selection). So the secondary is always the cell just above: swapping it up twice swaps the last two cells back.
   * **Group** (G) groups the operand (`ws.group`'s default), then selects the new group so that it can be named in place.
-  * **Maximize** (M) maximizes it, and **the focus goes there** (the prompt's `maximize` behaviour): a maximized prompt alone would show nothing. M again, from it, restores.
+  * **Maximize** (M) maximizes it, and **the focus goes there**: `ws.maximize()` maximizes the operand, and moves the selection to it when it isn't the selection (a maximized prompt alone would show nothing). M again, from it, restores.
   * With no cells, there is no secondary focus (a null operand): those operations do nothing.
   * Closing the secondary doesn't move the focus (it isn't in the closed cell): it stays on the prompt, and the next cell up becomes the secondary.
 * Demo: the "Prompt column" example. "$ cmd" becomes a shell cell (canned output for the commands it knows, an error otherwise), anything else a prompt cell with a fake answer (`promptCell` in `demo/cellclasses.ts`, given to `configurePrompts` in `demo/main.ts`).
