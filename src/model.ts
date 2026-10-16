@@ -577,6 +577,13 @@ function applyDropRaw(
   target: DropTarget,
 ): { paneId: string; floated?: PaneNode } | null {
   if (wouldNestInItself(root, subject, target)) return null;
+  // Never beside a scroll split itself: it lives as its group's root, so this would wrap it in
+  // a split inside the group (and normalization would then pack it into yet another group).
+  // Insert beside the group's holder, or into the scroll split, instead.
+  if (target.kind === "side") {
+    const t = find(root, target.targetId)?.node;
+    if (t && t.type !== "pane" && isScroll(t.type)) return null;
+  }
   if (target.kind === "float") {
     if (subject.kind === "external") return null;
     const loc = find(root, target.paneId);

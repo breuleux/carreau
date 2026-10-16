@@ -78,6 +78,8 @@ interface Choice {
   span: [number, number];
   /** For insertions between two siblings: [before, after] node ids. */
   straddle?: [string, string];
+  /** For insertions at the start/end of a scroll split: the end child, and which side. */
+  edge?: { nodeId: string; side: Side };
 }
 
 /** The drop line along one side of the hovered pane. */
@@ -149,6 +151,9 @@ const DASH_GAP = 1;
 /** Each half of a border line backs off this much from the middle, unless both halves
  *  stand for the same insertion. */
 const HALF_GAP = 1;
+/** How far outward the hit area of a scroll split's start/end separator reaches. */
+const EDGE_REACH = 5;
+
 /** Line thickness. */
 const LINE = 8;
 
@@ -1117,6 +1122,9 @@ export class View {
     }
     const R = this.pxRect(this.ws.root.id);
     if (!hover && d.hoverPane && R && inRect(R, px, py)) hover = d.hoverPane;
+    // Still within the current line's hit area (which can reach past the pane, e.g. a scroll
+    // split's end separator over the holder's header): keep the pane.
+    if (d.hoverPane && hover !== d.hoverPane && d.near && this.inLine(d.near, px, py)) hover = d.hoverPane;
     if (hover !== d.hoverPane) {
       d.hoverPane = hover;
       d.lines = hover ? this.buildLines(hover, d.subject) : [];
@@ -1241,7 +1249,10 @@ export class View {
     const rect = this.visRect(paneId);
     if (!rect) return null;
     const sides: Zones["sides"] = {};
+    const parent = find(root, paneId)?.parent;
     for (const side of SIDES) {
+      // A cell of a scroll split, along its axis: only the separators (lines) apply there.
+      if (parent && isScroll(parent.type) && axisOf(parent.type) === sideAxis[side]) continue;
       const target: DropTarget = { kind: "side", targetId: paneId, side };
       const result = this.tryDrop(subject, target);
       if (result) sides[side] = { target, result, ownerId: paneId, span: [0, 0] };
@@ -1302,7 +1313,9 @@ export class View {
       const start = sideIsStart[side];
       const horizontal = axis === "row";
       // A border scrolled out of view gets no line.
-      if (Math.abs(edgeOf(P, side) - edgeOf(Pvis, side)) > 0.5) continue;
+      // (Tolerance: at a scroll split's very end, fractional pixels can leave the last cell's
+      // edge just past the viewport's; that edge is still visible.)
+      if (Math.abs(edgeOf(P, side) - edgeOf(Pvis, side)) > 2) continue;
       // Spans are compared on full rects (to tell boundaries apart) but drawn clipped to
       // what is visible.
       const spanOf = (r: Rect | null): [number, number] | null =>
@@ -1312,6 +1325,8 @@ export class View {
 
       const chain: LayoutNode[] = [];
       let between: { split: SplitNode; index: number; before: LayoutNode; after: LayoutNode } | null = null;
+      // At the start/end of a scroll split, along its axis: a separator inserting there.
+      let scrollEdge: { split: SplitNode; index: number; cell: LayoutNode } | null = null;
       let x: LayoutNode = find(root, paneId)!.node;
       for (;;) {
         chain.unshift(x);
@@ -1336,6 +1351,27 @@ export class View {
             };
             break;
           }
+          // In a scroll split's direction, only separators make sense (a "beside" zone would
+          // look like a split, but cells there just stack): offer the split's very start/end,
+          // and nothing further out.
+          if (isScroll(loc.parent.type) && !scrollEdge) {
+            scrollEdge = { split: loc.parent, index: start ? 0 : loc.parent.children.length, cell: x };
+            // Where the scroll split's edge is also its holder's (e.g. the top, the header
+            // being at the bottom), the holder's own options are at the same location:
+            // continue there, so that they share the line (dashed). Not the scroll split
+            // itself: "beside" it would look like a split, which it isn't.
+            const sLoc = find(root, loc.parent.id);
+            const holder = sLoc?.parent?.type === "group" ? holderOf(root, sLoc.parent.id)?.pane : null;
+            const S = this.pxRect(loc.parent.id);
+            const H = holder ? this.pxRect(holder.id) : null;
+            const edgeOf2 = (r: Rect) =>
+              side === "left" ? r.x : side === "right" ? r.x + r.w : side === "top" ? r.y : r.y + r.h;
+            if (holder && S && H && Math.abs(edgeOf2(S) - edgeOf2(H)) <= 1.5) {
+              x = holder;
+              continue;
+            }
+            break;
+          }
         }
         x = loc.parent;
       }
@@ -1357,6 +1393,20 @@ export class View {
         }
         rest = chain.slice(1);
       }
+      // A scroll edge splits the rest of the chain in two: the levels outside the scroll
+      // split (outermost first), the separator itself, then the levels inside the cell.
+      let outer: LayoutNode[] = [];
+      let edgeChoice: Choice | null = null;
+      if (scrollEdge) {
+        const i = rest.indexOf(scrollEdge.cell);
+        outer = rest.slice(0, i);
+        rest = rest.slice(i + 1);
+        const target: DropTarget = { kind: "between", splitId: scrollEdge.split.id, index: scrollEdge.index };
+        const result = this.tryDrop(subject, target);
+        const sp = span(scrollEdge.cell.id);
+        if (result && sp)
+          edgeChoice = { target, result, span: sp, ownerId: scrollEdge.split.id, edge: { nodeId: scrollEdge.cell.id, side } };
+      }
       // One choice per distinct boundary: the innermost node for which the drop is valid.
       // The pane's own boundary (and any ancestor sharing exactly that boundary) is left
       // out: the pane's edge thirds already offer it. Lines only show enclosing groups.
@@ -1364,20 +1414,26 @@ export class View {
       const flush = () => {
         if (group?.best && !group.self) levels.push(group.best);
       };
-      for (const n of rest) {
-        const full = fullSpan(n.id);
-        const sp = span(n.id);
-        if (!full || !sp) continue;
-        if (!group || Math.abs(full[0] - group.span[0]) > 1 || Math.abs(full[1] - group.span[1]) > 1) {
-          flush();
-          group = { span: full, best: null, self: false };
+      const addSideLevels = (nodes: LayoutNode[]) => {
+        for (const n of nodes) {
+          const full = fullSpan(n.id);
+          const sp = span(n.id);
+          if (!full || !sp) continue;
+          if (!group || Math.abs(full[0] - group.span[0]) > 1 || Math.abs(full[1] - group.span[1]) > 1) {
+            flush();
+            group = { span: full, best: null, self: false };
+          }
+          if (n.id === paneId) group.self = true;
+          const target: DropTarget = { kind: "side", targetId: n.id, side };
+          const result = this.tryDrop(subject, target);
+          if (result) group.best = { target, result, span: sp, ownerId: n.id };
         }
-        if (n.id === paneId) group.self = true;
-        const target: DropTarget = { kind: "side", targetId: n.id, side };
-        const result = this.tryDrop(subject, target);
-        if (result) group.best = { target, result, span: sp, ownerId: n.id };
-      }
-      flush();
+        flush();
+        group = null;
+      };
+      addSideLevels(outer);
+      if (edgeChoice) levels.push(edgeChoice);
+      addSideLevels(rest);
       if (!levels.length) continue;
 
       // Position of the line across the edge.
@@ -1394,7 +1450,9 @@ export class View {
         hit = start ? [far, mid + LINE] : [mid - LINE, far];
       } else {
         band = start ? [edge, edge + LINE] : [edge - LINE, edge];
-        hit = band;
+        // At a scroll split's start/end, the hit area also reaches a few pixels outward (the
+        // scroll split's border, the holder's header edge), so aiming right at the edge works.
+        hit = scrollEdge ? (start ? [edge - EDGE_REACH, edge + LINE] : [edge - LINE, edge + EDGE_REACH]) : band;
       }
 
       // Panes on the other side of the border, and the border as they see it.
@@ -1464,6 +1522,18 @@ export class View {
                   ? { ...r, h: r.h / 2 }
                   : { ...r, y: r.y + r.h / 2, h: r.h / 2 };
         }
+      } else if (t.kind === "between" && d.active.edge) {
+        const e = d.active.edge;
+        const c = this.pxRect(e.nodeId);
+        if (c)
+          r =
+            e.side === "left"
+              ? { ...c, w: c.w / 3 }
+              : e.side === "right"
+                ? { ...c, x: c.x + (c.w * 2) / 3, w: c.w / 3 }
+                : e.side === "top"
+                  ? { ...c, h: c.h / 3 }
+                  : { ...c, y: c.y + (c.h * 2) / 3, h: c.h / 3 };
       } else if (t.kind === "between" && d.active.straddle) {
         // Straddle the boundary: last third of the node before, first third of the one after.
         const a = this.pxRect(d.active.straddle[0])!;

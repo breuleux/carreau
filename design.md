@@ -360,6 +360,12 @@ For each side of P, working within **P's own tree** (main or window):
    * Group consecutive nodes whose extent along the edge is the same (using full rects), within 1px. A row's first child shares its left edge with the row, for example.
    * From each group, keep the **innermost** node whose drop is valid.
    * **Leave out the group containing P itself**: P's own boundary, and any ancestor sharing exactly that boundary. P's edge thirds already offer "beside P", so lines only show insertions into enclosing groups. That is the `between` choice plus the outer `side` choices.
+   * **Along a scroll split's axis, only separators.** When the walk reaches a child at the start/end of a **scroll** split along the side's axis (no sibling on that side), it yields a separator choice: `{between, split, index: 0 or n}`, inserting at the very start/end of the scroll split. There is never a "beside the scroll split" level.
+     * **Same location, same line**: if the scroll split's edge coincides with its group holder's edge (within ~1px; e.g. the top, the header being at the bottom), the walk **continues from the holder**. The holder's options and those further out are at the same location: they share the line, dashed. Levels are ordered outermost first: [between, if the holder has a sibling there] + the holder and outer `side` levels + the scroll-edge separator + the levels inside the cell. Where the edges don't coincide (the bottom, above the holder's header), the separator stands alone.
+     * The line lies inside P along the edge, like at a workspace edge. Its **hit area also reaches a few pixels outward** (5px), over the scroll split's border and the holder's header edge, so that aiming right at the very edge works.
+     * While the cursor is within the current line's hit area, the hovered pane is kept, even if the pane under the cursor is another one (e.g. the holder, over its header).
+     * Its preview is the third of that end child next to the edge, consistent with the between-cells previews.
+     * Rationale: in a scroll split, cells just stack at their natural size, so "beside" zones, which look like splits, would misrepresent the operation.
 4. Each choice has a `span`: its node's visible extent along the edge, in pixels. Choices are ordered outermost (longest) first.
 
 ### The border line
@@ -413,6 +419,7 @@ The tab bar shows grey dots at every insertion position: before the first tab, b
 The hovered pane also offers its own zones, laid out on a 3×3 grid of its *visible* rect:
 
 * **Edge thirds** (x < 1/3, x > 2/3, y < 1/3, y > 2/3) propose a `side` drop on the pane itself, on that side: insert beside it, taking half of it.
+  * **Not along a scroll split's axis**: for a pane that is a direct child of a scroll split, the thirds on the sides along that split's axis propose nothing. Only the separator lines apply there. The cross axis is a real split and keeps its thirds, and so do panes nested deeper inside a cell.
   * In corners, pick the side whose boundary is nearer, using normalized distance.
   * Sides where that drop is a no-op propose nothing.
 * **Center third:** shows an icon in the middle of the pane, a grey circle of radius 22. The choice is active only while the cursor is over the icon; the rest of the center proposes nothing.
@@ -467,6 +474,7 @@ A tab can hold **a whole layout** instead of content. The pane holding it then s
   * Normalization normalizes each group's layout separately. **A group left empty disappears together with its tab**, and the group node itself never collapses.
   * `shape` includes groups' layouts.
   * Deserialization validates them.
+* **Never beside a scroll split itself.** A `side` target on a scroll split is invalid, on any side. The scroll split is its group's root, so this would wrap it in a split inside the group, and normalization would then pack it into yet another group tab. Insert beside the group's holder, or into the scroll split, instead. Lines then simply omit that level; where the holder shares the boundary, the holder's level is picked instead.
 * **Cycles.** A drop must never put something inside itself. If the dragged tab carries a group, or the dragged pane has group tabs, and the target lies inside one of those groups, the drop is invalid.
 * **Grouping** (`group(name)`; demo: **G** in navigation mode):
   * The selection becomes a new **holder pane** with a single group tab named `name`.
@@ -571,7 +579,7 @@ In a `scroll-column`, children take their **natural height** (their content deci
   * A scroll split hidden in an inactive group tab (`display: none`) has lost its offset and reads 0. Reading it would erase its position, and switching back to its tab would reset the scroll.
 * **Navigation** still uses logical rects from weights, which treats scroll children as equal shares. Within the scroll split, up and down follow the true order. Coming in from the side picks a pane by its logical position, which may be off-screen; scrolling the selection into view handles that.
 * **Clipping.** Every overlay is clipped to the *visible* rect of the nodes involved: the node's rect intersected with the client rect of each scroll ancestor, up to the tree's layer. This covers the selection outline, the border lines, tab dots, zones and previews.
-  * A side whose border is scrolled out of view gets no line. Detect it by comparing the full rect's edge with the visible rect's edge.
+  * A side whose border is scrolled out of view gets no line. Detect it by comparing the full rect's edge with the visible rect's edge, **with a ~2px tolerance**. At a scroll split's very end, fractional pixels can leave the last cell's edge slightly past the viewport's, and that edge must still count as visible.
   * Dedupe by distinct boundary using **full** spans. Clipped spans of different nodes can coincide.
   * Draw with visible spans.
 * **Scrolling during a drag** (mouse wheel) moves everything. Listen for `scroll` in the capture phase on the workspace. Re-run the hover logic for the last pointer position, rebuilding the indicators, and refresh the selection outline.
