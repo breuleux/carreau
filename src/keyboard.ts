@@ -10,7 +10,7 @@ import { PaneNode } from "./model";
 import { View } from "./view";
 import { Command, Workspace } from "./workspace";
 
-export type NavAction = Command | "toggleMaximize" | "float" | "closeTab";
+export type NavAction = Command | "toggleMaximize" | "float" | "closeTab" | "group" | "collapse" | "renameTab";
 
 export type Modifier = "Control" | "Alt" | "Meta" | "Shift";
 
@@ -97,6 +97,9 @@ export class KeyboardNav {
 
   private keydown(e: KeyboardEvent): void {
     const { activation } = this.config;
+    // Typing in a text field (e.g. the group name prompt) is not navigation.
+    const t = e.target as HTMLElement | null;
+    if (t && (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName))) return;
     if (e.key === activation.modifier) return; // the modifier itself (incl. autorepeat)
 
     if (this.mode === "off") {
@@ -196,6 +199,22 @@ export class KeyboardNav {
         if (n?.type === "pane") this.view.floatPane(n.id);
         return;
       }
+      case "group":
+        // Group now, then edit the new tab's title in place (keys typed in the field are
+        // ignored by this controller).
+        this.view.groupAndName();
+        return;
+      case "renameTab": {
+        const n = ws.node(ws.selection.id);
+        if (n?.type === "pane") {
+          const tab = (n as PaneNode).tabs[(n as PaneNode).active];
+          if (tab) this.view.editTabTitle(tab.id);
+        }
+        return;
+      }
+      case "collapse":
+        ws.collapse();
+        return;
       case "closeTab": {
         const n = ws.node(ws.selection.id);
         if (n?.type === "pane") {

@@ -6,8 +6,10 @@ import {
   DragSubject,
   ForestResult,
   DropTarget,
+  activeGroup,
   find,
   findTab,
+  holderOf,
   FloatingWindow,
   LayoutNode,
   opposite,
@@ -346,6 +348,7 @@ export class View {
       const body = paneEls.get(p.id)?.querySelector<HTMLElement>(":scope > .carreau-body");
       if (!body) continue;
       p.tabs.forEach((tab, i) => {
+        if (tab.group) return; // group tabs show a layout, rendered with the pane
         seen.add(tab.id);
         let el = this.contents.get(tab.id);
         if (!el) {
@@ -399,7 +402,25 @@ export class View {
       el.append(this.renderTabBar(node, inFloat));
       const body = document.createElement("div");
       body.className = "carreau-body";
-      // Filled by placeContents() once the tree is attached.
+      // Group tabs show a whole layout. All of them are rendered (inactive ones hidden), so
+      // that the tab contents inside them stay in the document. Other tabs' contents are
+      // placed by placeContents() once the tree is attached.
+      node.tabs.forEach((t, i) => {
+        const inner = t.group?.children[0];
+        if (!inner) return;
+        const g = document.createElement("div");
+        g.className = "carreau-group";
+        g.dataset.groupTab = t.id;
+        g.hidden = i !== node.active;
+        // The group's layout inherits the holder's natural-size context (inside a scroll
+        // split, the holder sizes to its content, so the group's parts must too; with
+        // weights they would share an indefinite size and collapse to nothing).
+        g.classList.toggle("natural-row", natural.row);
+        g.classList.toggle("natural-column", natural.column);
+        g.append(this.renderNode(inner, natural, false, inFloat));
+        body.append(g);
+      });
+      body.classList.toggle("shows-group", !!activeGroup(node));
       el.append(body);
       el.addEventListener("pointerdown", (e) => {
         // Primary button only: selecting re-renders, which would replace the element under a
@@ -409,7 +430,7 @@ export class View {
       });
       return el;
     }
-    const axis = axisOf(node.type);
+    const axis = axisOf(node.type) ?? "column"; // (group nodes are never rendered as splits)
     const scroll = isScroll(node.type);
     el.className = `carreau-split carreau-${axis}` + (scroll ? ` carreau-scroll carreau-${node.type}` : "");
     // Children of a scroll split, or of a plain split whose own size along its axis is
@@ -461,6 +482,7 @@ export class View {
       tab.className = "carreau-tab" + (i === node.active ? " active" : "");
       tab.dataset.tab = t.id;
       tab.textContent = t.title;
+      if (t.group) tab.classList.add("is-group");
       tab.style.setProperty("--tab-accent", tabColor(t.id));
       // Close button (the × is drawn in CSS, so the tab's text stays its title). The very last
       // tab of the main tree can't be closed.
@@ -542,6 +564,8 @@ export class View {
     };
     const canFloat = !!find(this.ws.root, node.id)?.parent;
     item("Float", canFloat, () => this.ws.float(node.id, this.floatRect(node.id)!));
+    // A pane whose only tab is a group can be replaced by the group's layout.
+    if (this.ws.canCollapse(node.id)) item("Collapse group", true, () => this.ws.collapse(node.id));
     const g = anchor.getBoundingClientRect();
     const b = this.el.getBoundingClientRect();
     // The header is at the bottom of panes: open upwards.
@@ -551,6 +575,62 @@ export class View {
     this.menu = menu;
     this.menuAnchor = anchor;
     anchor.classList.add("open");
+  }
+
+  /**
+   * Group the selection right away under a random name, then let the user edit the new group
+   * tab's title in place.
+   */
+  groupAndName(): void {
+    if (!this.ws.group(randomWord())) return;
+    const holder = this.ws.node(this.ws.selection.id);
+    // Naming is part of grouping: Escape, or an empty name, cancels the grouping itself.
+    if (holder?.type === "pane")
+      this.editTabTitle(holder.tabs[holder.active].id, () => this.ws.discardLastStep());
+  }
+
+  /**
+   * Edit a tab's title in place: the tab's text becomes a field. Enter or leaving the field
+   * confirms; Escape keeps the current title. With `onCancel`, Escape or an empty name call
+   * it instead (e.g. to cancel the grouping that created the tab).
+   */
+  editTabTitle(tabId: string, onCancel?: () => void): void {
+    const tab = this.el.querySelector<HTMLElement>(`.carreau-tab[data-tab="${tabId}"]`);
+    const text = tab?.firstChild;
+    if (!tab || !text || text.nodeType !== Node.TEXT_NODE) return;
+    const input = document.createElement("input");
+    input.className = "carreau-tab-edit";
+    input.value = text.textContent ?? "";
+    input.spellcheck = false;
+    const fit = () => (input.size = Math.max(4, input.value.length + 1));
+    fit();
+    input.addEventListener("input", fit);
+    // Interacting with the field is neither a drag nor a click on the tab.
+    for (const ev of ["pointerdown", "click", "dblclick", "auxclick"])
+      input.addEventListener(ev, (e) => e.stopPropagation());
+    let done = false;
+    const finish = (commit: boolean) => {
+      if (done) return;
+      done = true;
+      const title = input.value.trim();
+      if (onCancel && (!commit || !title)) onCancel();
+      else if (commit && title && title !== text.textContent) this.ws.renameTab(tabId, title);
+      else this.ws.emit(); // re-render: back to the plain title
+    };
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        finish(true);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        finish(false);
+      }
+    });
+    input.addEventListener("blur", () => finish(true));
+    tab.replaceChild(input, text);
+    tab.scrollIntoView({ block: "nearest", inline: "nearest" });
+    input.focus();
+    input.select();
   }
 
   /** Enter or leave navigation mode (see keyboard.ts). */
@@ -752,14 +832,15 @@ export class View {
       grip.removeEventListener("pointermove", move);
       grip.removeEventListener("pointerup", up);
       clearHold();
-      this.el.classList.remove("is-moving-float");
-      el.classList.remove("docking");
+      // Final hit test and commit *while the window is still see-through*: restoring it
+      // first would make the hit test find the window itself, and nothing would dock.
       if (this.drag) {
         this.dragMove(ev);
         this.endDrag(true);
-      } else {
-        this.ws.emit();
       }
+      this.el.classList.remove("is-moving-float");
+      el.classList.remove("docking");
+      if (!this.drag) this.ws.emit();
     };
     // The hold timer only starts once the window has actually been dragged.
     grip.addEventListener("pointermove", move);
@@ -812,8 +893,8 @@ export class View {
   /** Apply selection & maximization. Pure CSS: the DOM structure is untouched. */
   decorate(): void {
     for (const sc of this.el.querySelectorAll<HTMLElement>(".carreau-tabs")) updateTabShadows(sc);
-    for (const el of this.rootEl.querySelectorAll(".max-hidden, .max-path, .selected"))
-      el.classList.remove("max-hidden", "max-path", "selected");
+    for (const el of this.rootEl.querySelectorAll(".max-hidden, .max-path, .max-through, .selected"))
+      el.classList.remove("max-hidden", "max-path", "max-through", "selected");
     this.el.classList.toggle("is-maximized", !!this.ws.maximized);
 
     const max = this.ws.maximized;
@@ -827,7 +908,12 @@ export class View {
         });
       }
       for (const n of path.slice(0, -1)) {
-        if (n.type === "pane") continue;
+        if (n.type === "pane") {
+          // A group's holder that the maximization passes through: only the maximized part
+          // of its group shows, without the holder's tabs.
+          this.elOf(n.id)?.classList.add("max-through");
+          continue;
+        }
         for (const c of n.children)
           if (!keep.has(c.id)) this.elOf(c.id)?.classList.add("max-hidden");
       }
@@ -1144,6 +1230,13 @@ export class View {
         chain.unshift(x);
         const loc = find(root, x.id)!;
         if (!loc.parent) break;
+        if (loc.parent.type === "group") {
+          // A group's root shares its edges with the pane holding the group: continue there.
+          const h = holderOf(root, loc.parent.id);
+          if (!h) break;
+          x = h.pane;
+          continue;
+        }
         if (axisOf(loc.parent.type) === axis) {
           const j = start ? loc.index - 1 : loc.index + 1;
           if (j >= 0 && j < loc.parent.children.length) {
@@ -1504,4 +1597,14 @@ function updateTabShadows(scroller: HTMLElement): void {
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
+}
+
+const WORDS = [
+  "amber", "basalt", "cedar", "delta", "ember", "fjord", "garnet", "harbor", "indigo", "juniper",
+  "kestrel", "lagoon", "meadow", "nimbus", "orchid", "pebble", "quartz", "ridge", "saffron",
+  "tundra", "umber", "willow", "zephyr", "lantern", "marble", "copper", "falcon", "maple",
+];
+
+function randomWord(): string {
+  return WORDS[Math.floor(Math.random() * WORDS.length)];
 }

@@ -2,7 +2,10 @@
 // No keyboard shortcuts live here: commands are exposed by name and the host binds them.
 
 import {
+  activeGroup,
   applyDropForest,
+  genId,
+  holderOf,
   DragSubject,
   DropTarget,
   FloatingWindow,
@@ -278,6 +281,14 @@ export class Workspace {
     this.restoreSnapshot(snap);
   }
 
+  /** Revert the latest step and forget it (it can't be redone): for cancelled operations. */
+  discardLastStep(): void {
+    const snap = this.undoStack.pop();
+    if (!snap) return;
+    this.lastKind = null;
+    this.restoreSnapshot(snap);
+  }
+
   redo(): void {
     const snap = this.redoStack.pop();
     if (!snap) return;
@@ -336,6 +347,122 @@ export class Workspace {
     return false;
   }
 
+  // -------------------------------------------------------------------------
+  // Groups
+
+  /**
+   * Group the selection into a new pane holding a single group tab named `name`. A single
+   * node goes in as is; a range is wrapped in a split of the same axis. The new pane takes
+   * the selection's place and size.
+   */
+  group(name: string, selection?: Selection): boolean {
+    return this.record(() => {
+      const sel = selection && this.node(selection.id) ? selection : this.selection;
+      const tree = this.tree();
+      const n = this.node(sel.id);
+      if (!n || n.type === "group") return false;
+      let inner: LayoutNode;
+      let place: (p: PaneNode) => void;
+      if (sel.range && n.type !== "pane") {
+        const [lo, hi] = sel.range;
+        const kids = n.children.slice(lo, hi + 1);
+        const type = axisOf(n.type) === "row" ? "row" : "column";
+        inner = { type, id: genId(type === "row" ? "r" : "c"), weight: 1, children: kids };
+        const weight = kids.reduce((s, k) => s + k.weight, 0);
+        place = (p) => {
+          p.weight = weight;
+          n.children.splice(lo, kids.length, p);
+        };
+      } else {
+        inner = n;
+        const loc = find(tree, n.id)!;
+        place = (p) => {
+          p.weight = n.weight;
+          if (loc.parent) loc.parent.children[loc.index] = p;
+          else this.replaceTreeRoot(tree, p);
+        };
+      }
+      const holder: PaneNode = {
+        type: "pane",
+        id: genId("p"),
+        weight: 1,
+        active: 0,
+        tabs: [{ id: genId("t"), title: name, group: { type: "group", id: genId("g"), weight: 1, children: [inner] } }],
+      };
+      inner.weight = 1;
+      place(holder);
+      this.normalizeAll();
+      this.selectImpl({ id: holder.id }, false);
+      this.emit();
+      return true;
+    });
+  }
+
+  /** Rename a tab (wherever it is). */
+  renameTab(tabId: string, title: string): void {
+    this.record(() => {
+      for (const t of this.trees()) {
+        const ft = findTab(t, tabId);
+        if (ft) {
+          ft.pane.tabs[ft.index].title = title;
+          this.emit();
+          return;
+        }
+      }
+    });
+  }
+
+  /** A pane can collapse if its only tab is a group. */
+  canCollapse(paneId: string): boolean {
+    const p = this.node(paneId);
+    return p?.type === "pane" && p.tabs.length === 1 && !!p.tabs[0].group?.children[0];
+  }
+
+  /**
+   * Collapse a group: replace the pane holding it (its only tab) by the group's layout.
+   * Without an argument: the selected pane if it can collapse, else the innermost group
+   * around the selection whose holder can.
+   */
+  collapse(paneId?: string): boolean {
+    return this.record(() => {
+      const target = paneId ?? this.collapsibleAroundSelection();
+      if (!target || !this.canCollapse(target)) return false;
+      const tree = this.treeOf(target)!;
+      const loc = find(tree, target)!;
+      const p = loc.node as PaneNode;
+      const inner = p.tabs[0].group!.children[0];
+      inner.weight = p.weight;
+      if (loc.parent) loc.parent.children[loc.index] = inner;
+      else this.replaceTreeRoot(tree, inner);
+      this.normalizeAll();
+      this.selectImpl({ id: this.node(inner.id) ? inner.id : this.lastPane ?? this.root.id }, false);
+      this.emit();
+      return true;
+    });
+  }
+
+  private collapsibleAroundSelection(): string | null {
+    const path = pathTo(this.tree(), this.selection.id) ?? [];
+    for (let i = path.length - 1; i >= 0; i--) {
+      const n = path[i];
+      if (n.type === "pane" && this.canCollapse(n.id)) return n.id;
+    }
+    return null;
+  }
+
+  /** Replace the root of a tree (the main one or a floating window's). */
+  private replaceTreeRoot(tree: LayoutNode, node: LayoutNode): void {
+    if (tree === this.root) this.root = node;
+    else for (const w of this.floating) if (w.root === tree) w.root = node;
+  }
+
+  private normalizeAll(): void {
+    this.root = normalize(this.root) ?? this.root;
+    this.floating = this.floating
+      .map((w) => ({ ...w, root: normalize(w.root) }))
+      .filter((w): w is FloatingWindow => !!w.root);
+  }
+
   /** All trees: the main one first, then the floating windows' (minus `exclude`). */
   trees(exclude?: FloatingWindow): LayoutNode[] {
     return [this.root, ...this.floating.filter((w) => w !== exclude).map((w) => w.root)];
@@ -391,8 +518,14 @@ export class Workspace {
   }
 
   private selectImpl(sel: Selection, emit: boolean): void {
-    const n = this.node(sel.id);
+    let n = this.node(sel.id);
     if (!n) return;
+    // Group nodes are wrappers, never selected: select their root instead.
+    if (n.type === "group") {
+      n = n.children[0];
+      if (!n) return;
+      sel = { id: n.id };
+    }
     if (sel.range && n.type !== "pane") {
       if (sel.range[0] === 0 && sel.range[1] === n.children.length - 1) sel = { id: sel.id };
     }
@@ -497,11 +630,12 @@ export class Workspace {
   goParent(): void {
     const s = this.selection;
     if (s.range) {
-      this.select({ id: s.id }, false);
+      // From a range: its split, unless that split is a group's root (then its holder).
+      this.select({ id: this.groupHolderOf(s.id)?.id ?? s.id }, false);
     } else {
-      const loc = find(this.tree(), s.id);
-      if (!loc?.parent) return;
-      this.select({ id: loc.parent.id }, false);
+      const up = this.upOf(s.id);
+      if (!up) return;
+      this.select({ id: up.id }, false);
     }
     this.widenMaximized();
     this.emit();
@@ -519,13 +653,47 @@ export class Workspace {
   goChild(): void {
     const s = this.selection;
     const n = this.node(s.id);
-    if (!n || n.type === "pane") return;
-    const [lo, hi] = s.range ?? [0, n.children.length - 1];
-    const allowed = n.children.slice(lo, hi + 1);
-    const last = this.lastChild.get(n.id);
-    const child = allowed.find((c) => c.id === last) ?? allowed[0];
+    if (!n) return;
+    let child: LayoutNode;
+    if (n.type === "pane") {
+      // Into a pane showing a group. The group's root, when a split, fills the pane's body
+      // exactly: a pointless step, skipped (go to its last-focused child).
+      const g = activeGroup(n);
+      const root = g?.children[0];
+      if (!root) return;
+      child = root.type === "pane" ? root : this.lastChildOf(root);
+    } else {
+      const [lo, hi] = s.range ?? [0, n.children.length - 1];
+      const allowed = n.children.slice(lo, hi + 1);
+      const last = this.lastChild.get(n.id);
+      child = allowed.find((c) => c.id === last) ?? allowed[0];
+    }
     this.select({ id: child.id }, false);
     this.emit();
+  }
+
+  private lastChildOf(split: SplitNode): LayoutNode {
+    const last = this.lastChild.get(split.id);
+    return split.children.find((c) => c.id === last) ?? split.children[0];
+  }
+
+  /** If `id` is a group's root, the pane holding the group. */
+  private groupHolderOf(id: string): PaneNode | null {
+    const tree = this.tree();
+    const loc = find(tree, id);
+    return loc?.parent?.type === "group" ? (holderOf(tree, loc.parent.id)?.pane ?? null) : null;
+  }
+
+  /**
+   * The node above `id` for navigation. Above a group's root is the pane holding the group;
+   * a group's root that is a split is skipped (it is the same area as its holder's body).
+   */
+  private upOf(id: string): LayoutNode | null {
+    const tree = this.tree();
+    const loc = find(tree, id);
+    if (!loc?.parent) return null;
+    if (loc.parent.type === "group") return holderOf(tree, loc.parent.id)?.pane ?? null;
+    return this.groupHolderOf(loc.parent.id) ?? loc.parent;
   }
 
   /**
@@ -611,7 +779,10 @@ export class Workspace {
       const center = horizontal ? S.y + S.h / 2 : S.x + S.w / 2;
       let best: { id: string; score: number } | null = null;
       for (const p of panes(this.tree())) {
-        const r = rects.get(p.id)!;
+        const r = rects.get(p.id);
+        // Hidden panes (in inactive group tabs) have no rect; a pane showing a group acts as
+        // a container: its group's panes are the targets.
+        if (!r || activeGroup(p)) continue;
         if (!adjacent(r)) continue;
         const ov = overlap(r);
         if (ov <= EPS) continue;
@@ -745,3 +916,4 @@ export class Workspace {
     if (!inside) this.maximized = { ...this.selection };
   }
 }
+

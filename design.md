@@ -39,7 +39,8 @@ The prototype consists of:
 All state is plain JSON-serializable data:
 
 ```ts
-type Tab = { id: string; title: string; content?: string; data?: Record<string, unknown> };
+type Tab = { id: string; title: string; content?: string; data?: Record<string, unknown>; group?: GroupNode };
+type GroupNode = { type: "group"; id: string; weight: number; children: [Node] };  // a group tab's layout
 type Pane = { type: "pane"; id: string; weight: number; tabs: Tab[]; active: number };
 type Split = { type: "row" | "column" | "scroll-row" | "scroll-column"; id: string; weight: number; children: Node[] };
 type Node = Pane | Split;
@@ -151,6 +152,8 @@ All keyboard navigation happens in a **navigation mode**:
   | P / C | parent / child |
   | R | root |
   | Z / Shift+Z | undo / redo |
+  | G / Shift+G | group (then edit its name in place) / collapse group |
+  | % (Shift+5) | edit the selected tab's title in place |
   | ] / [ | next / previous tab |
   | M | toggle maximize |
   | F | float |
@@ -414,6 +417,54 @@ On top of the indicators, draw the drop area as a faint translucent fill with a 
 * `float`: outline where the window will appear, the same rect the menu's Float uses. On commit, add the window with that rect.
 
 
+## Group tabs
+
+A tab can hold **a whole layout** instead of content. The pane holding it then switches between that layout (when the group tab is active) and its other tabs. Both kinds of tab live in the same tab bar, so tabs can be dragged in and out as usual.
+
+* **Representation.** `tab.group` is a wrapper node of type `"group"` with exactly one child, the layout's root.
+  * Tree walks (`walk`, `find`, `pathTo`, `panes`, `findTab`) descend from a pane into its tabs' group nodes. A group node has no split parent; its child's parent is the group node.
+  * Drops, swaps, floating, undo and normalization therefore work inside groups unchanged.
+  * `axisOf("group")` is null, so nothing is ever inserted as a sibling of a group's root. `insertBeside` wraps it instead, and a group's root never forms a "between" with anything.
+  * Removing a group's root (dragging its last pane out, a tombstone) empties the group node.
+  * Normalization normalizes each group's layout separately. **A group left empty disappears together with its tab**, and the group node itself never collapses.
+  * `shape` includes groups' layouts.
+  * Deserialization validates them.
+* **Cycles.** A drop must never put something inside itself. If the dragged tab carries a group, or the dragged pane has group tabs, and the target lies inside one of those groups, the drop is invalid.
+* **Grouping** (`group(name)`; demo: **G** in navigation mode):
+  * The selection becomes a new **holder pane** with a single group tab named `name`.
+  * A single node (pane or split) goes in as is. A range is wrapped in a plain split of the same axis.
+  * The holder takes the selection's place and weight; on a tree root, it becomes the root. Then normalize and select the holder.
+  * G groups **immediately** under a random word, then puts the new group tab's title into **in-place editing**.
+  * Naming is part of grouping: **Escape, or confirming an empty name, cancels the grouping itself**. The step is reverted and *discarded* from the undo history (`discardLastStep`: restore without pushing onto the redo stack), so it can't be redone. The original selection comes back.
+  * For a plain rename, by contrast, Escape or an empty name just keep the current title.
+* **Editing a tab's title in place** (`renameTab`; demo: **%**, i.e. Shift+5 on a US layout, renames the selected pane's active tab).
+  * The tab's text node is replaced by a small text field, sized to its content, with the text selected.
+  * Enter, or leaving the field, confirms; Escape keeps the current title.
+  * The field stops pointer events (pointerdown, click, double-click, auxclick) from reaching the tab, so it's neither a drag nor an activation.
+  * Confirming renames through the workspace, which re-renders the tab. A rename is a layout change, hence an undo step of its own, separate from the grouping.
+  * The keyboard controller ignores keys typed in text fields, so typing the name isn't navigation, even in sticky mode.
+* **Collapsing** (`collapse(paneId?)`; demo: **Shift+G**, and **"Collapse group"** in the ⋯ menu) is possible when a pane's **only** tab is a group. It replaces the pane by the group's layout, with the pane's weight, then normalizes.
+  * Without an argument, it acts on the selected pane if it can collapse; otherwise on the innermost holder around the selection that can.
+* Group and collapse are layout changes, hence undoable.
+* **Rendering.**
+  * A pane's body renders **every** group tab's layout in its own container, hiding the inactive ones (`hidden`). Inactive groups' panes thus stay in the document, and the tab contents inside them (iframes) survive tab switches.
+  * `placeContents` skips group tabs, since they have no content element.
+  * Pitfall: **a group's layout inherits its holder's natural-size context.** Inside a scroll split, the holder sizes to its content, so the group's parts must size to theirs (`flex: none` along that axis, with the group container laid out along it). With weights, they would share an indefinite size and collapse to nothing.
+  * A group's layout fills its holder's body entirely: no padding, no margin. Its background is **lighter than the normal gaps**, so the group is visible through the gaps between its parts.
+  * Group tabs are marked with a small ▦ before their title.
+* **Logical geometry**: `computeRects` gives the active group's layout the holder pane's rect. Inactive groups get no rects.
+* **Navigation**:
+  * Candidate panes for focus must have a rect, which excludes panes in inactive groups. A pane *showing* a group is skipped too: it acts as a container, and its group's panes are the targets.
+  * **child** of a pane showing a group goes to the group's root. **parent** of a group's root goes to the holder pane.
+  * **A group's root split is skipped.** When a group's root is a split, it fills its holder's body exactly, so it isn't a navigation step.
+    * **child** of the holder goes straight to that split's last-focused child.
+    * **parent** from one of the split's children, from a range in it, or from the split itself goes straight to the holder.
+    * When the group's root is a single pane, it is the holder's child as usual.
+    * The holder itself is always a step: its tab bar switches between the group and any other tabs.
+  * A group node is never selected; selecting one selects its root.
+  * Maximization works through groups, since `pathTo` descends into them. When the maximization passes **through** a holder (the maximized node is inside its group), the holder's tab bar and outline are hidden, so only the maximized part shows. Maximizing the holder itself keeps its tabs.
+* **Drop lines**: when a chain walking up reaches a group's root, it continues from the **holder pane**, because they share their edges. Lines from inside a group can thus also insert beside the holder and further out.
+
 ## Floating windows
 
 A floating window holds **a whole layout tree**, so everything that works in the main tree works inside it: splitting it at its edges, tab bars, thirds, swap, between-siblings lines and splitters. Things move freely between the main tree and windows (see [Drop targets](#drop-targets-model)).
@@ -438,6 +489,7 @@ A floating window holds **a whole layout tree**, so everything that works in the
   * The timer does not start on a mere press of the bar.
   * While docking, the window turns translucent with `pointer-events: none`, so hit-testing sees through it, including to other windows. It keeps following the cursor (still clamped), and the regular drop UI appears.
 * **Releasing** on an active choice docks the window's **whole tree** as an `external` subject, with the window itself excluded from the drop. Releasing anywhere else, or after Esc, leaves the window floating.
+  * Pitfall: on release, run the final hit test and commit **before** making the window opaque and hit-testable again. Otherwise the hit test finds the window itself, and nothing docks.
 
 
 ## Tab contents and embeds (iframes)

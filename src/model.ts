@@ -7,10 +7,14 @@ export type Orientation = "row" | "column";
  * each child take its natural size along the axis and scroll when the content overflows.
  * Scroll splits are never created by moving things around; only by building the layout.
  */
-export type SplitType = Orientation | "scroll-row" | "scroll-column";
+export type SplitType = Orientation | "scroll-row" | "scroll-column" | "group";
 
-/** The axis along which a split lays out its children. */
-export function axisOf(type: SplitType): Orientation {
+/**
+ * The axis along which a split lays out its children. A "group" node (the wrapper around a
+ * group tab's layout, see Tab.group) has no axis: nothing is ever inserted beside its child.
+ */
+export function axisOf(type: SplitType): Orientation | null {
+  if (type === "group") return null;
   return type === "row" || type === "scroll-row" ? "row" : "column";
 }
 
@@ -25,6 +29,12 @@ export interface Tab {
   content?: string;
   /** Arbitrary serializable data for the host app (e.g. what to embed). */
   data?: Record<string, unknown>;
+  /**
+   * A group tab holds a whole layout instead of content: a node of type "group" whose single
+   * child is the layout's root. Tree walks descend into it, so everything that works in a
+   * layout (drops, swaps, navigation...) works inside groups too.
+   */
+  group?: SplitNode;
 }
 
 export interface PaneNode {
@@ -127,7 +137,13 @@ function validate(n: any): void {
   if (n.type === "pane") {
     if (!Array.isArray(n.tabs)) throw new Error("Pane without tabs");
     n.active = Math.max(0, Math.min(n.active ?? 0, n.tabs.length - 1));
-  } else if (["row", "column", "scroll-row", "scroll-column"].includes(n.type)) {
+    for (const t of n.tabs) {
+      if (!t.group) continue;
+      if (t.group.type !== "group" || !Array.isArray(t.group.children) || t.group.children.length !== 1)
+        throw new Error("A group tab must hold a group node with one child");
+      validate(t.group);
+    }
+  } else if (["row", "column", "scroll-row", "scroll-column", "group"].includes(n.type)) {
     if (!Array.isArray(n.children)) throw new Error("Split without children");
     n.children.forEach(validate);
   } else {
@@ -158,7 +174,24 @@ export function* walk(
     for (let i = 0; i < node.children.length; i++) {
       yield* walk(node.children[i], node, i);
     }
+  } else {
+    // Group tabs: their group node is reached from the pane (with no split parent).
+    for (const t of node.tabs) if (t.group) yield* walk(t.group, null, 0);
   }
+}
+
+/** The pane holding a group node (as the `group` of one of its tabs). */
+export function holderOf(root: LayoutNode, groupId: string): { pane: PaneNode; index: number } | null {
+  for (const p of panes(root)) {
+    const i = p.tabs.findIndex((t) => t.group?.id === groupId);
+    if (i >= 0) return { pane: p, index: i };
+  }
+  return null;
+}
+
+/** The active group tab's group node, if a pane is showing a group. */
+export function activeGroup(p: PaneNode): SplitNode | null {
+  return p.tabs[p.active]?.group ?? null;
 }
 
 export function find(root: LayoutNode, id: string): Located | null {
@@ -169,8 +202,8 @@ export function find(root: LayoutNode, id: string): Located | null {
 /** Path of nodes from the root to the node with the given id (inclusive). */
 export function pathTo(root: LayoutNode, id: string): LayoutNode[] | null {
   if (root.id === id) return [root];
-  if (root.type === "pane") return null;
-  for (const c of root.children) {
+  const children = root.type === "pane" ? root.tabs.flatMap((t) => (t.group ? [t.group] : [])) : root.children;
+  for (const c of children) {
     const p = pathTo(c, id);
     if (p) return [root, ...p];
   }
@@ -196,7 +229,13 @@ export function computeRects(
   out = new Map<string, Rect>(),
 ): Map<string, Rect> {
   out.set(root.id, frame);
-  if (root.type === "pane") return out;
+  if (root.type === "pane") {
+    // A pane showing a group: the group's layout takes the pane's place (inactive groups
+    // are hidden and get no rects).
+    const g = activeGroup(root);
+    if (g?.children[0]) computeRects(g.children[0], frame, out);
+    return out;
+  }
   const total = root.children.reduce((s, c) => s + c.weight, 0) || 1;
   let offset = 0;
   for (const c of root.children) {
@@ -305,6 +344,17 @@ export function removeNode(root: LayoutNode, id: string): LayoutNode | null {
  */
 export function normalize(node: LayoutNode): LayoutNode | null {
   if (node.type === "pane") {
+    // Group tabs: normalize their layout; a group left empty disappears with its tab.
+    node.tabs = node.tabs.filter((t, i) => {
+      if (!t.group) return true;
+      const inner = t.group.children[0] ? normalize(t.group.children[0]) : null;
+      if (inner) {
+        t.group.children = [inner];
+        return true;
+      }
+      if (i < node.active) node.active--;
+      return false;
+    });
     if (node.tabs.length === 0) return null;
     node.active = Math.max(0, Math.min(node.active, node.tabs.length - 1));
     return node;
@@ -443,16 +493,39 @@ function normalizeForest(forest: SplitNode): void {
 
 /** Structure of a layout, ignoring ids and sizes: nesting, orientation, tabs in each pane. */
 export function shape(node: LayoutNode): string {
-  if (node.type === "pane") return `[${node.tabs.map((t) => t.id).join(",")}]`;
+  if (node.type === "pane")
+    return `[${node.tabs.map((t) => (t.group ? `${t.id}{${t.group.children.map(shape).join(" ")}}` : t.id)).join(",")}]`;
   return `${node.type}(${node.children.map(shape).join(" ")})`;
 }
 
 /** Works on the forest in place. Returns where the dragged thing went, or null. */
+/** Ids of the nodes a drop target refers to. */
+function targetIds(t: DropTarget): string[] {
+  return t.kind === "side" ? [t.targetId] : t.kind === "between" ? [t.splitId] : [t.paneId];
+}
+
+/**
+ * Whether a drop would put something inside itself: the target lies in a group carried by
+ * the dragged tab, or by one of the dragged pane's tabs.
+ */
+function wouldNestInItself(root: SplitNode, subject: DragSubject, target: DropTarget): boolean {
+  let groups: SplitNode[] = [];
+  if (subject.kind === "tab") {
+    const g = findTab(root, subject.tabId)?.pane.tabs.find((t) => t.id === subject.tabId)?.group;
+    if (g) groups = [g];
+  } else if (subject.kind === "pane") {
+    const p = find(root, subject.paneId)?.node;
+    if (p?.type === "pane") groups = p.tabs.flatMap((t) => (t.group ? [t.group] : []));
+  }
+  return groups.some((g) => targetIds(target).some((id) => find(g, id)));
+}
+
 function applyDropRaw(
   root: SplitNode,
   subject: DragSubject,
   target: DropTarget,
 ): { paneId: string; floated?: PaneNode } | null {
+  if (wouldNestInItself(root, subject, target)) return null;
   if (target.kind === "float") {
     if (subject.kind === "external") return null;
     const loc = find(root, target.paneId);

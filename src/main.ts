@@ -35,6 +35,9 @@ const navConfig: NavConfig = {
     BracketLeft: "prevTab",
     KeyM: "toggleMaximize",
     KeyF: "float",
+    KeyG: "group",
+    "Shift+KeyG": "collapse",
+    "Shift+Digit5": "renameTab", // % on a US layout
     KeyZ: "undo",
     "Shift+KeyZ": "redo",
     KeyW: "closeTab",
@@ -106,7 +109,16 @@ const nav = new KeyboardNav(ws, view, navConfig);
 
 // Help & serialization panel
 const help = document.querySelector("#keys")!;
-const label = (k: string) => k.replace(/Key|Arrow|Bracket/g, "").replace("Right", "→").replace("Left", "←").replace("Up", "↑").replace("Down", "↓");
+const label = (k: string) =>
+  k
+    .replace("BracketRight", "]")
+    .replace("BracketLeft", "[")
+    .replace("Shift+Digit5", "%")
+    .replace(/Key|Arrow/g, "")
+    .replace("Right", "→")
+    .replace("Left", "←")
+    .replace("Up", "↑")
+    .replace("Down", "↓");
 const legend: [string, string][] = [
   ["Alt+Q", "navigation mode (hold Alt)"],
   ["Alt+Q Q", "sticky navigation mode (Q / Esc to leave)"],

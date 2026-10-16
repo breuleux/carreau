@@ -179,3 +179,26 @@ kbd { background: #3c3f4b; border-radius: 3px; padding: 0 4px; font-size: 11px; 
 .carreau.nav-mode .carreau-selection { outline: 1px solid #d6d8de; }
 .carreau.nav-mode iframe { pointer-events: none; }
 .carreau.nav-mode .carreau-pane, .carreau.nav-mode .carreau-float { cursor: grab; }
+
+/* group tabs: a whole layout inside a pane */
+/* A group fills its holder's body entirely; its background is lighter than the normal gaps,
+   so the group shows through the gaps between its parts. */
+.carreau-body.shows-group { padding: 0; background: #3f4250; }
+.carreau-group { flex: 1; display: flex; min-width: 0; min-height: 0; background: #3f4250; }
+.carreau-group[hidden] { display: none; }
+.carreau-group > * { flex: 1 1 0 !important; }
+.carreau-tab.is-group::before { content: "▦"; font-size: 11px; opacity: 0.7; margin-right: -2px; }
+
+/* editing a tab's title in place */
+.carreau-tab-edit {
+  font: inherit; color: #eee; background: #15161b; border: 1px solid #5a5f78; border-radius: 3px;
+  padding: 0 4px; margin: 0; height: 18px; outline: none;
+}
+/* maximizing something inside a group: the holder's tabs and outline go away */
+.carreau-pane.max-through { border: 0; border-radius: 0; background: transparent; }
+.carreau-pane.max-through > .carreau-tabbar { display: none; }
+.carreau-pane.max-through > .carreau-body { background: transparent; }
+/* a group inside a scroll split: its root sizes to its content along the scroll axis */
+.carreau-group.natural-row > * { flex: none !important; }
+.carreau-group.natural-column { flex-direction: column; }
+.carreau-group.natural-column > * { flex: none !important; }
