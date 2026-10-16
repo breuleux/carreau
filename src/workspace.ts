@@ -408,7 +408,9 @@ export class Workspace {
       for (const t of this.trees()) {
         const ft = findTab(t, tabId);
         if (ft) {
+          // The new name replaces both the plain title and any HTML `short`.
           ft.pane.tabs[ft.index].title = title;
+          delete ft.pane.tabs[ft.index].short;
           this.emit();
           return;
         }

@@ -39,7 +39,13 @@ The prototype consists of:
 All state is plain JSON-serializable data:
 
 ```ts
-type Tab = { id: string; title: string; content?: string; data?: Record<string, unknown>; group?: GroupNode };
+type Tab = {                       // a "cell", shown as a tab
+  id: string; title: string;       // title: plain-text name (drag label; fallback for `short`)
+  icon?: string; short?: string; long?: string;   // HTML parts (content is rendered by the host)
+  accent?: string;                 // CSS color; default: derived from the id
+  status?: "done" | "error" | "unresponsive" | string;
+  content?: string; data?: Record<string, unknown>; group?: GroupNode;
+};
 type GroupNode = { type: "group"; id: string; weight: number; children: [Node] };  // a group tab's layout
 type Pane = { type: "pane"; id: string; weight: number; tabs: Tab[]; active: number };
 type Split = { type: "row" | "column" | "scroll-row" | "scroll-column"; id: string; weight: number; children: Node[] };
@@ -410,7 +416,7 @@ The hovered pane also offers its own zones, laid out on a 3×3 grid of its *visi
   * In corners, pick the side whose boundary is nearer, using normalized distance.
   * Sides where that drop is a no-op propose nothing.
 * **Center third:** shows an icon in the middle of the pane, a grey circle of radius 22. The choice is active only while the cursor is over the icon; the rest of the center proposes nothing.
-  * Over another pane, it is a **swap icon** (two opposed arrows), for `swap`.
+  * Over another pane, it is a **swap icon** (two opposed arrows), for `swap`. If that pane's tab bar is hidden (a single cell), a **tab icon** (a small folder-like tab) sits next to it, for a `tab` target appending to the pane. Several icons are laid out side by side, centered.
   * Over the dragged thing's own pane, it is a **cloud icon** (three overlapping circles over a flat base), for `float`.
 
 **Priority**, from highest: the border line under the cursor, then the tab bar (nearest gap), then the thirds and center. The border line matters most at the bottom border, where the header is.
@@ -425,6 +431,29 @@ On top of the indicators, draw the drop area as a faint translucent fill with a 
 * `swap`: outline both panes that trade contents, the target and the dragged item's pane.
 * `float`: outline where the window will appear, the same rect the menu's Float uses. On commit, add the window with that rect.
 
+
+## Cells
+
+Tabs are **cells**. A cell has HTML parts (**content**, rendered by the host; **icon**; **short**; **long**) and properties (**accent**, **status**). `long` is typically the shell command that created the cell, or the prompt it is the result of.
+
+* **A tab shows `[icon][short][×]`.**
+  * `short` defaults to `title`, as text.
+  * A group tab's default icon is ▦.
+  * Renaming a tab sets `title` and drops `short`.
+* **Status** changes how the icon looks:
+  * `"done"`: 50% opacity;
+  * `"error"`: tinted red;
+  * `"unresponsive"`: blinking between normal and done;
+  * anything else: normal.
+* **Accent**: the cell's `accent`, or a color derived from its id. It colors the selected tab's line, the `long` strip, and a cell's focus border.
+* **Display options per pane, automatic, by location:**
+  * **Panes in a scroll split** (any natural-size context) have `showSingleTab = false` and `showLong = true`.
+  * **Everywhere else**, `showSingleTab = true` and `showLong = false`.
+  * `showSingleTab = false`: with a single tab, the tab bar is hidden. Exception: **a pane whose only tab is a group always shows its tab bar**, since a group is a container whose name matters (and it must be editable in place right after grouping).
+  * `showLong = true`: the active cell's `long` is shown in a strip at the top of the cell. Its background is tinted from the accent by default; the host's HTML can style it otherwise.
+* **Handles.** With no tab bar, the top strip is the pane's handle: drag it to move the pane. A cell with no tab bar and no `long` gets an empty, slim strip just to have one. Focus is shown by the cell's border, in its accent.
+* **Adding a tab to a pane with no tab bar.** There are no tab bar dots to drop on, so the center of such a pane offers a **tab icon** next to the swap icon, as a `tab` target appending to it. Its preview outlines the pane.
+* **Nested panes and presses.** Panes nest, inside group tabs. A pane's "select on press" handler must only act when it is the **innermost** pane under the pointer; the press bubbles through the holders too, and the outermost would win otherwise.
 
 ## Group tabs
 

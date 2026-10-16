@@ -23,9 +23,22 @@ export function isScroll(type: SplitType | "pane"): boolean {
 }
 export type Side = "left" | "right" | "top" | "bottom";
 
+/**
+ * A cell, shown as a tab. HTML parts: `content` (rendered by the host), `icon`, `short`
+ * (shown in the tab; defaults to `title` as text) and `long` (shown at the top of the cell
+ * in panes that show it, e.g. the shell command or prompt that created the cell).
+ * Properties: `accent` (a CSS color) and `status`, which changes how the icon looks
+ * ("done": faded, "error": red, "unresponsive": blinking; anything else: normal).
+ */
 export interface Tab {
   id: string;
+  /** Plain-text name (also used where HTML can't be, e.g. the drag label). */
   title: string;
+  icon?: string;
+  short?: string;
+  long?: string;
+  accent?: string;
+  status?: "done" | "error" | "unresponsive" | string;
   content?: string;
   /** Arbitrary serializable data for the host app (e.g. what to embed). */
   data?: Record<string, unknown>;

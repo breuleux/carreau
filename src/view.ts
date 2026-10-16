@@ -39,6 +39,11 @@ const SIDES: Side[] = ["left", "right", "top", "bottom"];
 
 const TAB_HUES = [25, 70, 145, 195, 240, 285, 330];
 
+/** A cell's accent: its own, or one derived from its id. */
+export function cellAccent(t: { id: string; accent?: string }): string {
+  return t.accent ?? tabColor(t.id);
+}
+
 /** A tab's accent color, derived from its id (several tabs may share one). */
 export function tabColor(tabId: string): string {
   let h = 0;
@@ -118,7 +123,7 @@ interface Zones {
    * The center icon, shown when in the center third and active over the icon: swap contents
    * with the pane, or (over the dragged thing's own pane) float it.
    */
-  center: { kind: "swap" | "float"; choice: Choice; cx: number; cy: number; r: number } | null;
+  centers: { kind: "swap" | "float" | "tab"; choice: Choice; cx: number; cy: number; r: number }[];
 }
 
 /** Docking a floating window: hold it still this long (ms), within this many pixels. */
@@ -367,7 +372,7 @@ export class View {
           el = document.createElement("div");
           el.className = "carreau-content";
           el.dataset.tab = tab.id;
-          el.style.setProperty("--accent", tabColor(tab.id));
+          el.style.setProperty("--accent", cellAccent(tab));
           const c = this.opts.renderTab(tab, p);
           if (typeof c === "string") el.textContent = c;
           else el.append(c);
@@ -411,9 +416,37 @@ export class View {
     el.style.flex = sizedByContent ? "none" : `${node.weight} 1 0`;
     if (node.type === "pane") {
       el.className = "carreau-pane";
-      el.append(this.renderTabBar(node, inFloat));
+      // Display options, automatic: panes in a scroll split are "cells" (no tab bar for a
+      // single tab; the active cell's `long` shown at the top); elsewhere, the opposite.
+      const inScroll = natural.row || natural.column;
+      const showSingleTab = !inScroll;
+      const showLong = inScroll;
+      const tabBar = this.renderTabBar(node, inFloat);
+      // (A group tab always shows: it's a container, whose name matters.)
+      if (!showSingleTab && node.tabs.length === 1 && !node.tabs[0].group) {
+        tabBar.hidden = true;
+        el.classList.add("no-tabbar");
+      }
+      el.append(tabBar);
       const body = document.createElement("div");
       body.className = "carreau-body";
+      const activeTab = node.tabs[node.active];
+      if (activeTab) el.style.setProperty("--focus-accent", cellAccent(activeTab));
+      // A cell with neither a tab bar nor a `long` still needs a handle: an empty strip.
+      const needsHandle = el.classList.contains("no-tabbar");
+      if (activeTab && ((showLong && activeTab.long) || needsHandle)) {
+        const long = document.createElement("div");
+        long.className = "carreau-long";
+        if (showLong && activeTab.long) long.innerHTML = activeTab.long;
+        else long.classList.add("empty");
+        long.style.setProperty("--cell-accent", cellAccent(activeTab));
+        // With no tab bar, this strip is how the pane is moved around.
+        long.title = "Drag to move this pane";
+        long.addEventListener("pointerdown", (e) =>
+          this.armDrag(e, { kind: "pane", paneId: node.id }, activeTab.title, el),
+        );
+        body.append(long);
+      }
       // Group tabs show a whole layout. All of them are rendered (inactive ones hidden), so
       // that the tab contents inside them stay in the document. Other tabs' contents are
       // placed by placeContents() once the tree is attached.
@@ -438,6 +471,9 @@ export class View {
         // Primary button only: selecting re-renders, which would replace the element under a
         // middle click before its auxclick fires.
         if (e.button !== 0) return;
+        // Panes nest (group tabs): only the innermost pane under the pointer is selected
+        // (the press bubbles through the holders too).
+        if ((e.target as HTMLElement).closest(".carreau-pane") !== el) return;
         if (this.ws.selection.id !== node.id) this.ws.select({ id: node.id });
       });
       return el;
@@ -493,9 +529,22 @@ export class View {
       const tab = document.createElement("div");
       tab.className = "carreau-tab" + (i === node.active ? " active" : "");
       tab.dataset.tab = t.id;
-      tab.textContent = t.title;
+      // [icon][short][×]. The status changes how the icon looks (see the CSS).
+      const icon = t.icon ?? (t.group ? "▦" : null);
+      if (icon) {
+        const i = document.createElement("span");
+        i.className = "carreau-tab-icon";
+        i.innerHTML = icon;
+        tab.append(i);
+      }
+      const short = document.createElement("span");
+      short.className = "carreau-tab-short";
+      if (t.short) short.innerHTML = t.short;
+      else short.textContent = t.title;
+      tab.append(short);
       if (t.group) tab.classList.add("is-group");
-      tab.style.setProperty("--tab-accent", tabColor(t.id));
+      if (t.status) tab.classList.add(`status-${t.status}`);
+      tab.style.setProperty("--tab-accent", cellAccent(t));
       // Close button (the × is drawn in CSS, so the tab's text stays its title). The very last
       // tab of the main tree can't be closed.
       if (this.ws.canCloseTab(t.id)) {
@@ -608,11 +657,14 @@ export class View {
    */
   editTabTitle(tabId: string, onCancel?: () => void): void {
     const tab = this.el.querySelector<HTMLElement>(`.carreau-tab[data-tab="${tabId}"]`);
-    const text = tab?.firstChild;
-    if (!tab || !text || text.nodeType !== Node.TEXT_NODE) return;
+    const text = tab?.querySelector<HTMLElement>(".carreau-tab-short");
+    // (A hidden tab bar, as for a single cell in a scroll split, has nothing to edit: the
+    // name stays as it is.)
+    if (!tab || !text || !tab.getClientRects().length) return;
     const input = document.createElement("input");
     input.className = "carreau-tab-edit";
     input.value = text.textContent ?? "";
+    const before = input.value;
     input.spellcheck = false;
     const fit = () => (input.size = Math.max(4, input.value.length + 1));
     fit();
@@ -626,7 +678,7 @@ export class View {
       done = true;
       const title = input.value.trim();
       if (onCancel && (!commit || !title)) onCancel();
-      else if (commit && title && title !== text.textContent) this.ws.renameTab(tabId, title);
+      else if (commit && title && title !== before) this.ws.renameTab(tabId, title);
       else this.ws.emit(); // re-render: back to the plain title
     };
     input.addEventListener("keydown", (e) => {
@@ -1111,7 +1163,8 @@ export class View {
           d.active = Z.sides[cands[0][0]] ?? null;
         } else {
           d.inCenter = true;
-          if (Z.center && Math.hypot(px - Z.center.cx, py - Z.center.cy) <= Z.center.r) d.active = Z.center.choice;
+          const hit = Z.centers.find((c) => Math.hypot(px - c.cx, py - c.cy) <= c.r);
+          if (hit) d.active = hit.choice;
         }
       }
     }
@@ -1193,17 +1246,35 @@ export class View {
       const result = this.tryDrop(subject, target);
       if (result) sides[side] = { target, result, ownerId: paneId, span: [0, 0] };
     }
-    // Over its own pane, the center floats the dragged thing; elsewhere it swaps.
+    // Center icons. Over its own pane: float the dragged thing. Elsewhere: swap, plus, for a
+    // pane whose tab bar is hidden (a single cell), a tab icon to add the dragged thing as a
+    // tab (there are no tab bar dots to drop on).
     const own =
       (subject.kind === "pane" && subject.paneId === paneId) ||
       (subject.kind === "tab" && findTab(root, subject.tabId)?.pane.id === paneId);
-    const kind = own ? "float" : "swap";
-    const target: DropTarget = { kind, paneId };
-    const result = this.tryDrop(subject, target);
-    const center = result
-      ? { kind, choice: { target, result, ownerId: paneId, span: [0, 0] as [number, number] }, cx: rect.x + rect.w / 2, cy: rect.y + rect.h / 2, r: SWAP_R } as Zones["center"]
-      : null;
-    return { rect, sides, center };
+    const node = find(root, paneId)?.node as PaneNode | undefined;
+    const wanted: { kind: "swap" | "float" | "tab"; target: DropTarget }[] = own
+      ? [{ kind: "float", target: { kind: "float", paneId } }]
+      : [
+          { kind: "swap", target: { kind: "swap", paneId } },
+          ...(this.elOf(paneId)?.classList.contains("no-tabbar") && node
+            ? [{ kind: "tab" as const, target: { kind: "tab", paneId, index: node.tabs.length } as DropTarget }]
+            : []),
+        ];
+    const valid = wanted.flatMap((w) => {
+      const result = this.tryDrop(subject, w.target);
+      return result ? [{ ...w, result }] : [];
+    });
+    const step = SWAP_R * 2 + 12;
+    const x0 = rect.x + rect.w / 2 - ((valid.length - 1) * step) / 2;
+    const centers = valid.map((w, i) => ({
+      kind: w.kind,
+      choice: { target: w.target, result: w.result, ownerId: paneId, span: [0, 0] as [number, number] },
+      cx: x0 + i * step,
+      cy: rect.y + rect.h / 2,
+      r: SWAP_R,
+    }));
+    return { rect, sides, centers };
   }
 
   /**
@@ -1375,7 +1446,11 @@ export class View {
     if (d.active) {
       const t = d.active.target;
       let r: Rect | null = null;
-      if (t.kind === "tab" || t.kind === "swap") r = null; // dot / swap outlines are the preview
+      if (t.kind === "tab") {
+        // Into a tab bar: the highlighted dot is the preview. Into a pane with no tab bar
+        // (via the center tab icon): outline the pane.
+        r = this.elOf(t.paneId)?.classList.contains("no-tabbar") ? this.visRect(t.paneId) : null;
+      } else if (t.kind === "swap") r = null; // swap outlines both panes, below
       else if (t.kind === "float") r = this.floatRect(t.paneId); // where the window will appear
       else if (t.kind === "side") {
         r = this.pxRect(t.targetId);
@@ -1401,7 +1476,8 @@ export class View {
       }
       // Clip to what is visible of the nodes involved.
       if (t.kind !== "float") {
-        const clipId = t.kind === "side" ? t.targetId : t.kind === "between" ? t.splitId : null;
+        const clipId =
+          t.kind === "side" ? t.targetId : t.kind === "between" ? t.splitId : t.kind === "tab" ? t.paneId : null;
         const clipR = clipId ? this.visRect(clipId) : null;
         r = r && clipR ? intersect(r, clipR) : null;
       }
@@ -1437,9 +1513,8 @@ export class View {
             });
       }
     }
-    // Center icon (swap, or float over its own pane), while in the center third of a pane.
-    if (d.inCenter && d.zones?.center) {
-      const { cx, cy, r, choice, kind } = d.zones.center;
+    // Center icons (swap and tab, or float over its own pane), in the center third of a pane.
+    for (const { cx, cy, r, choice, kind } of d.inCenter ? (d.zones?.centers ?? []) : []) {
       const active = d.active === choice;
       const g = mk("g", { class: "carreau-indicator carreau-swap" + (active ? " active" : "") });
       mk("circle", {
@@ -1452,7 +1527,15 @@ export class View {
         for (const [x, y, rr] of [[-6, 2, 5.5], [1, -3, 7.5], [8, 2, 5.5]] as const)
           mk("circle", { cx: cx + x, cy: cy + y, r: rr, fill: "#111" }, g);
         mk("rect", { x: cx - 6, y: cy + 2, width: 14, height: 5.5, fill: "#111" }, g);
-        return;
+        continue;
+      }
+      if (kind === "tab") {
+        // A tab: a small folder-like outline (a raised tab over a body).
+        mk("path", {
+          d: `M ${cx - 10} ${cy + 8} V ${cy - 4} H ${cx - 6} V ${cy - 8} H ${cx + 2} V ${cy - 4} H ${cx + 10} V ${cy + 8} Z`,
+          stroke: "#111", "stroke-width": 2.2, fill: "none", "stroke-linejoin": "round",
+        }, g);
+        continue;
       }
       // Two opposed arrows.
       const a = r * 0.5;

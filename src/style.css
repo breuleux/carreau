@@ -187,7 +187,24 @@ kbd { background: #3c3f4b; border-radius: 3px; padding: 0 4px; font-size: 11px; 
 .carreau-group { flex: 1; display: flex; min-width: 0; min-height: 0; background: #3f4250; }
 .carreau-group[hidden] { display: none; }
 .carreau-group > * { flex: 1 1 0 !important; }
-.carreau-tab.is-group::before { content: "▦"; font-size: 11px; opacity: 0.7; margin-right: -2px; }
+/* cells: [icon][short][×]; the status changes the icon */
+.carreau-tab-icon { display: inline-flex; align-items: center; font-size: 12px; line-height: 1; }
+.carreau-tab-icon > img, .carreau-tab-icon > svg { width: 14px; height: 14px; }
+.carreau-tab.status-done .carreau-tab-icon { opacity: 0.5; }
+.carreau-tab.status-error .carreau-tab-icon {
+  color: #f0524f; filter: brightness(0.75) sepia(1) saturate(9) hue-rotate(-38deg);
+}
+.carreau-tab.status-unresponsive .carreau-tab-icon { animation: carreau-unresponsive 1.1s steps(1, end) infinite; }
+@keyframes carreau-unresponsive { 50% { opacity: 0.5; } }
+/* a cell's "long" (e.g. the command or prompt behind it), at the top, tinted by its accent */
+.carreau-long {
+  margin: -10px -10px 10px; padding: 6px 10px; flex: none; cursor: grab;
+  font: 12px ui-monospace, monospace; color: #d7d9de; white-space: pre-wrap; overflow-wrap: anywhere;
+  background: color-mix(in oklch, var(--cell-accent) 24%, #191a20);
+  border-bottom: 1px solid color-mix(in oklch, var(--cell-accent) 40%, #191a20);
+}
+/* a cell with no tab bar: its border shows focus, in its accent */
+.carreau-pane.no-tabbar.selected { border-color: color-mix(in oklch, var(--focus-accent, #8a8d96) 70%, transparent); }
 
 /* editing a tab's title in place */
 .carreau-tab-edit {
@@ -202,3 +219,5 @@ kbd { background: #3c3f4b; border-radius: 3px; padding: 0 4px; font-size: 11px; 
 .carreau-group.natural-row > * { flex: none !important; }
 .carreau-group.natural-column { flex-direction: column; }
 .carreau-group.natural-column > * { flex: none !important; }
+.carreau-tabbar[hidden] { display: none; }
+.carreau-long.empty { padding: 0; height: 7px; }
