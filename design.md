@@ -149,10 +149,12 @@ All keyboard navigation happens in a **navigation mode**:
   | S, then arrows or H/J/K/L | swap (hold S to swap repeatedly) |
   | U | unexpand |
   | P / C | parent / child |
+  | R | root |
+  | Z / Shift+Z | undo / redo |
   | ] / [ | next / previous tab |
   | M | toggle maximize |
   | F | float |
-  | X | close tab |
+  | W, X | close the selected tab |
 
   Since bindings leave the activation modifier out of the chord, no binding can use that modifier itself. Prefixes, like S for swap, avoid piling more modifiers on top of the held Alt.
   * Avoid chords the browser reserves (Ctrl+W, Ctrl+T, Ctrl+N, Ctrl+Tab), which can't be prevented.
@@ -194,6 +196,7 @@ Commands:
 
 * **nextTab / prevTab**: cycle the active tab of the selected pane.
 * **parent**: the parent of the selected node. From a range, the split itself.
+* **root**: the root of the tree holding the selection (the main tree, or a floating window's). For the main tree, this clears the maximization (top-level rule). Since last-child memory is kept, **child** then walks back down the same path.
 * **child**: the last-focused child of the selected container, restricted to the range if one is selected. Falls back to the first child.
 * **focus left/right/up/down**, using logical rects. Let S be the selection's rect.
   1. If boundary memory has an entry for `selection:side` and that node is still adjacent on that side with positive overlap, go there.
@@ -212,9 +215,23 @@ Commands:
 * **maximize**: if the selection is not already the maximization, push the current maximization onto the history and maximize the selection.
 * **restore**: pop the history. This returns to the *previous view*, which may itself be maximized.
 * **toggle maximize** (the keyboard's maximization command): if the selection *is* the maximized group, restore. Otherwise maximize the selection, which may be wider than the current maximization (after going to a parent) or narrower.
-* **Only the maximization command changes the maximized group.** Parent, child, expand and unexpand leave it alone. For example, with a group maximized, child → child → parent keeps the *original* group maximized. Going to a parent above the group doesn't grow it either: press maximize for that.
-  * The one exception: when **focus** moves to a pane outside the maximized region, the maximization moves to it, since otherwise the selection would be hidden.
+* **Navigation may widen the maximization, never narrow it.** Only the maximization command zooms in further.
+  * **parent** and **expand** widen it: when the new selection contains the whole maximized area, the selection becomes the maximization, replacing it without pushing to the history.
+  * **child** and **unexpand** never narrow it. With a group G maximized, child → child → parent lands on G's child, which is *inside* G, so G stays maximized. A naive "the maximization follows the selection on parent" rule would wrongly narrow it to that child.
+  * When **focus** moves to a pane outside the maximized area, the maximization moves to that pane, since otherwise the selection would be hidden.
 * **At the top level, maximization is cleared unconditionally.** When the selection becomes the main tree's root, the maximization and its history are cleared. Maximizing the root just clears it.
+
+**Undo / redo** (`undo`, `redo` commands; demo: Z / Shift+Z in navigation mode) apply only to actions that **change the layout**: drag-and-drop moves, swaps, **splitter resizes**, floating, docking and closing tabs. Simple navigation (selection, the active tab, maximize/restore) is not recorded.
+
+* The workspace records a **snapshot** before each such action: the main tree, the floating windows (with their rects), the selection, the maximization and its history, the expand stack and the last pane. Undo restores it, so the selection that went with the layout comes back too, and pushes the current state onto the redo stack. Any new step clears the redo stack. The history is capped (200).
+* **What counts as a layout change**: compare a key made of the trees (structure, tabs, weights) *without* the panes' `active` indices or the windows' rects, before and after the action.
+* **Record at the entry points** (`run`, `select`, `activateTab`, `commitDrop`, `float`, `closeTab`, `maximize`, `restore`, `toggleMaximize`) with a wrapper. Only the outermost wrapper records, and only if the layout key changed. Navigation passes through the same wrapper and simply records nothing.
+* **Splitter resizes**: the view calls `beginResize(key)` when a splitter drag starts and `endResize(token)` when it ends, where the key identifies the splitter (split id + index).
+  * **Consecutive resizes of the same splitter coalesce** into one step, so a slow resize done in several drags undoes at once.
+  * A different splitter, any other recorded step, or an undo/redo ends the coalescing. Navigation in between doesn't, since it's not a step.
+* Floating-window moves/resizes are not steps, but undoing restores the rects that went with the restored layout.
+* Loading a layout clears both stacks.
+* Tab contents survive undo like any relayout: they are keyed by tab id and moved back into place. Undoing a tab close re-creates the tab, so its content element is created afresh; an iframe reloads.
 
 **Scrolling into view**: when the selection changes, call `scrollIntoView({block: "nearest", inline: "nearest"})` on it, since it may be in a scroll split.
 

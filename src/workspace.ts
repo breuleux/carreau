@@ -38,6 +38,8 @@ export type Command =
   | "prevTab"
   | "parent"
   | "root"
+  | "undo"
+  | "redo"
   | "child"
   | "focusLeft"
   | "focusRight"
@@ -60,6 +62,8 @@ export const COMMANDS: Command[] = [
   "prevTab",
   "parent",
   "root",
+  "undo",
+  "redo",
   "child",
   "focusLeft",
   "focusRight",
@@ -79,6 +83,18 @@ export const COMMANDS: Command[] = [
 ];
 
 const EPS = 1e-6;
+/** How many user actions can be undone. */
+const UNDO_LIMIT = 200;
+
+interface Snapshot {
+  root: LayoutNode;
+  floating: FloatingWindow[];
+  selection: Selection;
+  maximized: Selection | null;
+  maxHistory: (Selection | null)[];
+  expandStack: Selection[];
+  lastPane: string | null;
+}
 
 function sameSel(a: Selection | null, b: Selection | null): boolean {
   if (!a || !b) return a === b;
@@ -105,7 +121,7 @@ export class Workspace {
   constructor(root: LayoutNode) {
     this.root = normalize(root) ?? root;
     this.selection = { id: panes(root)[0].id };
-    this.select(this.selection);
+    this.selectImpl(this.selection, false);
   }
 
   onChange(fn: () => void): void {
@@ -162,8 +178,112 @@ export class Workspace {
   }
 
   load(data: WorkspaceData): void {
+    this.undoStack = [];
+    this.redoStack = [];
     this.floating = data.floating;
     this.setRoot(data.root);
+  }
+
+  // -------------------------------------------------------------------------
+  // Undo / redo of actions that change the layout (moves, swaps, resizes, floating, docking,
+  // closing tabs). Simple navigation (selection, active tab, maximization) is not recorded,
+  // although each step restores the selection that went with it.
+
+  private undoStack: Snapshot[] = [];
+  private redoStack: Snapshot[] = [];
+  private recording = 0;
+  /** Kind of the latest recorded step: consecutive resizes of one splitter coalesce. */
+  private lastKind: string | null = null;
+
+  /** What counts as "the layout": trees, tabs and sizes; not the active tabs nor rects. */
+  private layoutKey(): string {
+    return JSON.stringify(
+      { root: this.root, floating: this.floating.map((w) => w.root) },
+      (k, v) => (k === "active" ? undefined : v),
+    );
+  }
+
+  private pushUndo(before: Snapshot, kind: string): void {
+    this.undoStack.push(before);
+    if (this.undoStack.length > UNDO_LIMIT) this.undoStack.shift();
+    this.redoStack = [];
+    this.lastKind = kind;
+  }
+
+  private snapshot(): Snapshot {
+    return structuredClone({
+      root: this.root,
+      floating: this.floating,
+      selection: this.selection,
+      maximized: this.maximized,
+      maxHistory: this.maxHistory,
+      expandStack: this.expandStack,
+      lastPane: this.lastPane,
+    });
+  }
+
+  private restoreSnapshot(snap: Snapshot): void {
+    const s = structuredClone(snap);
+    this.root = s.root;
+    this.floating = s.floating;
+    this.maximized = s.maximized;
+    this.maxHistory = s.maxHistory;
+    this.lastPane = s.lastPane;
+    this.selectImpl(s.selection, false);
+    this.expandStack = s.expandStack; // after selectImpl, which clears it
+    this.emit();
+  }
+
+  /**
+   * Run a user action, recording the state before it for undo. Nested actions only record
+   * once (the outermost), and an action that changes nothing records nothing.
+   */
+  private record<T>(fn: () => T): T {
+    if (this.recording > 0) return fn();
+    const before = this.snapshot();
+    const key = this.layoutKey();
+    this.recording++;
+    try {
+      return fn();
+    } finally {
+      this.recording--;
+      // Only layout changes are undoable steps.
+      if (this.layoutKey() !== key) this.pushUndo(before, "action");
+    }
+  }
+
+  /**
+   * Resizing a splitter: call `beginResize` when the drag starts and `endResize` when it
+   * ends. Consecutive resizes of the same splitter (same `key`) coalesce into one step.
+   */
+  beginResize(key: string): { key: string; before: Snapshot; layout: string } {
+    return { key, before: this.snapshot(), layout: this.layoutKey() };
+  }
+
+  endResize(token: { key: string; before: Snapshot; layout: string }): void {
+    if (this.layoutKey() === token.layout) return;
+    const kind = `resize:${token.key}`;
+    if (this.lastKind === kind && this.undoStack.length) {
+      this.redoStack = []; // coalesced with the previous resize of this splitter
+      return;
+    }
+    this.pushUndo(token.before, kind);
+  }
+
+  undo(): void {
+    const snap = this.undoStack.pop();
+    if (!snap) return;
+    this.lastKind = null;
+    this.redoStack.push(this.snapshot());
+    this.restoreSnapshot(snap);
+  }
+
+  redo(): void {
+    const snap = this.redoStack.pop();
+    if (!snap) return;
+    this.lastKind = null;
+    this.undoStack.push(this.snapshot());
+    this.restoreSnapshot(snap);
   }
 
   // -------------------------------------------------------------------------
@@ -171,6 +291,10 @@ export class Workspace {
 
   /** Pull a pane out of the hierarchy into a floating window. The last pane can't float. */
   float(paneId: string, rect: Rect): boolean {
+    return this.record(() => this.floatImpl(paneId, rect));
+  }
+
+  private floatImpl(paneId: string, rect: Rect): boolean {
     const loc = find(this.root, paneId);
     if (!loc || loc.node.type !== "pane" || !loc.parent) return false;
     const pane = loc.node;
@@ -191,6 +315,10 @@ export class Workspace {
    * empty closes. The main tree can't be emptied (see canCloseTab).
    */
   closeTab(tabId: string): boolean {
+    return this.record(() => this.closeTabImpl(tabId));
+  }
+
+  private closeTabImpl(tabId: string): boolean {
     if (!this.canCloseTab(tabId)) return false;
     for (const t of this.trees()) {
       const ft = findTab(t, tabId);
@@ -228,6 +356,10 @@ export class Workspace {
    * `floatRect`: where to show the new window, for `float` drops.
    */
   commitDrop(result: ForestResult, consumed?: FloatingWindow, floatRect?: Rect): void {
+    this.record(() => this.commitDropImpl(result, consumed, floatRect));
+  }
+
+  private commitDropImpl(result: ForestResult, consumed?: FloatingWindow, floatRect?: Rect): void {
     const others = this.floating.filter((w) => w !== consumed);
     const next: FloatingWindow[] = [];
     others.forEach((w, i) => {
@@ -243,7 +375,22 @@ export class Workspace {
   // -------------------------------------------------------------------------
   // Selection
 
+  /** Select a node. As a user action (`emit`), this is recorded for undo. */
   select(sel: Selection, emit = true): void {
+    if (emit) return this.record(() => this.selectImpl(sel, true));
+    this.selectImpl(sel, false);
+  }
+
+  /** Activate a pane's tab and select the pane (a user action, recorded for undo). */
+  activateTab(paneId: string, index: number): void {
+    this.record(() => {
+      const n = this.node(paneId);
+      if (n?.type === "pane" && index >= 0 && index < n.tabs.length) n.active = index;
+      this.selectImpl({ id: paneId }, true);
+    });
+  }
+
+  private selectImpl(sel: Selection, emit: boolean): void {
     const n = this.node(sel.id);
     if (!n) return;
     if (sel.range && n.type !== "pane") {
@@ -290,6 +437,12 @@ export class Workspace {
   // Commands
 
   run(cmd: Command): void {
+    if (cmd === "undo") return this.undo();
+    if (cmd === "redo") return this.redo();
+    this.record(() => this.runImpl(cmd));
+  }
+
+  private runImpl(cmd: Command): void {
     switch (cmd) {
       case "nextTab":
         return this.cycleTab(1);
@@ -525,22 +678,28 @@ export class Workspace {
    * maximizes the selection (which may be wider or narrower than the current maximization).
    */
   toggleMaximize(): void {
+    this.record(() => this.toggleMaximizeImpl());
+  }
+
+  private toggleMaximizeImpl(): void {
     if (this.maximized && sameSel(this.maximized, this.selection)) this.restore();
     else this.maximize();
   }
 
   maximize(): void {
-    if (!this.inMain(this.selection.id)) return; // not in floating windows
-    // Maximizing the whole tree is no maximization at all.
-    if (this.selection.id === this.root.id && !this.selection.range) {
-      this.clearMaximization();
+    this.record(() => {
+      if (!this.inMain(this.selection.id)) return; // not in floating windows
+      // Maximizing the whole tree is no maximization at all.
+      if (this.selection.id === this.root.id && !this.selection.range) {
+        this.clearMaximization();
+        this.emit();
+        return;
+      }
+      if (sameSel(this.maximized, this.selection)) return;
+      this.maxHistory.push(this.maximized);
+      this.maximized = { ...this.selection };
       this.emit();
-      return;
-    }
-    if (sameSel(this.maximized, this.selection)) return;
-    this.maxHistory.push(this.maximized);
-    this.maximized = { ...this.selection };
-    this.emit();
+    });
   }
 
   private clearMaximization(): void {
@@ -549,9 +708,11 @@ export class Workspace {
   }
 
   restore(): void {
-    if (!this.maximized) return;
-    this.maximized = this.maxHistory.pop() ?? null;
-    this.emit();
+    this.record(() => {
+      if (!this.maximized) return;
+      this.maximized = this.maxHistory.pop() ?? null;
+      this.emit();
+    });
   }
 
   /**

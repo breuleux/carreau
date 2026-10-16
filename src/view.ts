@@ -483,8 +483,7 @@ export class View {
         if (e.button === 1) e.preventDefault(); // no autoscroll
       });
       tab.addEventListener("click", () => {
-        node.active = i;
-        this.ws.select({ id: node.id });
+        this.ws.activateTab(node.id, i);
       });
       tab.addEventListener("pointerdown", (e) =>
         this.armDrag(e, { kind: "tab", tabId: t.id }, t.title, tab),
@@ -786,6 +785,8 @@ export class View {
       const start = horiz ? e.clientX : e.clientY;
       s.setPointerCapture(e.pointerId);
       this.el.classList.add("is-resizing");
+      // Undoable; consecutive resizes of this same splitter coalesce into one step.
+      const token = this.ws.beginResize(`${parent.id}:${i}`);
       const move = (ev: PointerEvent) => {
         const d = (horiz ? ev.clientX : ev.clientY) - start;
         const na = Math.max(30, Math.min(pa + pb - 30, pa + d));
@@ -797,6 +798,7 @@ export class View {
       };
       const up = () => {
         this.el.classList.remove("is-resizing");
+        this.ws.endResize(token);
         s.removeEventListener("pointermove", move);
         s.removeEventListener("pointerup", up);
         this.ws.emit();

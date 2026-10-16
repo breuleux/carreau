@@ -35,6 +35,8 @@ const navConfig: NavConfig = {
     BracketLeft: "prevTab",
     KeyM: "toggleMaximize",
     KeyF: "float",
+    KeyZ: "undo",
+    "Shift+KeyZ": "redo",
     KeyW: "closeTab",
     KeyX: "closeTab",
   },
