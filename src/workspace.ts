@@ -1,6 +1,7 @@
 // Workspace state: layout trees + selection + maximization + navigation memory + undo.
 // No keyboard shortcuts live here: commands are exposed by name and the host binds them.
 
+import { Cell, Placer } from "./cells";
 import {
   DragSubject,
   DropTarget,
@@ -12,6 +13,7 @@ import {
   PaneNode,
   Rect,
   Side,
+  Tab,
   SplitNode,
   WorkspaceData,
   activeGroup,
@@ -84,6 +86,26 @@ interface Snapshot {
   expandStack: Selection[];
   lastPane: string | null;
 }
+
+/** A relative move, as the navigation shortcuts make it. */
+export type Direction = "left" | "right" | "up" | "down" | "parent" | "child";
+/** Where to go from a cell: a move, an explicit cell (or node), or a sequence of these. */
+export type Path = Direction | { id: string } | Path[];
+/** How to place something (see `Workspace.place`). */
+export interface PlaceSpec {
+  /** Beside the base, on that side; or into its tabs. */
+  split: Side | "tab";
+  /** The base: an explicit cell, or a path from the focused cell. Default: the focused cell. */
+  base?: Path;
+  /** If the base doesn't exist: put it where the base would be (see `place`). */
+  force?: boolean;
+  /** Focus what was placed (default: true). */
+  focus?: boolean;
+}
+/** What can be placed: a tab or a pane, new or already in the layout (then it moves), or a new layout. */
+export type Placeable = Tab | LayoutNode | { id: string };
+
+const DIRECTION_SIDES: Record<string, Side> = { left: "left", right: "right", up: "top", down: "bottom" };
 
 /** A pending close: of a tab, or of a pane (with all its tabs). */
 interface CloseOp {
@@ -361,6 +383,130 @@ export class Workspace {
   }
 
   /** Whether a pane can be closed: anything but the main tree's last pane. */
+  // -------------------------------------------------------------------------
+  // Relative addressing and placement (for hosts; see cells.ts for the handles)
+
+  /** A handle on a node (null if there is none with that id). */
+  cell(id: string): Cell | null {
+    return this.node(id) ? new Cell(this, id) : null;
+  }
+
+  /** The focused cell: the selected node (for a range, its split). */
+  focused(): Cell {
+    return new Cell(this, this.selection.id);
+  }
+
+  /** Something that places things as `spec` says, relative to the focused cell. */
+  placer(spec: PlaceSpec): Placer {
+    return new Placer(this, spec);
+  }
+
+  /** The node a path leads to from a node, as the navigation shortcuts would go; or null. */
+  cellAt(fromId: string, path: Path): string | null {
+    return this.walk(fromId, path).id;
+  }
+
+  /** Follow a path; on failure, where it got to and the move that failed. */
+  private walk(fromId: string, path: Path): { id: string | null; last: string; failed?: Direction } {
+    if (Array.isArray(path)) {
+      let at = fromId;
+      for (const p of path) {
+        const r = this.walk(at, p);
+        if (!r.id) return r;
+        at = r.id;
+      }
+      return { id: at, last: at };
+    }
+    if (typeof path !== "string") {
+      const n = this.node(path.id);
+      return n ? { id: n.id, last: n.id } : { id: null, last: fromId };
+    }
+    const sel = { id: fromId };
+    const side = DIRECTION_SIDES[path];
+    const to = side
+      ? this.neighbour(side, "nodes", sel)?.id
+      : path === "parent"
+        ? this.parentOf(sel)?.id
+        : this.childOf(sel)?.id;
+    return to ? { id: to, last: to } : { id: null, last: fromId, failed: path };
+  }
+
+  /**
+   * Place something (a tab or a pane, new or moved; or a new layout) relative to a base cell:
+   * beside it (`split: side`), or into its tabs (`split: "tab"`; a split base: into its most
+   * recently focused pane). Placing works like dropping: same rules, undoable.
+   *
+   * If the base doesn't exist (its path fails) and `force` is set, the thing goes where the
+   * base would have been: walking up from where the path got to, the first parent that takes
+   * insertions on the side of the failed move (or, if that move wasn't sideways, on
+   * `split`'s side) gets a new pane on that side, holding it.
+   * Returns the pane that ends up holding it, or null.
+   */
+  place(spec: PlaceSpec, what: Placeable): string | null {
+    const from = this.selection.id;
+    const r = spec.base === undefined ? { id: from, last: from } : this.walk(from, spec.base);
+    let target: DropTarget | null = null;
+    if (r.id) {
+      if (spec.split === "tab") {
+        const p = this.node(this.descend(this.node(r.id)!));
+        if (p?.type === "pane") target = { kind: "tab", paneId: p.id, index: p.tabs.length };
+      } else target = { kind: "side", targetId: r.id, side: spec.split };
+    } else if (spec.force) {
+      const side = (r.failed && DIRECTION_SIDES[r.failed]) ?? (spec.split !== "tab" ? spec.split : null);
+      if (side) {
+        const idx = this.index();
+        let a: LayoutNode | null = idx.parent(r.last);
+        while (a && (a.type === "slot" || !kind(a).sides.includes(side))) a = idx.parent(a.id);
+        target = { kind: "side", targetId: (a ?? idx.node(r.last)!).id, side };
+      }
+    }
+    const subject = target && this.subjectOf(what);
+    const result = subject && this.tryDrop(subject, target!);
+    if (!result) return null;
+    const before = this.selection;
+    this.commitDrop(result);
+    if (spec.focus === false && this.node(before.id)) this.select(before);
+    return result.paneId;
+  }
+
+  /**
+   * Insert a new cell, as `spec` says (see `place`). What it is, the focused cell decides
+   * (the host's `lifecycle.spawn`): the selected pane's active tab, or for a split, its most
+   * recently focused pane's. Returns the pane holding it, or null.
+   */
+  spawn(spec: PlaceSpec): Cell | null {
+    const sel = this.node(this.selection.id);
+    const pane = sel && this.node(sel.type === "pane" ? sel.id : this.descend(sel));
+    const from = pane?.type === "pane" ? pane.tabs[pane.active] : undefined;
+    if (!from) return null;
+    const tab = this.lifecycle.spawn ? this.lifecycle.spawn(from) : { id: genId("t"), title: "New tab" };
+    return tab ? this.placer(spec).apply(tab) : null;
+  }
+
+  /**
+   * Move the focused tab (the selected pane's active tab) as `spec` says (see `place`).
+   * Returns the pane that ends up holding it, or null (e.g. a lone tab beside its own pane).
+   */
+  moveTab(spec: PlaceSpec): Cell | null {
+    const sel = this.node(this.selection.id);
+    const tab = sel?.type === "pane" && !this.selection.range ? sel.tabs[sel.active] : undefined;
+    return tab ? this.placer(spec).apply({ id: tab.id }) : null;
+  }
+
+  /** What placing something drags: an existing tab or pane, or a new node. */
+  private subjectOf(what: Placeable): DragSubject | null {
+    if ("type" in what) {
+      const n = what as LayoutNode;
+      if (!this.node(n.id)) return { kind: "external", node: n };
+      return n.type === "pane" ? { kind: "pane", paneId: n.id } : null; // splits don't move
+    }
+    if (this.findTab(what.id)) return { kind: "tab", tabId: what.id };
+    const n = this.node(what.id);
+    if (n) return n.type === "pane" ? { kind: "pane", paneId: n.id } : null;
+    if ("title" in what) return { kind: "external", node: { type: "pane", id: genId("p"), weight: 1, tabs: [what as Tab], active: 0 } };
+    return null;
+  }
+
   canClosePane(paneId: string): boolean {
     const main = panes(this.root);
     return this.node(paneId)?.type === "pane" && !(main.length === 1 && main[0].id === paneId);
@@ -736,11 +882,24 @@ export class Workspace {
   }
 
   /** Up one navigation step (slots and groups' root splits are skipped, see LayoutIndex). */
-  private goParent(): void {
-    const s = this.selection;
-    const idx = this.index();
+  private parentOf(s: Selection, idx = this.index()): LayoutNode | null {
     // From a range: its split (or the split's holder, if the split is a group's root).
-    const up = s.range ? (idx.holder(s.id) ?? idx.node(s.id)) : idx.navParent(s.id);
+    return s.range ? (idx.holder(s.id) ?? idx.node(s.id)) : idx.navParent(s.id);
+  }
+
+  /** Down one navigation step, to the most recently focused child (within the range, if any). */
+  private childOf(s: Selection, idx = this.index()): LayoutNode | null {
+    const n = idx.node(s.id);
+    if (!n) return null;
+    const pick = (split: SplitNode, range = [0, split.children.length - 1]) => {
+      const allowed = split.children.slice(range[0], range[1] + 1);
+      return this.mostRecent(split.id, allowed) ?? allowed[0];
+    };
+    return n.type !== "pane" && s.range ? pick(n, s.range) : idx.navChild(n, (split) => pick(split));
+  }
+
+  private goParent(): void {
+    const up = this.parentOf(this.selection);
     if (!up) return;
     this.select({ id: up.id }, false);
     this.widenMaximized();
@@ -756,17 +915,8 @@ export class Workspace {
     this.emit();
   }
 
-  /** Down one navigation step, to the last-focused child (within the range, if any). */
   private goChild(): void {
-    const s = this.selection;
-    const n = this.node(s.id);
-    if (!n) return;
-    const pick = (split: SplitNode, range = [0, split.children.length - 1]) => {
-      const allowed = split.children.slice(range[0], range[1] + 1);
-      return this.mostRecent(split.id, allowed) ?? allowed[0];
-    };
-    const child =
-      n.type !== "pane" && s.range ? pick(n, s.range) : this.index().navChild(n, (split) => pick(split));
+    const child = this.childOf(this.selection);
     if (!child) return;
     this.select({ id: child.id }, false);
     this.emit();
@@ -801,17 +951,21 @@ export class Workspace {
     if (this.clearMultiSelection()) return;
     const me = this.node(this.selection.id);
     if (this.selection.range || me?.type !== "pane") return;
-    const target = this.neighbour(side, true);
+    const target = this.neighbour(side, "panes");
     if (!target) return;
     this.change((forest) => swapNodes(forest, me.id, target.id), () => me.id);
     this.boundary.set(`${me.id}:${opposite[side]}`, target);
     this.boundary.set(`${target.id}:${side}`, { id: me.id });
   }
 
-  /** The pane (or remembered selection) touching a side of the selection. */
-  private neighbour(side: Side, panesOnly = false): Selection | null {
-    const rects = computeRects(this.tree());
-    const sel = this.selection;
+  /**
+   * The pane (or remembered selection) touching a side of a selection (by default, the
+   * current one). `only`: what the remembered selection may be (panes, or single nodes).
+   */
+  private neighbour(side: Side, only: "any" | "panes" | "nodes" = "any", sel = this.selection): Selection | null {
+    const tree = this.treeOf(sel.id);
+    if (!tree) return null;
+    const rects = computeRects(tree);
     const S = this.selectionRect(sel, rects);
     const horizontal = sideAxis[side] === "row";
     const adjacent = (r: Rect) => {
@@ -824,7 +978,7 @@ export class Workspace {
     // 1. Back where we came from through this boundary, if still valid.
     const remembered = this.boundary.get(`${sel.id}:${side}`);
     const rn = remembered && this.node(remembered.id);
-    if (remembered && rn && (!panesOnly || (rn.type === "pane" && !remembered.range))) {
+    if (remembered && rn && (only === "any" || (!remembered.range && (only === "nodes" || rn.type === "pane")))) {
       const r = this.selectionRect(remembered, rects);
       if (adjacent(r) && overlap(r) > EPS) return remembered;
     }
@@ -832,7 +986,7 @@ export class Workspace {
     // without a rect are hidden (inactive groups); a pane showing a group is a container.
     const center = horizontal ? S.y + S.h / 2 : S.x + S.w / 2;
     let best: { id: string; score: number } | null = null;
-    for (const p of panes(this.tree())) {
+    for (const p of panes(tree)) {
       const r = rects.get(p.id);
       if (!r || p.tabs[p.active]?.group || !adjacent(r)) continue;
       const ov = overlap(r);

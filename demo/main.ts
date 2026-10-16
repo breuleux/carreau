@@ -1,11 +1,13 @@
 // Demo host. Key bindings live here, not in the library: Carreau takes them as configuration.
 
-import "./style.css";
+import "../src/style.css";
+import "./demo.css";
 import { examples } from "./examples";
-import { deserialize, serialize } from "./model";
-import { hasMoveBefore, View } from "./view";
-import { Workspace } from "./workspace";
-import { KeyboardNav, NavConfig } from "./keyboard";
+import { spawnCell } from "./cellclasses";
+import { deserialize, serialize } from "../src/model";
+import { hasMoveBefore, View } from "../src/view";
+import { Workspace } from "../src/workspace";
+import { KeyboardNav, NavConfig } from "../src/keyboard";
 
 // Navigation mode: hold Alt after Alt+Q (or Alt+Q, Q for sticky mode), then use these.
 const navConfig: NavConfig = {
@@ -58,6 +60,45 @@ const navConfig: NavConfig = {
       KeyK: "swapUp",
       KeyJ: "swapDown",
     },
+    // I, then a direction: a new cell (the focused cell decides what) into the tabs of the cell
+    // in that direction; with Shift, beside the focused cell, on that side.
+    KeyI: {
+      ArrowLeft: "insertIntoLeft",
+      ArrowRight: "insertIntoRight",
+      ArrowUp: "insertIntoUp",
+      ArrowDown: "insertIntoDown",
+      KeyH: "insertIntoLeft",
+      KeyL: "insertIntoRight",
+      KeyK: "insertIntoUp",
+      KeyJ: "insertIntoDown",
+      "Shift+ArrowLeft": "insertLeft",
+      "Shift+ArrowRight": "insertRight",
+      "Shift+ArrowUp": "insertUp",
+      "Shift+ArrowDown": "insertDown",
+      "Shift+KeyH": "insertLeft",
+      "Shift+KeyL": "insertRight",
+      "Shift+KeyK": "insertUp",
+      "Shift+KeyJ": "insertDown",
+    },
+    // A, then a direction: move the focused tab the same way.
+    KeyA: {
+      ArrowLeft: "moveIntoLeft",
+      ArrowRight: "moveIntoRight",
+      ArrowUp: "moveIntoUp",
+      ArrowDown: "moveIntoDown",
+      KeyH: "moveIntoLeft",
+      KeyL: "moveIntoRight",
+      KeyK: "moveIntoUp",
+      KeyJ: "moveIntoDown",
+      "Shift+ArrowLeft": "moveLeft",
+      "Shift+ArrowRight": "moveRight",
+      "Shift+ArrowUp": "moveUp",
+      "Shift+ArrowDown": "moveDown",
+      "Shift+KeyH": "moveLeft",
+      "Shift+KeyL": "moveRight",
+      "Shift+KeyK": "moveUp",
+      "Shift+KeyJ": "moveDown",
+    },
   },
 };
 
@@ -80,6 +121,8 @@ ws.lifecycle = {
   closeTab: (t) =>
     t.status === "unresponsive" ? new Promise(() => {}) : new Promise((done) => setTimeout(done, t.long?.startsWith("$") ? 1200 : 0)),
   forceCloseTab: async (t) => console.log(`force closed ${t.title}`),
+  // What a new cell inserted from a cell is (Alt+Q, I, then a direction): see cellclasses.ts.
+  spawn: spawnCell,
 };
 const view = new View(ws, document.querySelector("#host")!, {
   renderTab: (tab) => {

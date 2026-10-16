@@ -35,6 +35,11 @@ export interface Lifecycle {
   closeTab(tab: Tab): Promise<void>;
   /** Close it now, whatever its state. Not waited for. */
   forceCloseTab(tab: Tab): Promise<void>;
+  /**
+   * The new cell a cell creates (e.g. a shell cell: another shell), when the user inserts one
+   * from it (`Workspace.spawn`). Null: it creates none. Default: an empty tab.
+   */
+  spawn?(from: Tab): Tab | null;
 }
 
 /** A lifecycle with nothing to wait for. */

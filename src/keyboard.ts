@@ -6,11 +6,35 @@
 // While in navigation mode, plain keys (with the activation modifier held or not) run
 // actions. Nothing is hard-coded: the activation chord and all bindings come from the config.
 
-import { PaneNode } from "./model";
+import { PaneNode, Side } from "./model";
 import { View } from "./view";
-import { Command, Workspace } from "./workspace";
+import { Command, Direction, Workspace } from "./workspace";
 
-export type NavAction = Command | "toggleMaximize" | "float" | "closeTab" | "closePane" | "group" | "collapse" | "renameTab";
+type Dir = "Left" | "Right" | "Up" | "Down";
+export type NavAction =
+  | Command
+  | "toggleMaximize"
+  | "float"
+  | "closeTab"
+  | "closePane"
+  | "group"
+  | "collapse"
+  | "renameTab"
+  /** a new cell (created by the focused one) beside the focused cell, on that side */
+  | `insert${Dir}`
+  /** a new cell into the tabs of the cell on that side (or where it would be) */
+  | `insertInto${Dir}`
+  /** the focused tab, moved beside the focused cell, on that side */
+  | `move${Dir}`
+  /** the focused tab, moved into the tabs of the cell on that side (or where it would be) */
+  | `moveInto${Dir}`;
+
+const DIRS: Record<Dir, { side: Side; dir: Direction }> = {
+  Left: { side: "left", dir: "left" },
+  Right: { side: "right", dir: "right" },
+  Up: { side: "top", dir: "up" },
+  Down: { side: "bottom", dir: "down" },
+};
 
 export type Modifier = "Control" | "Alt" | "Meta" | "Shift";
 
@@ -30,7 +54,8 @@ export interface NavConfig {
   /**
    * Prefix keys: after a prefix key (same chord syntax), the next key is looked up in its own
    * table. Holding the prefix key down keeps it active for every key pressed meanwhile.
-   * E.g. `{ KeyS: { ArrowLeft: "swapLeft", … } }` makes S then ← swap left.
+   * E.g. `{ KeyS: { ArrowLeft: "swapLeft", … } }` makes S then ← swap left. Modifiers that
+   * are part of the prefix's chord are ignored on the next key (e.g. Shift+X, then Shift+← = ←).
    */
   prefixes?: Record<string, Record<string, NavAction>>;
 }
@@ -146,6 +171,8 @@ export class KeyboardNav {
       return;
     }
 
+    // A modifier pressed on its own (e.g. Shift, before Shift+←) is not a key of its own.
+    if (/^(Alt|Control|Meta|Shift)(Left|Right)$/.test(e.code)) return;
     const chord = this.chord(e);
     // A pending prefix: look the key up in the prefix's table.
     if (this.prefix) {
@@ -153,7 +180,11 @@ export class KeyboardNav {
         e.preventDefault();
         return;
       }
-      const action = this.config.prefixes?.[this.prefix]?.[chord];
+      // Modifiers of the prefix's own chord may still be held (Shift+X, then Shift+←): ignore them.
+      const table = this.config.prefixes?.[this.prefix];
+      const prefixMods = this.prefix.split("+").slice(0, -1);
+      const bare = chord.split("+").filter((p) => !prefixMods.includes(p)).join("+");
+      const action = table?.[chord] ?? table?.[bare];
       e.preventDefault();
       e.stopPropagation();
       if (action) {
@@ -248,8 +279,15 @@ export class KeyboardNav {
       case "closePane":
         ws.closePane(ws.selection.id);
         return;
-      default:
-        ws.run(action);
+      default: {
+        const m = /^(insert|move)(Into)?(Left|Right|Up|Down)$/.exec(action);
+        if (!m) return ws.run(action as Command);
+        const { side, dir } = DIRS[m[3] as Dir];
+        // Into a neighbour's tabs: if there is none on that side, where it would be.
+        const spec = m[2] ? { split: "tab" as const, base: dir, force: true } : { split: side };
+        if (m[1] === "insert") ws.spawn(spec);
+        else ws.moveTab(spec);
+      }
     }
   }
 }

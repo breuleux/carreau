@@ -1,0 +1,19 @@
+/* The demo page, and the demo's tab contents. (The library's styles: src/style.css.) */
+html, body { margin: 0; height: 100%; background: #2c2e38; color: #ddd; font: 13px system-ui, sans-serif; }
+body { display: flex; flex-direction: column; }
+header { display: flex; gap: 12px; align-items: center; padding: 6px 10px; border-bottom: 1px solid #2a2c35; }
+header #description { color: #999; }
+header #status { margin-left: auto; color: #8a8; font-family: ui-monospace, monospace; font-size: 11px; }
+main { flex: 1; display: flex; min-height: 0; }
+#host { flex: 1; min-width: 0; padding: 6px; display: flex; }
+aside { width: 280px; padding: 8px 12px; border-left: 1px solid #2a2c35; display: flex; flex-direction: column; overflow: auto; }
+aside h3 { margin: 8px 0 4px; font-size: 12px; text-transform: uppercase; color: #888; }
+aside ul { list-style: none; margin: 0; padding: 0; }
+aside li { display: flex; justify-content: space-between; padding: 1px 0; }
+kbd { background: #3c3f4b; border-radius: 3px; padding: 0 4px; font-size: 11px; }
+.hint { color: #888; }
+#json { flex: 1; min-height: 200px; background: #101115; color: #bbb; border: 1px solid #2a2c35; font: 10px ui-monospace, monospace; }
+.demo-content h2 { margin: 0 0 4px; font-weight: 500; color: #ddd; }
+.demo-content .meta { margin: 0; color: #777; font-size: 11px; font-family: ui-monospace, monospace; }
+.demo-content .text { margin: 8px 0 0; white-space: pre-wrap; color: #bbb; line-height: 1.45; }
+.carreau-natural-row .demo-content .text { white-space: pre; }
