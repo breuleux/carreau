@@ -137,6 +137,17 @@ export class View {
     window.addEventListener("keydown", (e) => {
       if (e.key === "Escape" && this.drag) this.endDrag(false);
     });
+    // Clicking into an iframe fires nothing in this document; the window loses focus and
+    // the iframe becomes the active element. Select its pane.
+    window.addEventListener("blur", () =>
+      setTimeout(() => {
+        const a = document.activeElement;
+        if (a instanceof HTMLIFrameElement && this.rootEl.contains(a)) {
+          const id = (a.closest(".carreau-pane") as HTMLElement | null)?.dataset.id;
+          if (id && this.ws.selection.id !== id) this.ws.select({ id });
+        }
+      }),
+    );
     // Scrolling a scroll split moves things around: refresh the selection outline and, during
     // a drag, rebuild the indicators for the current cursor position.
     this.el.addEventListener(
@@ -162,7 +173,14 @@ export class View {
     const scroll = new Map<string, [number, number]>();
     for (const el of this.rootEl.querySelectorAll<HTMLElement>(".carreau-scroll"))
       scroll.set(el.dataset.id!, [el.scrollLeft, el.scrollTop]);
-    this.rootEl.replaceChildren(this.renderNode(this.ws.root));
+    // Attach the new tree *before* removing the old one, so that tab contents (iframes...)
+    // can be moved across while staying connected: moveBefore only preserves state when
+    // both the node and its destination are in the document.
+    const old = [...this.rootEl.childNodes];
+    const tree = this.renderNode(this.ws.root);
+    this.rootEl.append(tree);
+    this.placeContents(tree);
+    for (const n of old) n.remove();
     for (const [id, [l, t]] of scroll) {
       const el = this.elOf(id);
       if (el) {
@@ -180,6 +198,45 @@ export class View {
   }
 
   private lastSelection = "";
+
+  /** One persistent element per tab, created once and moved around, never recreated. */
+  private contents = new Map<string, HTMLElement>();
+
+  /** Put every tab's content into its pane's body; only the active tab's is shown. */
+  private placeContents(tree: HTMLElement): void {
+    const seen = new Set<string>();
+    // Pitfall: the old tree is still attached at this point, so look panes up in the new
+    // tree only (a document-wide lookup would find the old pane first).
+    const paneEls = new Map<string, HTMLElement>();
+    for (const el of [tree, ...tree.querySelectorAll<HTMLElement>(".carreau-pane")])
+      if (el.classList.contains("carreau-pane")) paneEls.set(el.dataset.id!, el);
+    for (const p of panes(this.ws.root)) {
+      const body = paneEls.get(p.id)?.querySelector<HTMLElement>(":scope > .carreau-body");
+      if (!body) continue;
+      p.tabs.forEach((tab, i) => {
+        seen.add(tab.id);
+        let el = this.contents.get(tab.id);
+        if (!el) {
+          el = document.createElement("div");
+          el.className = "carreau-content";
+          el.dataset.tab = tab.id;
+          const c = this.opts.renderTab(tab, p);
+          if (typeof c === "string") el.textContent = c;
+          else el.append(c);
+          this.contents.set(tab.id, el);
+        }
+        el.hidden = i !== p.active;
+        if (el.parentElement !== body) move(body, el);
+      });
+    }
+    // Tabs that left the layout entirely (e.g. a new layout was loaded).
+    for (const [id, el] of this.contents) {
+      if (!seen.has(id)) {
+        el.remove();
+        this.contents.delete(id);
+      }
+    }
+  }
 
   private elOf(id: string): HTMLElement | null {
     return this.rootEl.querySelector(`[data-id="${id}"]`);
@@ -203,12 +260,7 @@ export class View {
       el.append(this.renderTabBar(node));
       const body = document.createElement("div");
       body.className = "carreau-body";
-      const tab = node.tabs[node.active];
-      if (tab) {
-        const c = this.opts.renderTab(tab, node);
-        if (typeof c === "string") body.textContent = c;
-        else body.append(c);
-      }
+      // Filled by placeContents() once the tree is attached.
       el.append(body);
       el.addEventListener("pointerdown", () => {
         if (this.ws.selection.id !== node.id) this.ws.select({ id: node.id });
@@ -285,6 +337,7 @@ export class View {
       const wTot = a.weight + b.weight;
       const start = horiz ? e.clientX : e.clientY;
       s.setPointerCapture(e.pointerId);
+      this.el.classList.add("is-resizing");
       const move = (ev: PointerEvent) => {
         const d = (horiz ? ev.clientX : ev.clientY) - start;
         const na = Math.max(30, Math.min(pa + pb - 30, pa + d));
@@ -295,6 +348,7 @@ export class View {
         this.decorate();
       };
       const up = () => {
+        this.el.classList.remove("is-resizing");
         s.removeEventListener("pointermove", move);
         s.removeEventListener("pointerup", up);
         this.ws.emit();
@@ -376,6 +430,9 @@ export class View {
     e.stopPropagation();
     const x0 = e.clientX;
     const y0 = e.clientY;
+    // Capture the pointer so that moving over an iframe doesn't swallow the events.
+    const capturer = e.currentTarget as HTMLElement | null;
+    capturer?.setPointerCapture(e.pointerId);
     const move = (ev: PointerEvent) => {
       if (!this.drag && Math.hypot(ev.clientX - x0, ev.clientY - y0) > 5) {
         this.startDrag(subject, label, sourceEl);
@@ -844,3 +901,19 @@ function intersect(a: Rect, b: Rect): Rect | null {
   const h = Math.min(a.y + a.h, b.y + b.h) - y;
   return w > 0 && h > 0 ? { x, y, w, h } : null;
 }
+
+/** Move a node, preserving its state (iframes, focus, ...) where `moveBefore` exists. */
+function move(parent: HTMLElement, node: HTMLElement): void {
+  const p = parent as HTMLElement & { moveBefore?: (n: Node, ref: Node | null) => void };
+  if (p.moveBefore && node.isConnected && parent.isConnected) {
+    try {
+      p.moveBefore(node, null);
+      return;
+    } catch {
+      // fall through
+    }
+  }
+  parent.appendChild(node);
+}
+
+export const hasMoveBefore = typeof (Element.prototype as { moveBefore?: unknown }).moveBefore === "function";

@@ -23,6 +23,8 @@ export interface Tab {
   id: string;
   title: string;
   content?: string;
+  /** Arbitrary serializable data for the host app (e.g. what to embed). */
+  data?: Record<string, unknown>;
 }
 
 export interface PaneNode {

@@ -3,7 +3,7 @@
 import "./style.css";
 import { examples } from "./examples";
 import { deserialize, serialize } from "./model";
-import { View } from "./view";
+import { hasMoveBefore, View } from "./view";
 import { Command, Workspace } from "./workspace";
 
 const keymap: Record<string, Command> = {
@@ -43,16 +43,34 @@ for (const ex of examples) select.append(new Option(ex.name, ex.name, false, ex 
 select.addEventListener("change", () => {
   location.search = `?example=${encodeURIComponent(select.value)}`;
 });
-document.querySelector("#description")!.textContent = example.description;
+document.querySelector("#description")!.textContent =
+  example.description + (hasMoveBefore ? "" : " ⚠ This browser has no Element.moveBefore: iframes will reload when moved.");
 
 const ws = new Workspace(example.build());
 const view = new View(ws, document.querySelector("#host")!, {
-  renderTab: (tab, p) => {
+  renderTab: (tab) => {
+    const data = tab.data ?? {};
+    if (typeof data.youtube === "string" || typeof data.srcdoc === "string") {
+      const f = document.createElement("iframe");
+      if (typeof data.youtube === "string") {
+        f.src = `https://www.youtube.com/embed/${data.youtube}`;
+        f.allow = "autoplay; encrypted-media; picture-in-picture; fullscreen";
+        f.allowFullscreen = true;
+        // YouTube refuses to play embeds without a referrer (error 153).
+        f.referrerPolicy = "strict-origin-when-cross-origin";
+      } else {
+        f.srcdoc = data.srcdoc as string;
+      }
+      if (typeof data.height === "number") f.style.height = `${data.height}px`;
+      f.style.flex = typeof data.height === "number" ? "none" : "1";
+      return f;
+    }
     const d = document.createElement("div");
     d.className = "demo-content";
     d.innerHTML = `<h2></h2><p class="meta"></p>`;
     d.querySelector("h2")!.textContent = tab.title;
-    d.querySelector(".meta")!.textContent = `pane ${p.id} · weight ${p.weight.toFixed(2)}`;
+    // Contents are created once and kept for the session, so show only stable facts.
+    d.querySelector(".meta")!.textContent = `tab ${tab.id}`;
     if (tab.content) {
       const text = document.createElement("p");
       text.className = "text";
