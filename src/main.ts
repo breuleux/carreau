@@ -101,7 +101,7 @@ for (const [k, c] of Object.entries(keymap)) {
 const json = document.querySelector<HTMLTextAreaElement>("#json")!;
 const status = document.querySelector("#status")!;
 const refresh = () => {
-  if (document.activeElement !== json) json.value = serialize(ws.root);
+  if (document.activeElement !== json) json.value = serialize(ws.floating.length ? ws.data() : ws.root);
   const s = ws.selection;
   status.textContent =
     `selection: ${ws.node(s.id)?.type} ${s.id}${s.range ? ` [${s.range.join("–")}]` : ""}` +
@@ -111,7 +111,7 @@ ws.onChange(refresh);
 refresh();
 document.querySelector("#load")!.addEventListener("click", () => {
   try {
-    ws.setRoot(deserialize(json.value));
+    ws.load(deserialize(json.value));
   } catch (err) {
     alert(String(err));
   }

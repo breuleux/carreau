@@ -2,6 +2,12 @@
 // No keyboard shortcuts live here: commands are exposed by name and the host binds them.
 
 import {
+  applyDropForest,
+  DragSubject,
+  DropTarget,
+  FloatingWindow,
+  ForestResult,
+  WorkspaceData,
   axisOf,
   computeRects,
   find,
@@ -78,6 +84,8 @@ function sameSel(a: Selection | null, b: Selection | null): boolean {
 
 export class Workspace {
   root: LayoutNode;
+  /** Panes pulled out of the hierarchy, shown as floating windows (last is frontmost). */
+  floating: FloatingWindow[] = [];
   selection: Selection;
   maximized: Selection | null = null;
   private maxHistory: (Selection | null)[] = [];
@@ -125,6 +133,62 @@ export class Workspace {
     this.maxHistory = this.maxHistory.map(valid);
     this.select(this.selection, false);
     this.emit();
+  }
+
+  /** Serializable state: the tree and the floating windows. */
+  data(): WorkspaceData {
+    return { root: this.root, floating: this.floating };
+  }
+
+  load(data: WorkspaceData): void {
+    this.floating = data.floating;
+    this.setRoot(data.root);
+  }
+
+  // -------------------------------------------------------------------------
+  // Floating windows
+
+  /** Pull a pane out of the hierarchy into a floating window. The last pane can't float. */
+  float(paneId: string, rect: Rect): boolean {
+    const loc = find(this.root, paneId);
+    if (!loc || loc.node.type !== "pane" || !loc.parent) return false;
+    const pane = loc.node;
+    loc.parent.children.splice(loc.index, 1);
+    this.floating.push({ root: pane, rect });
+    this.setRoot(this.root);
+    return true;
+  }
+
+  /** All trees: the main one first, then the floating windows' (minus `exclude`). */
+  trees(exclude?: FloatingWindow): LayoutNode[] {
+    return [this.root, ...this.floating.filter((w) => w !== exclude).map((w) => w.root)];
+  }
+
+  /** The tree (main or floating) containing a node. */
+  treeOf(id: string): LayoutNode | null {
+    return this.trees().find((t) => find(t, id)) ?? null;
+  }
+
+  /** Compute a drop across all trees. `exclude`: a window being docked (it is the subject). */
+  tryDrop(subject: DragSubject, target: DropTarget, exclude?: FloatingWindow): ForestResult | null {
+    return applyDropForest(this.trees(exclude), subject, target);
+  }
+
+  /**
+   * Commit a drop computed by tryDrop. `consumed`: the window that was excluded (docked).
+   * `floatRect`: where to show the new window, for `float` drops.
+   */
+  commitDrop(result: ForestResult, consumed?: FloatingWindow, floatRect?: Rect): void {
+    const others = this.floating.filter((w) => w !== consumed);
+    const next: FloatingWindow[] = [];
+    others.forEach((w, i) => {
+      const t = result.trees[i + 1];
+      if (t) next.push({ root: t, rect: w.rect }); // emptied windows close
+    });
+    if (result.floated && floatRect) next.push({ root: result.floated, rect: floatRect });
+    this.floating = next;
+    const main = result.trees[0]!;
+    this.setRoot(main, find(main, result.paneId) ? result.paneId : undefined);
   }
 
   // -------------------------------------------------------------------------

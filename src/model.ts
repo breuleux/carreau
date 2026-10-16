@@ -89,14 +89,36 @@ export function scrollColumn(children: LayoutNode[], weight = 1): SplitNode {
 // ---------------------------------------------------------------------------
 // Serialization
 
-export function serialize(node: LayoutNode): string {
-  return JSON.stringify(node, null, 2);
+/** A layout tree pulled out of the hierarchy, shown as a floating window. */
+export interface FloatingWindow {
+  root: LayoutNode;
+  /** position and size in pixels, relative to the workspace */
+  rect: Rect;
 }
 
-export function deserialize(text: string): LayoutNode {
+/** Everything that is serialized: the tree, plus floating windows. */
+export interface WorkspaceData {
+  root: LayoutNode;
+  floating: FloatingWindow[];
+}
+
+export function serialize(data: WorkspaceData | LayoutNode): string {
+  return JSON.stringify(data, null, 2);
+}
+
+/** Accepts either a bare tree or `{root, floating}`. */
+export function deserialize(text: string): WorkspaceData {
   const data = JSON.parse(text);
+  if (data && typeof data === "object" && "root" in data) {
+    validate(data.root);
+    const floating: FloatingWindow[] = (Array.isArray(data.floating) ? data.floating : []).map(
+      (f: any) => ({ root: f.root ?? f.pane, rect: f.rect }), // older format: {pane, rect}
+    );
+    for (const f of floating) validate(f.root);
+    return { root: data.root, floating };
+  }
   validate(data);
-  return data;
+  return { root: data, floating: [] };
 }
 
 function validate(n: any): void {
@@ -230,7 +252,7 @@ export function insertBeside(
   const axis = sideAxis[side];
   const before = sideIsStart[side];
   const { node: target, parent, index } = loc;
-  if (parent && axisOf(parent.type) === axis) {
+  if (parent && parent.id !== FOREST && axisOf(parent.type) === axis) {
     const w = target.weight / 2;
     target.weight = w;
     node.weight = w;
@@ -323,27 +345,100 @@ export type DropTarget =
   | { kind: "side"; targetId: string; side: Side }
   | { kind: "tab"; paneId: string; index: number }
   /** Insert as child `index` of split `splitId`, sized to 1/N of the split. */
-  | { kind: "between"; splitId: string; index: number };
+  | { kind: "between"; splitId: string; index: number }
+  /**
+   * Exchange contents with a pane: a dragged tab trades places with the pane's active tab;
+   * a dragged pane trades all its tabs with the pane's.
+   */
+  | { kind: "swap"; paneId: string }
+  /**
+   * Pull the dragged thing out of the hierarchy into a floating window. Only over its own
+   * pane: a dragged pane (or its only tab) floats the pane; a tab among others floats alone.
+   */
+  | { kind: "float"; paneId: string };
 
-export type DragSubject = { kind: "tab"; tabId: string } | { kind: "pane"; paneId: string };
+export type DragSubject =
+  | { kind: "tab"; tabId: string }
+  | { kind: "pane"; paneId: string }
+  /** A node that is in none of the trees (a floating window's tree being docked). */
+  | { kind: "external"; node: LayoutNode };
+
+/**
+ * Result of a drop across several trees (the main tree, then floating windows' trees, in
+ * the order they were given). A tree is null if the drop emptied it.
+ */
+export interface ForestResult {
+  trees: (LayoutNode | null)[];
+  /** id of the pane that ends up holding the dragged thing */
+  paneId: string;
+  /** for `float` drops: the pane to show as a new floating window (in none of the trees) */
+  floated?: PaneNode;
+}
 
 export interface DropResult {
   root: LayoutNode;
-  /** id of the pane that ends up holding the dragged thing */
   paneId: string;
+  floated?: PaneNode;
 }
 
-/** Apply a drop to a copy of the layout. Returns null if the drop is a no-op or invalid. */
+/** Single-tree convenience wrapper around applyDropForest. */
 export function applyDrop(
   original: LayoutNode,
   subject: DragSubject,
   target: DropTarget,
 ): DropResult | null {
-  const r = applyDropRaw(original, subject, target);
+  const r = applyDropForest([original], subject, target);
+  return r ? { root: r.trees[0]!, paneId: r.paneId, floated: r.floated } : null;
+}
+
+/**
+ * Apply a drop to copies of several trees at once, so that things can move between them.
+ * `trees[0]` is the main tree: a drop that would empty it is invalid. Returns null if the
+ * drop is invalid or a no-op.
+ */
+export function applyDropForest(
+  trees: LayoutNode[],
+  subject: DragSubject,
+  target: DropTarget,
+): ForestResult | null {
+  // All trees go under a temporary root, so that ids stay findable across them and the
+  // detach/insert logic works unchanged. That root is never normalized as a split: each
+  // tree is normalized on its own, and a tree emptied by the drop becomes an EMPTY marker
+  // rather than being spliced out, so that tree indices stay stable.
+  const forest: SplitNode = { type: "row", id: FOREST, weight: 1, children: clone(trees) };
+  const r = applyDropRaw(forest, subject, target);
+  if (!r) return null;
+  const out = forest.children.map((c) => (c.id === EMPTY ? null : c));
+  if (!out[0]) return null; // the main tree cannot be emptied
+  if (target.kind === "float") {
+    // Floating a floating window's only pane again would change nothing.
+    const i = trees.findIndex((t) => t.id === target.paneId);
+    if (i > 0) return null;
+  }
   // A drop that leaves the arrangement as it was (e.g. a lone tab dropped on a border it
   // already occupies) is pointless, even if sizes would change.
-  if (r && shape(r.root) === shape(original)) return null;
-  return r;
+  const shapeOf = (ts: (LayoutNode | null)[]) => ts.map((t) => (t ? shape(t) : "-")).join(" ; ");
+  if (!r.floated && shapeOf(out) === shapeOf(trees)) return null;
+  return { trees: out, paneId: r.paneId, floated: r.floated };
+}
+
+const FOREST = "__forest__";
+const EMPTY = "__empty__";
+const TOMB = "__tombstone__";
+
+function emptyMarker(): PaneNode {
+  return { type: "pane", id: EMPTY, weight: 1, tabs: [], active: 0 };
+}
+
+/** Remove a child; at the top of the forest, leave an EMPTY marker so indices don't shift. */
+function removeAt(parent: SplitNode, index: number): void {
+  if (parent.id === FOREST) parent.children[index] = emptyMarker();
+  else parent.children.splice(index, 1);
+}
+
+/** Normalize each tree of the forest separately. */
+function normalizeForest(forest: SplitNode): void {
+  forest.children = forest.children.map((c) => normalize(c) ?? emptyMarker());
 }
 
 /** Structure of a layout, ignoring ids and sizes: nesting, orientation, tabs in each pane. */
@@ -352,26 +447,64 @@ export function shape(node: LayoutNode): string {
   return `${node.type}(${node.children.map(shape).join(" ")})`;
 }
 
+/** Works on the forest in place. Returns where the dragged thing went, or null. */
 function applyDropRaw(
-  original: LayoutNode,
+  root: SplitNode,
   subject: DragSubject,
   target: DropTarget,
-): DropResult | null {
-  let root = clone(original);
-  const TOMB = "__tombstone__";
+): { paneId: string; floated?: PaneNode } | null {
+  if (target.kind === "float") {
+    if (subject.kind === "external") return null;
+    const loc = find(root, target.paneId);
+    if (!loc || loc.node.type !== "pane" || !loc.parent) return null;
+    const p = loc.node;
+    let floated: PaneNode;
+    if (subject.kind === "pane" || (p.tabs.length === 1 && p.tabs[0].id === subject.tabId)) {
+      if (subject.kind === "pane" && subject.paneId !== p.id) return null;
+      removeAt(loc.parent, loc.index);
+      floated = p;
+    } else {
+      const i = p.tabs.findIndex((t) => t.id === subject.tabId);
+      if (i < 0) return null; // only over its own pane
+      const [tab] = p.tabs.splice(i, 1);
+      if (i < p.active || p.active >= p.tabs.length) p.active = Math.max(0, p.active - 1);
+      floated = { type: "pane", id: genId("p"), weight: 1, tabs: [tab], active: 0 };
+    }
+    normalizeForest(root);
+    return { paneId: floated.id, floated };
+  }
+
+  if (target.kind === "swap") {
+    if (subject.kind === "external") return null;
+    const dest = find(root, target.paneId)?.node;
+    if (!dest || dest.type !== "pane") return null;
+    if (subject.kind === "pane") {
+      const src = find(root, subject.paneId)?.node;
+      if (!src || src.type !== "pane" || src === dest) return null;
+      [src.tabs, dest.tabs] = [dest.tabs, src.tabs];
+      [src.active, dest.active] = [dest.active, src.active];
+    } else {
+      const ft = findTab(root, subject.tabId);
+      if (!ft || ft.pane === dest) return null;
+      const theirs = dest.tabs[dest.active];
+      dest.tabs[dest.active] = ft.pane.tabs[ft.index];
+      ft.pane.tabs[ft.index] = theirs;
+    }
+    return { paneId: dest.id };
+  }
 
   // 1. Detach the subject, leaving a tombstone so that ids along the target path stay valid.
-  let moving: PaneNode;
-  if (subject.kind === "pane") {
+  let moving: LayoutNode;
+  if (subject.kind === "external") {
+    moving = { ...clone(subject.node), weight: 1 };
+  } else if (subject.kind === "pane") {
     const loc = find(root, subject.paneId);
-    if (!loc || loc.node.type !== "pane") return null;
+    if (!loc || loc.node.type !== "pane" || !loc.parent) return null;
     if (target.kind === "side" && target.targetId === subject.paneId) return null;
     if (target.kind === "tab" && target.paneId === subject.paneId) return null;
     if (target.kind === "between" && isNeighbourOf(root, subject.paneId, target)) return null;
     moving = loc.node;
-    const tomb: PaneNode = { type: "pane", id: TOMB, weight: moving.weight, tabs: [], active: 0 };
-    if (loc.parent) loc.parent.children[loc.index] = tomb;
-    else return null; // the only pane cannot move anywhere
+    loc.parent.children[loc.index] = { type: "pane", id: TOMB, weight: moving.weight, tabs: [], active: 0 };
   } else {
     const ft = findTab(root, subject.tabId);
     if (!ft) return null;
@@ -386,8 +519,8 @@ function applyDropRaw(
       if (dest === ft.pane && ft.index < idx) idx--;
       dest.tabs.splice(idx, 0, tab);
       dest.active = idx;
-      const r = normalize(root);
-      return r ? { root: r, paneId: dest.id } : null;
+      normalizeForest(root);
+      return { paneId: dest.id };
     }
     if (ft.pane.tabs.length === 0) {
       if (target.kind === "side" && target.targetId === ft.pane.id) return null;
@@ -398,12 +531,13 @@ function applyDropRaw(
 
   // 2. Insert.
   if (target.kind === "tab") {
+    if (moving.type !== "pane") return null; // only a pane's tabs can join a tab bar
     const dest = find(root, target.paneId)?.node;
     if (!dest || dest.type !== "pane") return null;
     dest.tabs.splice(target.index, 0, ...moving.tabs);
     dest.active = target.index + moving.active;
-    root = removeTomb(root, TOMB)!;
-    return { root, paneId: dest.id };
+    removeTomb(root);
+    return { paneId: dest.id };
   }
   if (target.kind === "between") {
     const split = find(root, target.splitId)?.node;
@@ -416,12 +550,17 @@ function applyDropRaw(
     moving.weight = staying.length ? total / staying.length : 1;
     split.children.splice(target.index, 0, moving);
   } else {
-    root = insertBeside(root, target.targetId, target.side, moving);
+    if (!find(root, target.targetId)) return null;
+    insertBeside(root, target.targetId, target.side, moving);
   }
 
   // 3. Remove tombstone & normalize (empty panes get dropped by normalize).
-  const r = removeTomb(root, TOMB);
-  return r ? { root: r, paneId: moving.id } : null;
+  removeTomb(root);
+  return { paneId: firstPane(moving).id };
+}
+
+function firstPane(n: LayoutNode): PaneNode {
+  return n.type === "pane" ? n : firstPane(n.children[0]);
 }
 
 /** Whether dropping `paneId` at `target` would put it right back where it is. */
@@ -435,8 +574,8 @@ function isNeighbourOf(
     (loc.index === target.index || loc.index === target.index - 1);
 }
 
-function removeTomb(root: LayoutNode, tombId: string): LayoutNode | null {
-  const loc = find(root, tombId);
-  if (loc?.parent) loc.parent.children.splice(loc.index, 1);
-  return normalize(root);
+function removeTomb(forest: SplitNode): void {
+  const loc = find(forest, TOMB);
+  if (loc?.parent) removeAt(loc.parent, loc.index);
+  normalizeForest(forest);
 }

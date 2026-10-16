@@ -1,13 +1,14 @@
 // DOM rendering, resizing, maximization (CSS only) and drag & drop with nested drop indicators.
 
 import {
-  applyDrop,
   axisOf,
   isScroll,
   DragSubject,
-  DropResult,
+  ForestResult,
   DropTarget,
   find,
+  findTab,
+  FloatingWindow,
   LayoutNode,
   opposite,
   panes,
@@ -43,7 +44,7 @@ export function accent(id: string, alpha = 1, lightness = 0.72): string {
 /** One possible drop. */
 interface Choice {
   target: DropTarget;
-  result: DropResult;
+  result: ForestResult;
   /** Node whose accent color represents this choice. */
   ownerId: string;
   /** The span of the boundary this choice inserts along (pixel coordinate along the edge). */
@@ -85,6 +86,28 @@ interface TabBar {
   dots: TabDot[];
 }
 
+/** The hovered pane's own drop zones: its edge thirds, and a swap icon in its center. */
+interface Zones {
+  /** visible rect of the pane */
+  rect: Rect;
+  /** Insert beside the pane (taking half of it), per side; missing if that's a no-op. */
+  sides: Partial<Record<Side, Choice>>;
+  /**
+   * The center icon, shown when in the center third and active over the icon: swap contents
+   * with the pane, or (over the dragged thing's own pane) float it.
+   */
+  center: { kind: "swap" | "float"; choice: Choice; cx: number; cy: number; r: number } | null;
+}
+
+/** Docking a floating window: hold it still this long (ms), within this many pixels. */
+const HOLD_TO_DOCK = 1000;
+const HOLD_TOLERANCE = 4;
+/** When the progress ring appears while holding still (ms). */
+const HOLD_RING_DELAY = 150;
+
+/** Radius of the swap icon. */
+const SWAP_R = 22;
+
 /** Length of each dash when several insertions share a stretch of boundary. */
 const DASH = 18;
 /** Visual gap between consecutive dashes. */
@@ -109,9 +132,14 @@ export class View {
     hoverPane: string | null;
     lines: SideLine[];
     tabBar: TabBar | null;
+    zones: Zones | null;
+    /** whether the cursor is in the center third (shows the swap icon) */
+    inCenter: boolean;
     near: SideLine | null;
     active: Choice | null;
     lastEvent?: PointerEvent;
+    /** set when docking a floating window */
+    win?: FloatingWindow;
   } | null = null;
 
   constructor(
@@ -130,7 +158,15 @@ export class View {
     this.overlay.classList.add("carreau-overlay");
     this.selBox = document.createElement("div");
     this.selBox.className = "carreau-selection";
-    this.el.append(this.rootEl, this.selBox, this.overlay);
+    this.floatLayer = document.createElement("div");
+    this.floatLayer.className = "carreau-floats";
+    this.el.append(this.rootEl, this.selBox, this.floatLayer, this.overlay);
+    // Close the pane menu on any outside interaction.
+    window.addEventListener("pointerdown", (e) => {
+      // (the anchor toggles the menu itself)
+      const t = e.target as Node;
+      if (this.menu && !this.menu.contains(t) && !this.menuAnchor?.contains(t)) this.closeMenu();
+    }, { capture: true });
     host.append(this.el);
     ws.onChange(() => this.render());
     new ResizeObserver(() => this.decorate()).observe(this.el);
@@ -142,7 +178,7 @@ export class View {
     window.addEventListener("blur", () =>
       setTimeout(() => {
         const a = document.activeElement;
-        if (a instanceof HTMLIFrameElement && this.rootEl.contains(a)) {
+        if (a instanceof HTMLIFrameElement && this.el.contains(a)) {
           const id = (a.closest(".carreau-pane") as HTMLElement | null)?.dataset.id;
           if (id && this.ws.selection.id !== id) this.ws.select({ id });
         }
@@ -171,15 +207,17 @@ export class View {
   render(): void {
     // Re-rendering rebuilds the DOM, so carry scroll positions over by node id.
     const scroll = new Map<string, [number, number]>();
-    for (const el of this.rootEl.querySelectorAll<HTMLElement>(".carreau-scroll"))
+    for (const el of this.el.querySelectorAll<HTMLElement>(".carreau-scroll"))
       scroll.set(el.dataset.id!, [el.scrollLeft, el.scrollTop]);
     // Attach the new tree *before* removing the old one, so that tab contents (iframes...)
     // can be moved across while staying connected: moveBefore only preserves state when
     // both the node and its destination are in the document.
-    const old = [...this.rootEl.childNodes];
+    const old = [...this.rootEl.childNodes, ...this.floatLayer.childNodes];
     const tree = this.renderNode(this.ws.root);
+    const floats = this.ws.floating.map((w) => this.renderFloat(w));
     this.rootEl.append(tree);
-    this.placeContents(tree);
+    this.floatLayer.append(...floats);
+    this.placeContents([tree, ...floats]);
     for (const n of old) n.remove();
     for (const [id, [l, t]] of scroll) {
       const el = this.elOf(id);
@@ -198,19 +236,23 @@ export class View {
   }
 
   private lastSelection = "";
+  private floatLayer: HTMLElement;
+  private menu: HTMLElement | null = null;
+  private menuAnchor: HTMLElement | null = null;
 
   /** One persistent element per tab, created once and moved around, never recreated. */
   private contents = new Map<string, HTMLElement>();
 
   /** Put every tab's content into its pane's body; only the active tab's is shown. */
-  private placeContents(tree: HTMLElement): void {
+  private placeContents(trees: HTMLElement[]): void {
     const seen = new Set<string>();
     // Pitfall: the old tree is still attached at this point, so look panes up in the new
     // tree only (a document-wide lookup would find the old pane first).
     const paneEls = new Map<string, HTMLElement>();
-    for (const el of [tree, ...tree.querySelectorAll<HTMLElement>(".carreau-pane")])
-      if (el.classList.contains("carreau-pane")) paneEls.set(el.dataset.id!, el);
-    for (const p of panes(this.ws.root)) {
+    for (const tree of trees)
+      for (const el of [tree, ...tree.querySelectorAll<HTMLElement>(".carreau-pane")])
+        if (el.classList.contains("carreau-pane")) paneEls.set(el.dataset.id!, el);
+    for (const p of this.ws.trees().flatMap((t) => panes(t))) {
       const body = paneEls.get(p.id)?.querySelector<HTMLElement>(":scope > .carreau-body");
       if (!body) continue;
       p.tabs.forEach((tab, i) => {
@@ -239,7 +281,13 @@ export class View {
   }
 
   private elOf(id: string): HTMLElement | null {
-    return this.rootEl.querySelector(`[data-id="${id}"]`);
+    const sel = `[data-id="${id}"]`;
+    return this.rootEl.querySelector(sel) ?? this.floatLayer.querySelector(sel);
+  }
+
+  /** A drop across all trees (main and floating), excluding a window being docked. */
+  private tryDrop(subject: DragSubject, target: DropTarget): ForestResult | null {
+    return this.ws.tryDrop(subject, target, this.drag?.win);
   }
 
   /**
@@ -250,6 +298,7 @@ export class View {
     node: LayoutNode,
     natural: Record<"row" | "column", boolean> = { row: false, column: false },
     sizedByContent = false,
+    inFloat = false,
   ): HTMLElement {
     const el = document.createElement("div");
     el.dataset.id = node.id;
@@ -257,7 +306,7 @@ export class View {
     el.style.setProperty("--accent", accent(node.id));
     if (node.type === "pane") {
       el.className = "carreau-pane";
-      el.append(this.renderTabBar(node));
+      el.append(this.renderTabBar(node, inFloat));
       const body = document.createElement("div");
       body.className = "carreau-body";
       // Filled by placeContents() once the tree is attached.
@@ -284,24 +333,16 @@ export class View {
           el.append(this.renderSplitter(node, i));
         }
       }
-      const child = this.renderNode(c, childNatural, byContent);
+      const child = this.renderNode(c, childNatural, byContent, inFloat);
       if (byContent) child.classList.add(`carreau-natural-${axis}`);
       el.append(child);
     });
     return el;
   }
 
-  private renderTabBar(node: PaneNode): HTMLElement {
+  private renderTabBar(node: PaneNode, inFloat: boolean): HTMLElement {
     const bar = document.createElement("div");
     bar.className = "carreau-tabbar";
-    const grip = document.createElement("div");
-    grip.className = "carreau-grip";
-    grip.title = "Drag to move this pane";
-    grip.textContent = "⠿";
-    grip.addEventListener("pointerdown", (e) =>
-      this.armDrag(e, { kind: "pane", paneId: node.id }, node.tabs[node.active]?.title ?? "pane", grip.parentElement!.parentElement!),
-    );
-    bar.append(grip);
     node.tabs.forEach((t, i) => {
       const tab = document.createElement("div");
       tab.className = "carreau-tab" + (i === node.active ? " active" : "");
@@ -309,14 +350,235 @@ export class View {
       tab.textContent = t.title;
       tab.addEventListener("click", () => {
         node.active = i;
-        this.ws.select({ id: node.id });
+        if (inFloat) this.ws.emit();
+        else this.ws.select({ id: node.id });
       });
       tab.addEventListener("pointerdown", (e) =>
         this.armDrag(e, { kind: "tab", tabId: t.id }, t.title, tab),
       );
+      if (!inFloat) {
+        // Double click: maximize the pane (or restore it if it already is).
+        tab.addEventListener("dblclick", () => {
+          this.ws.select({ id: node.id });
+          if (this.ws.maximized?.id === node.id && !this.ws.maximized.range) this.ws.restore();
+          else this.ws.maximize();
+        });
+      }
       bar.append(tab);
     });
+    // The empty part of the header moves the pane (there is no separate handle). It always
+    // keeps some room: tabs shrink (with an ellipsis) before it disappears.
+    const space = document.createElement("div");
+    space.className = "carreau-tabspace";
+    space.title = "Drag to move this pane";
+    space.addEventListener("pointerdown", (e) =>
+      this.armDrag(e, { kind: "pane", paneId: node.id }, node.tabs[node.active]?.title ?? "pane", bar.parentElement!),
+    );
+    bar.append(space);
+    if (!inFloat) {
+      // "More" button at the right end: opens the pane menu.
+      const more = document.createElement("div");
+      more.className = "carreau-more";
+      more.title = "Pane options";
+      more.textContent = "⋯";
+      more.addEventListener("pointerdown", (e) => e.stopPropagation());
+      more.addEventListener("click", () => {
+        if (this.menuAnchor === more) this.closeMenu();
+        else this.openMenu(more, node);
+      });
+      bar.append(more);
+    }
     return bar;
+  }
+
+  // -------------------------------------------------------------------------
+  // Pane menu
+
+  private openMenu(anchor: HTMLElement, node: PaneNode): void {
+    this.closeMenu();
+    const menu = document.createElement("div");
+    menu.className = "carreau-menu";
+    const item = (label: string, enabled: boolean, action: () => void) => {
+      const b = document.createElement("button");
+      b.textContent = label;
+      b.disabled = !enabled;
+      b.addEventListener("click", () => {
+        this.closeMenu();
+        action();
+      });
+      menu.append(b);
+    };
+    const canFloat = !!find(this.ws.root, node.id)?.parent;
+    item("Float", canFloat, () => this.ws.float(node.id, this.floatRect(node.id)!));
+    const g = anchor.getBoundingClientRect();
+    const b = this.el.getBoundingClientRect();
+    menu.style.right = `${b.right - g.right}px`;
+    menu.style.top = `${g.bottom - b.top + 2}px`;
+    this.el.append(menu);
+    this.menu = menu;
+    this.menuAnchor = anchor;
+    anchor.classList.add("open");
+  }
+
+  /** Where a pane floated out of the layout appears: its rect at 80%, centered on it. */
+  private floatRect(paneId: string): Rect | null {
+    const r = this.pxRect(paneId);
+    if (!r) return null;
+    const w = Math.max(240, r.w * 0.8);
+    const h = Math.max(160, r.h * 0.8);
+    return { x: r.x + (r.w - w) / 2, y: r.y + (r.h - h) / 2, w, h };
+  }
+
+  private closeMenu(): void {
+    this.menu?.remove();
+    this.menu = null;
+    this.menuAnchor?.classList.remove("open");
+    this.menuAnchor = null;
+  }
+
+  // -------------------------------------------------------------------------
+  // Floating windows
+
+  private renderFloat(win: FloatingWindow): HTMLElement {
+    const el = document.createElement("div");
+    el.className = "carreau-float";
+    this.placeFloat(el, win);
+    // Title bar: moves the window; holding it still for a second docks the whole window.
+    const bar = document.createElement("div");
+    bar.className = "carreau-float-bar";
+    bar.title = "Drag to move; hold still for a second to dock";
+    bar.style.setProperty("--accent", accent(firstPaneId(win.root)));
+    bar.addEventListener("pointerdown", (e) => this.armFloatMove(e, win));
+    el.append(bar);
+    const content = this.renderNode(win.root, undefined, false, true);
+    content.style.flex = "1 1 0";
+    el.append(content);
+    el.addEventListener("pointerdown", () => this.raiseFloat(win, el), { capture: true });
+    // Resize from the bottom-right corner.
+    const handle = document.createElement("div");
+    handle.className = "carreau-float-resize";
+    handle.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      handle.setPointerCapture(e.pointerId);
+      this.el.classList.add("is-resizing");
+      const { w, h } = win.rect;
+      const x0 = e.clientX;
+      const y0 = e.clientY;
+      const move = (ev: PointerEvent) => {
+        win.rect.w = Math.max(160, w + ev.clientX - x0);
+        win.rect.h = Math.max(100, h + ev.clientY - y0);
+        this.placeFloat(el, win);
+      };
+      const up = () => {
+        this.el.classList.remove("is-resizing");
+        handle.removeEventListener("pointermove", move);
+        handle.removeEventListener("pointerup", up);
+        this.ws.emit();
+      };
+      handle.addEventListener("pointermove", move);
+      handle.addEventListener("pointerup", up);
+    });
+    el.append(handle);
+    return el;
+  }
+
+  private placeFloat(el: HTMLElement, win: FloatingWindow): void {
+    Object.assign(el.style, {
+      left: `${win.rect.x}px`,
+      top: `${win.rect.y}px`,
+      width: `${win.rect.w}px`,
+      height: `${win.rect.h}px`,
+    });
+  }
+
+  /** Bring a window to the front without re-rendering (which would interrupt the click). */
+  private raiseFloat(win: FloatingWindow, el: HTMLElement): void {
+    if (this.ws.floating[this.ws.floating.length - 1] === win) return;
+    this.ws.floating.splice(this.ws.floating.indexOf(win), 1);
+    this.ws.floating.push(win);
+    // Reordering with appendChild would reload the window's iframes: use moveBefore.
+    move(this.floatLayer, el);
+  }
+
+  /**
+   * Drag a floating window by its grip. It moves freely; holding it still for a second
+   * switches to docking: the window turns translucent and the usual drop indicators appear.
+   * Releasing on one docks the pane back into the hierarchy; elsewhere, it stays floating.
+   */
+  private armFloatMove(e: PointerEvent, win: FloatingWindow): void {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const grip = e.currentTarget as HTMLElement; // the window's title bar
+    grip.setPointerCapture(e.pointerId);
+    const el = grip.closest(".carreau-float") as HTMLElement;
+    const { x, y } = win.rect;
+    const x0 = e.clientX;
+    const y0 = e.clientY;
+    this.el.classList.add("is-moving-float");
+    let anchor = { x: e.clientX, y: e.clientY };
+    let ring: HTMLElement | null = null;
+    let timers: number[] = [];
+    let docking = false;
+    const clearHold = () => {
+      timers.forEach(clearTimeout);
+      timers = [];
+      ring?.remove();
+      ring = null;
+    };
+    const startHold = (cx: number, cy: number) => {
+      clearHold();
+      if (docking) return;
+      // Show a filling ring after a short pause, dock after one second still.
+      timers.push(
+        window.setTimeout(() => {
+          ring = document.createElement("div");
+          ring.className = "carreau-hold";
+          ring.style.left = `${cx}px`;
+          ring.style.top = `${cy}px`;
+          ring.style.setProperty("--accent", accent(firstPaneId(win.root)));
+          ring.innerHTML = `<svg viewBox="0 0 40 40"><circle cx="20" cy="20" r="16" /></svg>`;
+          document.body.append(ring);
+        }, HOLD_RING_DELAY),
+        window.setTimeout(() => {
+          clearHold();
+          docking = true;
+          el.classList.add("docking");
+          this.startDrag({ kind: "external", node: win.root }, "", el, win);
+          if (last) this.dragMove(last);
+        }, HOLD_TO_DOCK),
+      );
+    };
+    let last: PointerEvent | null = null;
+    const move = (ev: PointerEvent) => {
+      last = ev;
+      win.rect.x = x + ev.clientX - x0;
+      win.rect.y = y + ev.clientY - y0;
+      this.placeFloat(el, win);
+      if (docking) {
+        if (this.drag) this.dragMove(ev);
+      } else if (Math.hypot(ev.clientX - anchor.x, ev.clientY - anchor.y) > HOLD_TOLERANCE) {
+        anchor = { x: ev.clientX, y: ev.clientY };
+        startHold(ev.clientX, ev.clientY);
+      }
+    };
+    const up = (ev: PointerEvent) => {
+      grip.removeEventListener("pointermove", move);
+      grip.removeEventListener("pointerup", up);
+      clearHold();
+      this.el.classList.remove("is-moving-float");
+      el.classList.remove("docking");
+      if (this.drag) {
+        this.dragMove(ev);
+        this.endDrag(true);
+      } else {
+        this.ws.emit();
+      }
+    };
+    // The hold timer only starts once the window has actually been dragged.
+    grip.addEventListener("pointermove", move);
+    grip.addEventListener("pointerup", up);
   }
 
   private renderSplitter(parent: SplitNode, i: number): HTMLElement {
@@ -425,7 +687,12 @@ export class View {
   // -------------------------------------------------------------------------
   // Drag & drop
 
-  private armDrag(e: PointerEvent, subject: DragSubject, label: string, sourceEl: HTMLElement): void {
+  private armDrag(
+    e: PointerEvent,
+    subject: DragSubject,
+    label: string,
+    sourceEl: HTMLElement,
+  ): void {
     if (e.button !== 0) return;
     e.stopPropagation();
     const x0 = e.clientX;
@@ -453,14 +720,16 @@ export class View {
     window.addEventListener("pointerup", up);
   }
 
-  private startDrag(subject: DragSubject, label: string, sourceEl: HTMLElement): void {
+  private startDrag(subject: DragSubject, label: string, sourceEl: HTMLElement, win?: FloatingWindow): void {
     const ghost = document.createElement("div");
     ghost.className = "carreau-ghost";
     ghost.textContent = label;
+    // A docking window follows the cursor itself: no label needed.
+    if (win) ghost.style.display = "none";
     document.body.append(ghost);
     sourceEl.classList.add("carreau-drag-source");
     this.el.classList.add("is-dragging");
-    this.drag = { subject, label, ghost, sourceEl, hoverPane: null, lines: [], tabBar: null, near: null, active: null };
+    this.drag = { subject, label, ghost, sourceEl, win, hoverPane: null, lines: [], tabBar: null, zones: null, inCenter: false, near: null, active: null };
   }
 
   private endDrag(commit: boolean): void {
@@ -471,7 +740,11 @@ export class View {
     d.sourceEl.classList.remove("carreau-drag-source");
     this.el.classList.remove("is-dragging");
     this.overlay.replaceChildren();
-    if (commit && d.active) this.ws.setRoot(d.active.result.root, d.active.result.paneId);
+    if (commit && d.active) {
+      const t = d.active.target;
+      const rect = t.kind === "float" ? this.floatRect(t.paneId) ?? undefined : undefined;
+      this.ws.commitDrop(d.active.result, d.win, rect);
+    }
   }
 
   private dragMove(ev: PointerEvent): void {
@@ -487,7 +760,7 @@ export class View {
     let hover: string | null = null;
     for (const el of document.elementsFromPoint(ev.clientX, ev.clientY)) {
       const p = (el as HTMLElement).closest?.(".carreau-pane") as HTMLElement | null;
-      if (p && this.rootEl.contains(p)) {
+      if (p && (this.rootEl.contains(p) || this.floatLayer.contains(p))) {
         hover = p.dataset.id!;
         break;
       }
@@ -498,9 +771,11 @@ export class View {
       d.hoverPane = hover;
       d.lines = hover ? this.buildLines(hover, d.subject) : [];
       d.tabBar = hover ? this.buildTabBar(hover, d.subject) : null;
+      d.zones = hover ? this.buildZones(hover, d.subject) : null;
     }
     d.near = null;
     d.active = null;
+    d.inCenter = false;
     const P = hover ? this.pxRect(hover) : null;
     if (P) {
       // The border line under the cursor (nearest border if two overlap, at corners).
@@ -522,6 +797,24 @@ export class View {
         for (const dot of d.tabBar.dots)
           if (!nearest || Math.abs(dot.x - px) < Math.abs(nearest.x - px)) nearest = dot;
         d.active = nearest?.choice ?? null;
+      } else if (d.zones && inRect(d.zones.rect, px, py)) {
+        // The pane's own zones: thirds of the box. Edge thirds insert beside the pane
+        // (corners go to the nearer edge); the center shows the swap icon.
+        const Z = d.zones;
+        const fx = (px - Z.rect.x) / Z.rect.w;
+        const fy = (py - Z.rect.y) / Z.rect.h;
+        const cands: [Side, number][] = [];
+        if (fx < 1 / 3) cands.push(["left", fx]);
+        if (fx > 2 / 3) cands.push(["right", 1 - fx]);
+        if (fy < 1 / 3) cands.push(["top", fy]);
+        if (fy > 2 / 3) cands.push(["bottom", 1 - fy]);
+        if (cands.length) {
+          cands.sort((a, b) => a[1] - b[1]);
+          d.active = Z.sides[cands[0][0]] ?? null;
+        } else {
+          d.inCenter = true;
+          if (Z.center && Math.hypot(px - Z.center.cx, py - Z.center.cy) <= Z.center.r) d.active = Z.center.choice;
+        }
       }
     }
     this.drawOverlay();
@@ -538,7 +831,7 @@ export class View {
     let r = this.pxRect(id);
     if (!el || !r) return null;
     const b = this.el.getBoundingClientRect();
-    for (let p = el.parentElement; p && p !== this.rootEl; p = p.parentElement) {
+    for (let p = el.parentElement; p && p !== this.rootEl && p !== this.floatLayer; p = p.parentElement) {
       if (!p.classList.contains("carreau-scroll")) continue;
       const c = p.getBoundingClientRect();
       r = intersect(r, { x: c.left - b.left, y: c.top - b.top, w: p.clientWidth, h: p.clientHeight });
@@ -557,7 +850,7 @@ export class View {
 
   /** Dots before the first tab, between tabs, and after the last tab. */
   private buildTabBar(paneId: string, subject: DragSubject): TabBar | null {
-    const root = this.ws.root;
+    const root = this.ws.treeOf(paneId) ?? this.ws.root;
     const paneEl = this.elOf(paneId)!;
     const tabs = [...paneEl.querySelectorAll<HTMLElement>(".carreau-tab")];
     const bar = paneEl.querySelector<HTMLElement>(".carreau-tabbar")!;
@@ -575,7 +868,7 @@ export class View {
       if (cx > br.right - 4) return; // overflowed out of the bar
       if (cx - b.left < barRect.x - 1 || cx - b.left > barRect.x + barRect.w + 1) return; // scrolled out
       const target: DropTarget = { kind: "tab", paneId, index };
-      const result = applyDrop(root, subject, target);
+      const result = this.tryDrop(subject, target);
       dots.push({
         choice: result ? { target, result, ownerId: paneId, span: [cx, cx] } : null,
         x: cx - b.left,
@@ -583,6 +876,29 @@ export class View {
       });
     });
     return { rect: barRect, dots };
+  }
+
+  private buildZones(paneId: string, subject: DragSubject): Zones | null {
+    const root = this.ws.treeOf(paneId) ?? this.ws.root;
+    const rect = this.visRect(paneId);
+    if (!rect) return null;
+    const sides: Zones["sides"] = {};
+    for (const side of SIDES) {
+      const target: DropTarget = { kind: "side", targetId: paneId, side };
+      const result = this.tryDrop(subject, target);
+      if (result) sides[side] = { target, result, ownerId: paneId, span: [0, 0] };
+    }
+    // Over its own pane, the center floats the dragged thing; elsewhere it swaps.
+    const own =
+      (subject.kind === "pane" && subject.paneId === paneId) ||
+      (subject.kind === "tab" && findTab(root, subject.tabId)?.pane.id === paneId);
+    const kind = own ? "float" : "swap";
+    const target: DropTarget = { kind, paneId };
+    const result = this.tryDrop(subject, target);
+    const center = result
+      ? { kind, choice: { target, result, ownerId: paneId, span: [0, 0] as [number, number] }, cx: rect.x + rect.w / 2, cy: rect.y + rect.h / 2, r: SWAP_R } as Zones["center"]
+      : null;
+    return { rect, sides, center };
   }
 
   /**
@@ -597,7 +913,7 @@ export class View {
     onlySide?: Side,
     withAcross = true,
   ): SideLine[] {
-    const root = this.ws.root;
+    const root = this.ws.treeOf(paneId) ?? this.ws.root;
     const P = this.pxRect(paneId);
     const Pvis = this.visRect(paneId);
     if (!P || !Pvis) return [];
@@ -645,7 +961,7 @@ export class View {
       let rest = chain;
       if (between) {
         const target: DropTarget = { kind: "between", splitId: between.split.id, index: between.index };
-        const result = applyDrop(root, subject, target);
+        const result = this.tryDrop(subject, target);
         const sp = span(chain[0].id);
         if (result && sp) {
           levels.push({
@@ -659,9 +975,11 @@ export class View {
         rest = chain.slice(1);
       }
       // One choice per distinct boundary: the innermost node for which the drop is valid.
-      let group: { span: [number, number]; best: Choice | null } | null = null;
+      // The pane's own boundary (and any ancestor sharing exactly that boundary) is left
+      // out: the pane's edge thirds already offer it. Lines only show enclosing groups.
+      let group: { span: [number, number]; best: Choice | null; self: boolean } | null = null;
       const flush = () => {
-        if (group?.best) levels.push(group.best);
+        if (group?.best && !group.self) levels.push(group.best);
       };
       for (const n of rest) {
         const full = fullSpan(n.id);
@@ -669,10 +987,11 @@ export class View {
         if (!full || !sp) continue;
         if (!group || Math.abs(full[0] - group.span[0]) > 1 || Math.abs(full[1] - group.span[1]) > 1) {
           flush();
-          group = { span: full, best: null };
+          group = { span: full, best: null, self: false };
         }
+        if (n.id === paneId) group.self = true;
         const target: DropTarget = { kind: "side", targetId: n.id, side };
-        const result = applyDrop(root, subject, target);
+        const result = this.tryDrop(subject, target);
         if (result) group.best = { target, result, span: sp, ownerId: n.id };
       }
       flush();
@@ -744,7 +1063,8 @@ export class View {
     if (d.active) {
       const t = d.active.target;
       let r: Rect | null = null;
-      if (t.kind === "tab") r = null; // the highlighted dot is the preview
+      if (t.kind === "tab" || t.kind === "swap") r = null; // dot / swap outlines are the preview
+      else if (t.kind === "float") r = this.floatRect(t.paneId); // where the window will appear
       else if (t.kind === "side") {
         r = this.pxRect(t.targetId);
         if (r) {
@@ -757,20 +1077,22 @@ export class View {
                   ? { ...r, h: r.h / 2 }
                   : { ...r, y: r.y + r.h / 2, h: r.h / 2 };
         }
-      } else if (d.active.straddle) {
+      } else if (t.kind === "between" && d.active.straddle) {
         // Straddle the boundary: last third of the node before, first third of the one after.
         const a = this.pxRect(d.active.straddle[0])!;
         const b = this.pxRect(d.active.straddle[1])!;
-        const split = this.ws.node(t.splitId)!;
+        const split = find(this.ws.treeOf(t.splitId) ?? this.ws.root, t.splitId)!.node;
         r =
           split.type !== "pane" && axisOf(split.type) === "row"
             ? { x: a.x + (a.w * 2) / 3, y: a.y, w: b.x + b.w / 3 - (a.x + (a.w * 2) / 3), h: a.h }
             : { x: a.x, y: a.y + (a.h * 2) / 3, w: a.w, h: b.y + b.h / 3 - (a.y + (a.h * 2) / 3) };
       }
       // Clip to what is visible of the nodes involved.
-      const clipId = t.kind === "side" ? t.targetId : t.kind === "between" ? t.splitId : null;
-      const clipR = clipId ? this.visRect(clipId) : null;
-      r = r && clipR ? intersect(r, clipR) : null;
+      if (t.kind !== "float") {
+        const clipId = t.kind === "side" ? t.targetId : t.kind === "between" ? t.splitId : null;
+        const clipR = clipId ? this.visRect(clipId) : null;
+        r = r && clipR ? intersect(r, clipR) : null;
+      }
       if (r) {
         mk("rect", {
           x: r.x + 3,
@@ -782,6 +1104,54 @@ export class View {
           style: `--accent: ${accent(d.active.ownerId)}`,
         });
       }
+    }
+
+    // Swap: outline both panes that trade contents.
+    if (d.active?.target.kind === "swap") {
+      const src =
+        d.subject.kind === "pane" ? d.subject.paneId
+          : d.subject.kind === "tab"
+            ? this.ws.trees().map((tr) => findTab(tr, (d.subject as { tabId: string }).tabId)).find(Boolean)?.pane.id
+            : undefined;
+      for (const id of [d.active.target.paneId, src]) {
+        const r = id ? this.visRect(id) : null;
+        if (r)
+          mk("rect", {
+            x: r.x + 3,
+            y: r.y + 3,
+            width: Math.max(0, r.w - 6),
+            height: Math.max(0, r.h - 6),
+            rx: 6,
+            class: "carreau-preview",
+            style: `--accent: ${accent(d.active.ownerId)}`,
+          });
+      }
+    }
+    // Center icon (swap, or float over its own pane), while in the center third of a pane.
+    if (d.inCenter && d.zones?.center) {
+      const { cx, cy, r, choice, kind } = d.zones.center;
+      const active = d.active === choice;
+      const g = mk("g", { class: "carreau-indicator carreau-swap" + (active ? " active" : "") });
+      mk("circle", {
+        cx, cy, r: active ? r + 3 : r,
+        fill: accent(choice.ownerId, active ? 0.95 : 0.7, active ? 0.8 : 0.62),
+        stroke: "#0009", "stroke-width": 1,
+      }, g);
+      if (kind === "float") {
+        // A cloud: overlapping circles over a flat base.
+        for (const [x, y, rr] of [[-6, 2, 5.5], [1, -3, 7.5], [8, 2, 5.5]] as const)
+          mk("circle", { cx: cx + x, cy: cy + y, r: rr, fill: "#111" }, g);
+        mk("rect", { x: cx - 6, y: cy + 2, width: 14, height: 5.5, fill: "#111" }, g);
+        return;
+      }
+      // Two opposed arrows.
+      const a = r * 0.5;
+      const arrow = (y: number, dir: 1 | -1) =>
+        `M ${cx - dir * a} ${y} L ${cx + dir * a} ${y} M ${cx + dir * a - dir * 6} ${y - 5} L ${cx + dir * a} ${y} L ${cx + dir * a - dir * 6} ${y + 5}`;
+      mk("path", {
+        d: `${arrow(cy - 6, 1)} ${arrow(cy + 6, -1)}`,
+        stroke: "#111", "stroke-width": 2.5, fill: "none", "stroke-linecap": "round", "stroke-linejoin": "round",
+      }, g);
     }
 
     // Tab insertion dots.
@@ -917,3 +1287,7 @@ function move(parent: HTMLElement, node: HTMLElement): void {
 }
 
 export const hasMoveBefore = typeof (Element.prototype as { moveBefore?: unknown }).moveBefore === "function";
+
+function firstPaneId(n: LayoutNode): string {
+  return n.type === "pane" ? n.id : firstPaneId(n.children[0]);
+}
