@@ -11,6 +11,7 @@ import {
   axisOf,
   computeRects,
   find,
+  findTab,
   LayoutNode,
   Located,
   normalize,
@@ -93,6 +94,8 @@ export class Workspace {
   private lastChild = new Map<string, string>();
   /** `${nodeId}:${side}` -> selection we came from through that side */
   private boundary = new Map<string, Selection>();
+  /** The latest single pane selected: plain moves start from it (multi-selections don't stick). */
+  private lastPane: string | null = null;
   /** selections preceding each expand, so that they can be undone */
   private expandStack: Selection[] = [];
   private listeners: (() => void)[] = [];
@@ -111,8 +114,22 @@ export class Workspace {
     for (const fn of this.listeners) fn();
   }
 
+  /** Look a node up in any tree (main or floating window). */
   node(id: string): LayoutNode | null {
-    return find(this.root, id)?.node ?? null;
+    for (const t of this.trees()) {
+      const n = find(t, id)?.node;
+      if (n) return n;
+    }
+    return null;
+  }
+
+  /** The tree holding the selection: navigation commands work within it. */
+  private tree(): LayoutNode {
+    return this.treeOf(this.selection.id) ?? this.root;
+  }
+
+  private inMain(id: string): boolean {
+    return !!find(this.root, id);
   }
 
   // -------------------------------------------------------------------------
@@ -129,8 +146,10 @@ export class Workspace {
     };
     if (select) this.selection = { id: select };
     this.selection = valid(this.selection) ?? { id: panes(root)[0].id };
-    this.maximized = valid(this.maximized);
-    this.maxHistory = this.maxHistory.map(valid);
+    // Maximization only applies to the main tree.
+    const validMain = (s: Selection | null) => (s && this.inMain(s.id) ? valid(s) : null);
+    this.maximized = validMain(this.maximized);
+    this.maxHistory = this.maxHistory.map(validMain);
     this.select(this.selection, false);
     this.emit();
   }
@@ -157,6 +176,34 @@ export class Workspace {
     this.floating.push({ root: pane, rect });
     this.setRoot(this.root);
     return true;
+  }
+
+  /** Whether a tab can be closed: anything but the very last tab of the main tree. */
+  canCloseTab(tabId: string): boolean {
+    const main = panes(this.root);
+    return !(main.length === 1 && main[0].tabs.length === 1 && main[0].tabs[0].id === tabId);
+  }
+
+  /**
+   * Close a tab, wherever it is. A pane left without tabs disappears; a floating window left
+   * empty closes. The main tree can't be emptied (see canCloseTab).
+   */
+  closeTab(tabId: string): boolean {
+    if (!this.canCloseTab(tabId)) return false;
+    for (const t of this.trees()) {
+      const ft = findTab(t, tabId);
+      if (!ft) continue;
+      const { pane, index } = ft;
+      pane.tabs.splice(index, 1);
+      if (index < pane.active || pane.active >= pane.tabs.length) pane.active = Math.max(0, pane.active - 1);
+      // Normalize the windows (dropping emptied ones); setRoot normalizes the main tree.
+      this.floating = this.floating
+        .map((w) => ({ ...w, root: normalize(w.root) }))
+        .filter((w): w is FloatingWindow => !!w.root);
+      this.setRoot(this.root);
+      return true;
+    }
+    return false;
   }
 
   /** All trees: the main one first, then the floating windows' (minus `exclude`). */
@@ -202,7 +249,10 @@ export class Workspace {
     }
     this.selection = sel;
     this.expandStack = [];
-    const path = pathTo(this.root, sel.id)!;
+    if (!sel.range && n.type === "pane") this.lastPane = sel.id;
+    // At the top level, maximization is cleared unconditionally.
+    if (sel.id === this.root.id && !sel.range) this.clearMaximization();
+    const path = pathTo(this.treeOf(sel.id)!, sel.id)!;
     for (let i = 0; i < path.length - 1; i++) this.lastChild.set(path[i].id, path[i + 1].id);
     if (emit) this.emit();
   }
@@ -292,11 +342,10 @@ export class Workspace {
     if (s.range) {
       this.select({ id: s.id }, false);
     } else {
-      const loc = find(this.root, s.id);
+      const loc = find(this.tree(), s.id);
       if (!loc?.parent) return;
       this.select({ id: loc.parent.id }, false);
     }
-    this.followMaximized(true);
     this.emit();
   }
 
@@ -312,13 +361,28 @@ export class Workspace {
     this.emit();
   }
 
+  /**
+   * If the selection is a row, column or range, go back to the latest single pane.
+   * Returns whether it did (the caller then does nothing else: clearing the multi-selection
+   * is the whole effect, so that the user sees what's going on).
+   */
+  clearMultiSelection(): boolean {
+    const n = this.node(this.selection.id);
+    if (n?.type === "pane" && !this.selection.range) return false;
+    if (!this.lastPane || this.node(this.lastPane)?.type !== "pane") return false;
+    this.select({ id: this.lastPane }, false);
+    this.emit();
+    return true;
+  }
+
   focus(side: Side): void {
+    if (this.clearMultiSelection()) return;
     const sel = this.selection;
     const target = this.neighbour(side);
     if (!target) return;
     this.boundary.set(`${target.id}:${opposite[side]}`, sel);
     this.select(target, false);
-    this.followMaximized(false);
+    this.followMaximized();
     this.emit();
   }
 
@@ -327,12 +391,13 @@ export class Workspace {
    * with the pane, and the boundary memory makes the opposite swap undo this one.
    */
   swap(side: Side): void {
+    if (this.clearMultiSelection()) return;
     const sel = this.selection;
     const me = this.node(sel.id);
     if (sel.range || !me || me.type !== "pane") return;
     const target = this.neighbour(side, true);
     if (!target) return;
-    swapNodes(this.root, me.id, target.id);
+    swapNodes(this.tree(), me.id, target.id);
     this.boundary.set(`${me.id}:${opposite[side]}`, target);
     this.boundary.set(`${target.id}:${side}`, { id: me.id });
     this.select({ id: me.id }, false);
@@ -341,7 +406,7 @@ export class Workspace {
 
   /** The pane (or remembered selection) touching the given side of the selection. */
   private neighbour(side: Side, panesOnly = false): Selection | null {
-    const rects = computeRects(this.root);
+    const rects = computeRects(this.tree());
     const sel = this.selection;
     const S = this.selectionRect(sel, rects);
     const key = (id: string, s: Side) => `${id}:${s}`;
@@ -378,7 +443,7 @@ export class Workspace {
     if (!target) {
       const center = horizontal ? S.y + S.h / 2 : S.x + S.w / 2;
       let best: { id: string; score: number } | null = null;
-      for (const p of panes(this.root)) {
+      for (const p of panes(this.tree())) {
         const r = rects.get(p.id)!;
         if (!adjacent(r)) continue;
         const ov = overlap(r);
@@ -408,7 +473,7 @@ export class Workspace {
     }
 
     while (x) {
-      const loc: Located = find(this.root, x.id)!;
+      const loc: Located = find(this.tree(), x.id)!;
       const parent: SplitNode | null = loc.parent;
       if (!parent) return;
       if (axisOf(parent.type) === axis) {
@@ -427,7 +492,6 @@ export class Workspace {
     const stack = this.expandStack;
     this.select(sel, false);
     this.expandStack = [...stack, prev];
-    this.followMaximized(true);
     this.emit();
   }
 
@@ -436,18 +500,37 @@ export class Workspace {
     const prev = this.expandStack.pop();
     if (!prev || !this.node(prev.id)) return;
     const stack = this.expandStack;
-    const maxFollows = sameSel(this.maximized, this.selection);
     this.select(prev, false);
     this.expandStack = stack;
-    if (maxFollows) this.maximized = { ...prev };
     this.emit();
   }
 
+  /**
+   * The maximization command: toggles if the selection is the maximized group; otherwise
+   * maximizes the selection (which may be wider or narrower than the current maximization).
+   */
+  toggleMaximize(): void {
+    if (this.maximized && sameSel(this.maximized, this.selection)) this.restore();
+    else this.maximize();
+  }
+
   maximize(): void {
+    if (!this.inMain(this.selection.id)) return; // not in floating windows
+    // Maximizing the whole tree is no maximization at all.
+    if (this.selection.id === this.root.id && !this.selection.range) {
+      this.clearMaximization();
+      this.emit();
+      return;
+    }
     if (sameSel(this.maximized, this.selection)) return;
     this.maxHistory.push(this.maximized);
     this.maximized = { ...this.selection };
     this.emit();
+  }
+
+  private clearMaximization(): void {
+    this.maximized = null;
+    this.maxHistory = [];
   }
 
   restore(): void {
@@ -461,12 +544,12 @@ export class Workspace {
    * `grow`: the selection grew (parent/expand) so the maximized region follows it.
    * Otherwise, follow only when the selection left the maximized region.
    */
-  private followMaximized(grow: boolean): void {
-    if (!this.maximized) return;
-    if (grow) {
-      this.maximized = { ...this.selection };
-      return;
-    }
+  /**
+   * Navigation never changes the maximized group, except that when focus moves to a pane
+   * outside of it, the maximization follows (otherwise the selection would be hidden).
+   */
+  private followMaximized(): void {
+    if (!this.maximized || !this.inMain(this.selection.id)) return;
     const inside = this.selectedNodes(this.maximized).some((m) =>
       pathTo(m, this.selection.id),
     );

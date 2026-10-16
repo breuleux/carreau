@@ -1,5 +1,5 @@
 /* ---------- demo page ---------- */
-html, body { margin: 0; height: 100%; background: #16171c; color: #ddd; font: 13px system-ui, sans-serif; }
+html, body { margin: 0; height: 100%; background: #2c2e38; color: #ddd; font: 13px system-ui, sans-serif; }
 body { display: flex; flex-direction: column; }
 header { display: flex; gap: 12px; align-items: center; padding: 6px 10px; border-bottom: 1px solid #2a2c35; }
 header #description { color: #999; }
@@ -10,10 +10,10 @@ aside { width: 280px; padding: 8px 12px; border-left: 1px solid #2a2c35; display
 aside h3 { margin: 8px 0 4px; font-size: 12px; text-transform: uppercase; color: #888; }
 aside ul { list-style: none; margin: 0; padding: 0; }
 aside li { display: flex; justify-content: space-between; padding: 1px 0; }
-kbd { background: #2a2c35; border-radius: 3px; padding: 0 4px; font-size: 11px; }
+kbd { background: #3c3f4b; border-radius: 3px; padding: 0 4px; font-size: 11px; }
 .hint { color: #888; }
 #json { flex: 1; min-height: 200px; background: #101115; color: #bbb; border: 1px solid #2a2c35; font: 10px ui-monospace, monospace; }
-.demo-content h2 { margin: 0 0 4px; font-weight: 500; color: var(--accent); }
+.demo-content h2 { margin: 0 0 4px; font-weight: 500; color: #ddd; }
 .demo-content .meta { margin: 0; color: #777; font-size: 11px; font-family: ui-monospace, monospace; }
 
 /* ---------- carreau ---------- */
@@ -30,17 +30,43 @@ kbd { background: #2a2c35; border-radius: 3px; padding: 0 4px; font-size: 11px; 
 
 .carreau-pane {
   display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden;
-  background: #1e2027; border: 1px solid #2c2e38; border-radius: 4px;
-  border-top: 2px solid color-mix(in oklch, var(--accent) 60%, transparent);
+  background: #191a20; border: 1px solid #2c2e38; border-radius: 4px;
 }
-.carreau-tabbar { display: flex; align-items: stretch; height: 26px; flex: 0 0 26px; background: #191a20; overflow: hidden; }
-.carreau-tabbar { padding-left: 4px; }
+/* Header, at the bottom of the pane: tabs (scrollable), the empty handle area, the ⋯ button;
+   a grey line separates it from the content above. */
+.carreau-tabbar {
+  display: flex; align-items: stretch; height: 27px; flex: 0 0 27px; box-sizing: border-box;
+  background: #191a20; overflow: hidden; padding-left: 4px;
+  box-shadow: inset 0 1px 0 #3a3d48; order: 1;
+}
+.carreau-tabs-wrap { position: relative; display: flex; flex: 0 1 auto; min-width: 0; }
+.carreau-tabs { display: flex; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+.carreau-tabs::-webkit-scrollbar { display: none; }
+.carreau-tabs-wrap::before, .carreau-tabs-wrap::after {
+  content: ""; position: absolute; top: 1px; bottom: 0; width: 14px; pointer-events: none;
+  opacity: 0; transition: opacity 120ms; z-index: 1;
+}
+.carreau-tabs-wrap::before { left: 0; background: linear-gradient(to right, #000c, transparent); }
+.carreau-tabs-wrap::after { right: 0; background: linear-gradient(to left, #000c, transparent); }
+.carreau-tabs-wrap.more-left::before, .carreau-tabs-wrap.more-right::after { opacity: 1; }
 .carreau-tabspace { flex: 1 0 24px; cursor: grab; }
+/* Every tab's text is faded except the selected one (active tab of the focused pane). The
+   active tab of each pane has a line on the header's grey line: mid grey, or the tab's
+   accent when its pane is focused. */
 .carreau-tab {
-  padding: 0 10px; display: block; line-height: 26px; color: #999; cursor: pointer; white-space: nowrap;
-  border-right: 1px solid #25272f; flex: 0 1 auto; box-sizing: border-box; min-width: 32px; overflow: hidden; text-overflow: ellipsis;
+  padding: 0 10px; line-height: 26px; color: #8a8d96; cursor: pointer; white-space: nowrap; flex: none;
 }
-.carreau-tab.active { background: #1e2027; color: #eee; box-shadow: inset 0 2px 0 var(--accent); }
+.carreau-tab:hover { color: #b8bac0; }
+.carreau-tab { display: flex; align-items: center; gap: 6px; padding-right: 6px; }
+.carreau-tab-close {
+  width: 16px; height: 16px; border-radius: 3px; display: flex; align-items: center; justify-content: center;
+  color: #5c5f69; cursor: pointer; font-size: 14px; line-height: 1;
+}
+.carreau-tab-close::before { content: "×"; }
+.carreau-tab:hover .carreau-tab-close, .carreau-pane.selected .carreau-tab.active .carreau-tab-close { color: #8a8d96; }
+.carreau-tab-close:hover { color: #eee !important; background: #3a3d48; }
+.carreau-tab.active { box-shadow: inset 0 2px 0 #6f727c; }
+.carreau-pane.selected > .carreau-tabbar .carreau-tab.active { color: #eee; box-shadow: inset 0 2px 0 var(--tab-accent); }
 .carreau-body { flex: 1; padding: 10px; overflow: auto; }
 
 /* maximization: CSS only */
@@ -50,10 +76,10 @@ kbd { background: #2a2c35; border-radius: 3px; padding: 0 4px; font-size: 11px; 
 /* selection */
 .carreau-selection {
   position: absolute; pointer-events: none; display: none; border-radius: 5px;
-  outline: 2px solid var(--accent); outline-offset: -1px; z-index: 5;
+  outline: 1.5px dashed #6a6d78; outline-offset: -1px; z-index: 5;
 }
 .carreau-selection[data-kind="row"], .carreau-selection[data-kind="column"], .carreau-selection[data-kind="range"] {
-  outline-style: dashed; background: color-mix(in oklch, var(--accent) 7%, transparent);
+  background: #ffffff08;
 }
 
 /* drag & drop */
@@ -65,8 +91,8 @@ kbd { background: #2a2c35; border-radius: 3px; padding: 0 4px; font-size: 11px; 
   background: #2d3040; color: #fff; box-shadow: 0 4px 14px #0008; font-size: 12px;
 }
 .carreau-preview {
-  fill: color-mix(in oklch, var(--accent) 14%, transparent);
-  stroke: var(--accent); stroke-width: 2; stroke-dasharray: 6 4;
+  fill: #ffffff14;
+  stroke: #7d808b; stroke-width: 1.5; stroke-dasharray: 6 4;
 }
 .carreau-indicator { transition: fill 80ms; }
 .carreau.is-dragging .carreau-selection { display: none !important; }
@@ -74,6 +100,9 @@ kbd { background: #2a2c35; border-radius: 3px; padding: 0 4px; font-size: 11px; 
 /* scroll splits: children take their natural size along the axis */
 .carreau-scroll-column { overflow-y: auto; overflow-x: hidden; }
 .carreau-scroll-row { overflow-x: auto; overflow-y: hidden; }
+/* A scroll split always occupies its whole allocation: give it a panel of its own, so that
+   the space left after short content reads as part of it (padding), not as a gap. */
+.carreau-scroll { background: #141519; border-radius: 4px; box-shadow: inset 0 0 0 1px #2c2e38; }
 .carreau-gap { flex: 0 0 4px; }
 .carreau-natural-column { flex: none !important; min-height: 60px; }
 .carreau-natural-row { flex: none !important; min-width: 120px; }
@@ -101,24 +130,32 @@ kbd { background: #2a2c35; border-radius: 3px; padding: 0 4px; font-size: 11px; 
 .carreau-menu button:disabled { color: #666; cursor: default; }
 
 /* floating windows */
-.carreau-floats { position: absolute; inset: 0; pointer-events: none; z-index: 7; }
+.carreau-floats { position: absolute; inset: 0; pointer-events: none; z-index: 7; overflow: hidden; }
 .carreau-float {
   position: absolute; display: flex; pointer-events: auto; border-radius: 6px;
   box-shadow: 0 12px 36px #000c, 0 0 0 1px #3a3d4a;
 }
 .carreau-float.docking { opacity: 0.35; pointer-events: none; }
-.carreau-float-resize { position: absolute; right: 0; bottom: 0; width: 14px; height: 14px; cursor: nwse-resize; }
-.carreau-float-resize::after {
-  content: ""; position: absolute; right: 3px; bottom: 3px; width: 7px; height: 7px;
-  border-right: 2px solid #666; border-bottom: 2px solid #666;
-}
+/* Resize handles: 4 edges and 4 corners, overhanging the window's border a little. */
+.carreau-float-resize { position: absolute; z-index: 2; }
+.carreau-resize-n, .carreau-resize-s { left: 10px; right: 10px; height: 8px; cursor: ns-resize; }
+.carreau-resize-e, .carreau-resize-w { top: 10px; bottom: 10px; width: 8px; cursor: ew-resize; }
+.carreau-resize-n { top: -5px; }
+.carreau-resize-s { bottom: -4px; }
+.carreau-resize-e { right: -4px; }
+.carreau-resize-w { left: -4px; }
+.carreau-resize-ne, .carreau-resize-nw, .carreau-resize-se, .carreau-resize-sw { width: 14px; height: 14px; }
+.carreau-resize-ne { top: -6px; right: -6px; cursor: nesw-resize; }
+.carreau-resize-sw { bottom: -6px; left: -6px; cursor: nesw-resize; }
+.carreau-resize-nw { top: -6px; left: -6px; cursor: nwse-resize; }
+.carreau-resize-se { bottom: -6px; right: -6px; cursor: nwse-resize; }
 .carreau.is-moving-float iframe { pointer-events: none; }
 .carreau.is-moving-float, .carreau.is-moving-float * { cursor: grabbing !important; }
 
 /* hold-to-dock progress ring */
 .carreau-hold { position: fixed; width: 40px; height: 40px; margin: -20px 0 0 -20px; pointer-events: none; z-index: 1000; }
 .carreau-hold circle {
-  fill: none; stroke: var(--accent); stroke-width: 4; stroke-linecap: round;
+  fill: none; stroke: #c8cad0; stroke-width: 4; stroke-linecap: round;
   stroke-dasharray: 100.5; stroke-dashoffset: 100.5; transform: rotate(-90deg); transform-origin: center;
   animation: carreau-hold 850ms linear forwards;
 }
@@ -131,6 +168,14 @@ kbd { background: #2a2c35; border-radius: 3px; padding: 0 4px; font-size: 11px; 
 .carreau-float { flex-direction: column; background: #16171c; }
 .carreau-float-bar {
   flex: 0 0 12px; cursor: grab; border-radius: 6px 6px 0 0;
-  background: linear-gradient(color-mix(in oklch, var(--accent) 45%, #2a2c36), #22242c);
+  background: linear-gradient(#3a3d48, #262830);
 }
-.carreau-float-bar:hover { background: linear-gradient(color-mix(in oklch, var(--accent) 70%, #2a2c36), #22242c); }
+.carreau-float-bar:hover { background: linear-gradient(#4a4e5a, #2c2e37); }
+.carreau-selection.in-float { z-index: 8; }
+
+/* navigation mode: the selected pane gets a brighter thin outline; panes can be dragged
+   from anywhere (iframes must not swallow the press) */
+.carreau.nav-mode .carreau-pane.selected { outline: 1px solid #d6d8de; outline-offset: -1px; }
+.carreau.nav-mode .carreau-selection { outline: 1px solid #d6d8de; }
+.carreau.nav-mode iframe { pointer-events: none; }
+.carreau.nav-mode .carreau-pane, .carreau.nav-mode .carreau-float { cursor: grab; }

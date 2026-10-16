@@ -31,14 +31,34 @@ const SVGNS = "http://www.w3.org/2000/svg";
 const SIDES: Side[] = ["left", "right", "top", "bottom"];
 
 // ---------------------------------------------------------------------------
-// Accent colors: constant lightness, narrow chroma range, hues spread by golden angle.
+// Colors. Almost everything is neutral grey. Tabs have an accent color (shown only on the
+// active tab of the focused pane); border lines get low-saturation colors only to tell
+// several possible insertions apart.
 
-const hues = new Map<string, number>();
-export function accent(id: string, alpha = 1, lightness = 0.72): string {
-  if (!hues.has(id)) hues.set(id, (hues.size * 137.508 + 20) % 360);
-  const h = hues.get(id)!;
-  const c = 0.13 + 0.03 * Math.sin(h);
-  return `oklch(${lightness} ${c.toFixed(3)} ${h.toFixed(1)} / ${alpha})`;
+const TAB_HUES = [25, 70, 145, 195, 240, 285, 330];
+
+/** A tab's accent color, derived from its id (several tabs may share one). */
+export function tabColor(tabId: string): string {
+  let h = 0;
+  for (const ch of tabId) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return `oklch(0.74 0.13 ${TAB_HUES[h % TAB_HUES.length]})`;
+}
+
+const LEVEL_HUES = [250, 35, 150, 310, 95];
+
+/**
+ * Color of a border line's k-th insertion level (outermost first). Level 0 is light grey;
+ * deeper levels get low-saturation hues so that dashes stand apart.
+ */
+function levelColor(k: number, alpha: number, lightness: number): string {
+  const chroma = k === 0 ? 0 : 0.06;
+  const hue = k === 0 ? 0 : LEVEL_HUES[(k - 1) % LEVEL_HUES.length];
+  return `oklch(${lightness} ${chroma} ${hue} / ${alpha})`;
+}
+
+/** Neutral grey at a given lightness/alpha, for icons and dots. */
+function grey(lightness: number, alpha = 1): string {
+  return `oklch(${lightness} 0 0 / ${alpha})`;
 }
 
 /** One possible drop. */
@@ -105,6 +125,13 @@ const HOLD_TOLERANCE = 4;
 /** When the progress ring appears while holding still (ms). */
 const HOLD_RING_DELAY = 150;
 
+/** After Esc cancels a drag, no drag may restart for this long (ms). */
+const ESC_COOLDOWN = 500;
+
+/** Minimum size of a floating window. */
+const FLOAT_MIN_W = 160;
+const FLOAT_MIN_H = 100;
+
 /** Radius of the swap icon. */
 const SWAP_R = 22;
 
@@ -161,6 +188,34 @@ export class View {
     this.floatLayer = document.createElement("div");
     this.floatLayer.className = "carreau-floats";
     this.el.append(this.rootEl, this.selBox, this.floatLayer, this.overlay);
+    // In navigation mode, pressing anywhere inside a pane drags it; anywhere inside a floating
+    // window moves the window. (Capture phase: this takes precedence over the content.)
+    this.el.addEventListener(
+      "pointerdown",
+      (e) => {
+        if (this.navMode === "off" || e.button !== 0) return;
+        const t = e.target as HTMLElement;
+        // Headers keep their usual behaviour (tabs, ×, ⋯; the empty part drags the pane).
+        if (t.closest(".carreau-tabbar")) return;
+        const floatEl = t.closest<HTMLElement>(".carreau-float");
+        if (floatEl && this.floatLayer.contains(floatEl)) {
+          if (t.closest(".carreau-float-resize")) return; // resizing still works
+          const win = this.ws.floating[[...this.floatLayer.children].indexOf(floatEl)];
+          if (win) {
+            this.raiseFloat(win, floatEl);
+            this.armFloatMove(e, win, floatEl);
+          }
+          return;
+        }
+        const paneEl = t.closest<HTMLElement>(".carreau-pane");
+        if (!paneEl || !this.rootEl.contains(paneEl)) return;
+        const node = this.ws.node(paneEl.dataset.id!);
+        if (node?.type !== "pane") return;
+        e.preventDefault();
+        this.armDrag(e, { kind: "pane", paneId: node.id }, node.tabs[node.active]?.title ?? "pane", paneEl, paneEl);
+      },
+      { capture: true },
+    );
     // Close the pane menu on any outside interaction.
     window.addEventListener("pointerdown", (e) => {
       // (the anchor toggles the menu itself)
@@ -169,9 +224,19 @@ export class View {
     }, { capture: true });
     host.append(this.el);
     ws.onChange(() => this.render());
-    new ResizeObserver(() => this.decorate()).observe(this.el);
+    new ResizeObserver(() => {
+      // Keep floating windows inside a workspace that changed size.
+      const els = [...this.floatLayer.children] as HTMLElement[];
+      this.ws.floating.forEach((w, i) => els[i] && this.placeFloat(els[i], w));
+      this.decorate();
+    }).observe(this.el);
     window.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && this.drag) this.endDrag(false);
+      if (e.key === "Escape" && this.drag) {
+        this.endDrag(false);
+        // The pointer is still down: without a cooldown, the next move would restart the
+        // drag right away and reactivate a drop zone.
+        this.dragCooldownUntil = performance.now() + ESC_COOLDOWN;
+      }
     });
     // Clicking into an iframe fires nothing in this document; the window loses focus and
     // the iframe becomes the active element. Select its pane.
@@ -209,6 +274,9 @@ export class View {
     const scroll = new Map<string, [number, number]>();
     for (const el of this.el.querySelectorAll<HTMLElement>(".carreau-scroll"))
       scroll.set(el.dataset.id!, [el.scrollLeft, el.scrollTop]);
+    const tabScroll = new Map<string, number>();
+    for (const el of this.el.querySelectorAll<HTMLElement>(".carreau-tabs"))
+      tabScroll.set(el.dataset.pane!, el.scrollLeft);
     // Attach the new tree *before* removing the old one, so that tab contents (iframes...)
     // can be moved across while staying connected: moveBefore only preserves state when
     // both the node and its destination are in the document.
@@ -226,6 +294,23 @@ export class View {
         el.scrollTop = t;
       }
     }
+    for (const el of this.el.querySelectorAll<HTMLElement>(".carreau-tabs")) {
+      const l = tabScroll.get(el.dataset.pane!);
+      if (l) el.scrollLeft = l;
+    }
+    // Keep the selected tab (active tab of the focused pane) in view when it changes.
+    const cur = this.ws.node(this.ws.selection.id);
+    const tabKey = cur?.type === "pane" ? `${cur.id}:${cur.active}` : "";
+    if (tabKey && tabKey !== this.lastTab) {
+      const scroller = this.elOf(cur!.id)?.querySelector<HTMLElement>(".carreau-tabs");
+      const tab = scroller?.children[(cur as PaneNode).active] as HTMLElement | undefined;
+      if (scroller && tab) {
+        if (tab.offsetLeft < scroller.scrollLeft) scroller.scrollLeft = tab.offsetLeft;
+        else if (tab.offsetLeft + tab.offsetWidth > scroller.scrollLeft + scroller.clientWidth)
+          scroller.scrollLeft = tab.offsetLeft + tab.offsetWidth - scroller.clientWidth;
+      }
+    }
+    this.lastTab = tabKey;
     this.decorate();
     // Bring a newly selected node into view (it may be scrolled out in a scroll split).
     const key = JSON.stringify(this.ws.selection);
@@ -236,8 +321,13 @@ export class View {
   }
 
   private lastSelection = "";
+  private lastTab = "";
   private floatLayer: HTMLElement;
   private menu: HTMLElement | null = null;
+  /** Navigation mode (driven by the keyboard controller). */
+  private navMode: "off" | "held" | "sticky" = "off";
+  /** No drag may start before this time (set when a drag is cancelled with Esc). */
+  private dragCooldownUntil = 0;
   private menuAnchor: HTMLElement | null = null;
 
   /** One persistent element per tab, created once and moved around, never recreated. */
@@ -262,6 +352,7 @@ export class View {
           el = document.createElement("div");
           el.className = "carreau-content";
           el.dataset.tab = tab.id;
+          el.style.setProperty("--accent", tabColor(tab.id));
           const c = this.opts.renderTab(tab, p);
           if (typeof c === "string") el.textContent = c;
           else el.append(c);
@@ -303,7 +394,6 @@ export class View {
     const el = document.createElement("div");
     el.dataset.id = node.id;
     el.style.flex = sizedByContent ? "none" : `${node.weight} 1 0`;
-    el.style.setProperty("--accent", accent(node.id));
     if (node.type === "pane") {
       el.className = "carreau-pane";
       el.append(this.renderTabBar(node, inFloat));
@@ -311,7 +401,10 @@ export class View {
       body.className = "carreau-body";
       // Filled by placeContents() once the tree is attached.
       el.append(body);
-      el.addEventListener("pointerdown", () => {
+      el.addEventListener("pointerdown", (e) => {
+        // Primary button only: selecting re-renders, which would replace the element under a
+        // middle click before its auxclick fires.
+        if (e.button !== 0) return;
         if (this.ws.selection.id !== node.id) this.ws.select({ id: node.id });
       });
       return el;
@@ -343,15 +436,55 @@ export class View {
   private renderTabBar(node: PaneNode, inFloat: boolean): HTMLElement {
     const bar = document.createElement("div");
     bar.className = "carreau-tabbar";
+    // Tabs never shrink: they scroll horizontally (scrollbar hidden), with a shadow at
+    // either end when there is more to see.
+    const wrap = document.createElement("div");
+    wrap.className = "carreau-tabs-wrap";
+    const scroller = document.createElement("div");
+    scroller.className = "carreau-tabs";
+    scroller.dataset.pane = node.id;
+    scroller.addEventListener("scroll", () => updateTabShadows(scroller));
+    // A plain mouse wheel scrolls the tabs sideways.
+    scroller.addEventListener(
+      "wheel",
+      (e) => {
+        if (e.deltaX !== 0 || scroller.scrollWidth <= scroller.clientWidth) return;
+        scroller.scrollLeft += e.deltaY;
+        e.preventDefault();
+      },
+      { passive: false },
+    );
+    wrap.append(scroller);
+    bar.append(wrap);
     node.tabs.forEach((t, i) => {
       const tab = document.createElement("div");
       tab.className = "carreau-tab" + (i === node.active ? " active" : "");
       tab.dataset.tab = t.id;
       tab.textContent = t.title;
+      tab.style.setProperty("--tab-accent", tabColor(t.id));
+      // Close button (the × is drawn in CSS, so the tab's text stays its title). The very last
+      // tab of the main tree can't be closed.
+      if (this.ws.canCloseTab(t.id)) {
+        const close = document.createElement("span");
+        close.className = "carreau-tab-close";
+        close.title = "Close tab";
+        close.addEventListener("pointerdown", (e) => e.stopPropagation()); // not a drag
+        close.addEventListener("click", (e) => {
+          e.stopPropagation(); // not an activation
+          this.ws.closeTab(t.id);
+        });
+        tab.append(close);
+      }
+      // Middle click closes too.
+      tab.addEventListener("auxclick", (e) => {
+        if (e.button === 1) this.ws.closeTab(t.id);
+      });
+      tab.addEventListener("mousedown", (e) => {
+        if (e.button === 1) e.preventDefault(); // no autoscroll
+      });
       tab.addEventListener("click", () => {
         node.active = i;
-        if (inFloat) this.ws.emit();
-        else this.ws.select({ id: node.id });
+        this.ws.select({ id: node.id });
       });
       tab.addEventListener("pointerdown", (e) =>
         this.armDrag(e, { kind: "tab", tabId: t.id }, t.title, tab),
@@ -364,7 +497,7 @@ export class View {
           else this.ws.maximize();
         });
       }
-      bar.append(tab);
+      scroller.append(tab);
     });
     // The empty part of the header moves the pane (there is no separate handle). It always
     // keeps some room: tabs shrink (with an ellipsis) before it disappears.
@@ -412,12 +545,26 @@ export class View {
     item("Float", canFloat, () => this.ws.float(node.id, this.floatRect(node.id)!));
     const g = anchor.getBoundingClientRect();
     const b = this.el.getBoundingClientRect();
+    // The header is at the bottom of panes: open upwards.
     menu.style.right = `${b.right - g.right}px`;
-    menu.style.top = `${g.bottom - b.top + 2}px`;
+    menu.style.bottom = `${b.bottom - g.top + 2}px`;
     this.el.append(menu);
     this.menu = menu;
     this.menuAnchor = anchor;
     anchor.classList.add("open");
+  }
+
+  /** Enter or leave navigation mode (see keyboard.ts). */
+  setNavMode(mode: "off" | "held" | "sticky"): void {
+    this.navMode = mode;
+    this.el.classList.toggle("nav-mode", mode !== "off");
+    this.el.classList.toggle("nav-sticky", mode === "sticky");
+  }
+
+  /** Float a pane of the main tree into a window (as the pane menu's Float does). */
+  floatPane(paneId: string): boolean {
+    const r = this.floatRect(paneId);
+    return !!r && this.ws.float(paneId, r);
   }
 
   /** Where a pane floated out of the layout appears: its rect at 80%, centered on it. */
@@ -447,43 +594,76 @@ export class View {
     const bar = document.createElement("div");
     bar.className = "carreau-float-bar";
     bar.title = "Drag to move; hold still for a second to dock";
-    bar.style.setProperty("--accent", accent(firstPaneId(win.root)));
     bar.addEventListener("pointerdown", (e) => this.armFloatMove(e, win));
     el.append(bar);
     const content = this.renderNode(win.root, undefined, false, true);
     content.style.flex = "1 1 0";
     el.append(content);
     el.addEventListener("pointerdown", () => this.raiseFloat(win, el), { capture: true });
-    // Resize from the bottom-right corner.
-    const handle = document.createElement("div");
-    handle.className = "carreau-float-resize";
-    handle.addEventListener("pointerdown", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      handle.setPointerCapture(e.pointerId);
-      this.el.classList.add("is-resizing");
-      const { w, h } = win.rect;
-      const x0 = e.clientX;
-      const y0 = e.clientY;
-      const move = (ev: PointerEvent) => {
-        win.rect.w = Math.max(160, w + ev.clientX - x0);
-        win.rect.h = Math.max(100, h + ev.clientY - y0);
-        this.placeFloat(el, win);
-      };
-      const up = () => {
-        this.el.classList.remove("is-resizing");
-        handle.removeEventListener("pointermove", move);
-        handle.removeEventListener("pointerup", up);
-        this.ws.emit();
-      };
-      handle.addEventListener("pointermove", move);
-      handle.addEventListener("pointerup", up);
-    });
-    el.append(handle);
+    // Resize from any corner or edge. The window never leaves the workspace.
+    for (const dir of ["n", "s", "e", "w", "ne", "nw", "se", "sw"]) {
+      const handle = document.createElement("div");
+      handle.className = `carreau-float-resize carreau-resize-${dir}`;
+      handle.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        handle.setPointerCapture(e.pointerId);
+        this.el.classList.add("is-resizing");
+        const start = { ...win.rect };
+        const x0 = e.clientX;
+        const y0 = e.clientY;
+        const move = (ev: PointerEvent) => {
+          const { w: W, h: H } = this.bounds();
+          const dx = ev.clientX - x0;
+          const dy = ev.clientY - y0;
+          const r = { ...start };
+          if (dir.includes("e")) r.w = clamp(start.w + dx, FLOAT_MIN_W, W - start.x);
+          if (dir.includes("s")) r.h = clamp(start.h + dy, FLOAT_MIN_H, H - start.y);
+          if (dir.includes("w")) {
+            const right = start.x + start.w;
+            r.x = clamp(start.x + dx, 0, right - FLOAT_MIN_W);
+            r.w = right - r.x;
+          }
+          if (dir.includes("n")) {
+            const bottom = start.y + start.h;
+            r.y = clamp(start.y + dy, 0, bottom - FLOAT_MIN_H);
+            r.h = bottom - r.y;
+          }
+          win.rect = r;
+          this.placeFloat(el, win);
+        };
+        const up = () => {
+          this.el.classList.remove("is-resizing");
+          handle.removeEventListener("pointermove", move);
+          handle.removeEventListener("pointerup", up);
+          this.ws.emit();
+        };
+        handle.addEventListener("pointermove", move);
+        handle.addEventListener("pointerup", up);
+      });
+      el.append(handle);
+    }
     return el;
   }
 
+  /** Size of the workspace, which floating windows must stay within. */
+  private bounds(): { w: number; h: number } {
+    return { w: this.el.clientWidth, h: this.el.clientHeight };
+  }
+
+  /** Fit a window's rect inside the workspace (shrinking it if the workspace is smaller). */
+  private clampFloat(win: FloatingWindow): void {
+    const { w: W, h: H } = this.bounds();
+    if (!W || !H) return; // not laid out yet
+    const r = win.rect;
+    r.w = Math.min(r.w, W);
+    r.h = Math.min(r.h, H);
+    r.x = clamp(r.x, 0, W - r.w);
+    r.y = clamp(r.y, 0, H - r.h);
+  }
+
   private placeFloat(el: HTMLElement, win: FloatingWindow): void {
+    this.clampFloat(win);
     Object.assign(el.style, {
       left: `${win.rect.x}px`,
       top: `${win.rect.y}px`,
@@ -506,11 +686,12 @@ export class View {
    * switches to docking: the window turns translucent and the usual drop indicators appear.
    * Releasing on one docks the pane back into the hierarchy; elsewhere, it stays floating.
    */
-  private armFloatMove(e: PointerEvent, win: FloatingWindow): void {
+  private armFloatMove(e: PointerEvent, win: FloatingWindow, handle?: HTMLElement): void {
     if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
-    const grip = e.currentTarget as HTMLElement; // the window's title bar
+    // The element that receives the gesture: the title bar, or (in navigation mode) the window.
+    const grip = handle ?? (e.currentTarget as HTMLElement);
     grip.setPointerCapture(e.pointerId);
     const el = grip.closest(".carreau-float") as HTMLElement;
     const { x, y } = win.rect;
@@ -537,7 +718,6 @@ export class View {
           ring.className = "carreau-hold";
           ring.style.left = `${cx}px`;
           ring.style.top = `${cy}px`;
-          ring.style.setProperty("--accent", accent(firstPaneId(win.root)));
           ring.innerHTML = `<svg viewBox="0 0 40 40"><circle cx="20" cy="20" r="16" /></svg>`;
           document.body.append(ring);
         }, HOLD_RING_DELAY),
@@ -556,8 +736,14 @@ export class View {
       win.rect.x = x + ev.clientX - x0;
       win.rect.y = y + ev.clientY - y0;
       this.placeFloat(el, win);
-      if (docking) {
-        if (this.drag) this.dragMove(ev);
+      if (docking && !this.drag) {
+        // Docking was cancelled (Esc): back to moving; docking needs a new hold.
+        docking = false;
+        el.classList.remove("docking");
+        anchor = { x: ev.clientX, y: ev.clientY };
+        startHold(ev.clientX, ev.clientY);
+      } else if (docking) {
+        this.dragMove(ev);
       } else if (Math.hypot(ev.clientX - anchor.x, ev.clientY - anchor.y) > HOLD_TOLERANCE) {
         anchor = { x: ev.clientX, y: ev.clientY };
         startHold(ev.clientX, ev.clientY);
@@ -623,6 +809,7 @@ export class View {
 
   /** Apply selection & maximization. Pure CSS: the DOM structure is untouched. */
   decorate(): void {
+    for (const sc of this.el.querySelectorAll<HTMLElement>(".carreau-tabs")) updateTabShadows(sc);
     for (const el of this.rootEl.querySelectorAll(".max-hidden, .max-path, .selected"))
       el.classList.remove("max-hidden", "max-path", "selected");
     this.el.classList.toggle("is-maximized", !!this.ws.maximized);
@@ -673,11 +860,13 @@ export class View {
         width: `${x1 - x0}px`,
         height: `${y1 - y0}px`,
       });
-      const accentId = this.ws.selection.id;
-      this.selBox.style.setProperty("--accent", accent(accentId));
-      this.selBox.dataset.kind = this.ws.selection.range
-        ? "range"
-        : (this.ws.node(accentId)?.type ?? "");
+      // A selected pane is shown by its active tab's accent (CSS on .selected); only
+      // rows, columns and ranges get an outline.
+      const sel = this.ws.selection;
+      const kind = sel.range ? "range" : (this.ws.node(sel.id)?.type ?? "");
+      this.selBox.dataset.kind = kind;
+      this.selBox.classList.toggle("in-float", !find(this.ws.root, sel.id));
+      if (kind === "pane") this.selBox.style.display = "none";
     } else {
       this.selBox.style.display = "none";
     }
@@ -692,16 +881,21 @@ export class View {
     subject: DragSubject,
     label: string,
     sourceEl: HTMLElement,
+    capturerEl?: HTMLElement,
   ): void {
     if (e.button !== 0) return;
     e.stopPropagation();
     const x0 = e.clientX;
     const y0 = e.clientY;
     // Capture the pointer so that moving over an iframe doesn't swallow the events.
-    const capturer = e.currentTarget as HTMLElement | null;
+    const capturer = capturerEl ?? (e.currentTarget as HTMLElement | null);
     capturer?.setPointerCapture(e.pointerId);
     const move = (ev: PointerEvent) => {
-      if (!this.drag && Math.hypot(ev.clientX - x0, ev.clientY - y0) > 5) {
+      if (
+        !this.drag &&
+        Math.hypot(ev.clientX - x0, ev.clientY - y0) > 5 &&
+        performance.now() >= this.dragCooldownUntil
+      ) {
         this.startDrag(subject, label, sourceEl);
       }
       if (this.drag) this.dragMove(ev);
@@ -864,9 +1058,16 @@ export class View {
     const barRect = visible && intersect({ x: br.left - b.left, y: br.top - b.top, w: br.width, h: br.height }, visible);
     if (!barRect) return null;
     const dots: TabDot[] = [];
-    xs.forEach((cx, index) => {
-      if (cx > br.right - 4) return; // overflowed out of the bar
-      if (cx - b.left < barRect.x - 1 || cx - b.left > barRect.x + barRect.w + 1) return; // scrolled out
+    // Tabs scroll horizontally: positions hidden in the middle get no dot; the first and last
+    // positions are pinned to the visible edges, so that both ends stay reachable.
+    const sr = paneEl.querySelector<HTMLElement>(".carreau-tabs")!.getBoundingClientRect();
+    const lo = Math.max(sr.left, barRect.x + b.left) + 3;
+    const hi = Math.min(sr.right, barRect.x + barRect.w + b.left) - 3;
+    xs.forEach((x, index) => {
+      let cx = x;
+      if (index === 0) cx = Math.max(cx, lo);
+      if (index === xs.length - 1) cx = Math.min(cx, hi);
+      if (cx < lo - 4 || cx > hi + 4) return; // scrolled out
       const target: DropTarget = { kind: "tab", paneId, index };
       const result = this.tryDrop(subject, target);
       dots.push({
@@ -1101,7 +1302,6 @@ export class View {
           height: Math.max(0, r.h - 6),
           rx: 6,
           class: "carreau-preview",
-          style: `--accent: ${accent(d.active.ownerId)}`,
         });
       }
     }
@@ -1123,8 +1323,7 @@ export class View {
             height: Math.max(0, r.h - 6),
             rx: 6,
             class: "carreau-preview",
-            style: `--accent: ${accent(d.active.ownerId)}`,
-          });
+            });
       }
     }
     // Center icon (swap, or float over its own pane), while in the center third of a pane.
@@ -1134,7 +1333,7 @@ export class View {
       const g = mk("g", { class: "carreau-indicator carreau-swap" + (active ? " active" : "") });
       mk("circle", {
         cx, cy, r: active ? r + 3 : r,
-        fill: accent(choice.ownerId, active ? 0.95 : 0.7, active ? 0.8 : 0.62),
+        fill: grey(active ? 0.86 : 0.7, active ? 0.95 : 0.75),
         stroke: "#0009", "stroke-width": 1,
       }, g);
       if (kind === "float") {
@@ -1162,7 +1361,7 @@ export class View {
         cx: dot.x,
         cy: dot.y,
         r: active ? 5.5 : 3.5,
-        fill: accent(dot.choice.ownerId, active ? 1 : 0.8, active ? 0.9 : 0.75),
+        fill: grey(active ? 0.92 : 0.7, active ? 1 : 0.8),
         stroke: "#0008",
         "stroke-width": 1,
         class: "carreau-indicator carreau-dot" + (active ? " active" : ""),
@@ -1199,8 +1398,9 @@ export class View {
         const [x1, y1, x2, y2] = horizontal ? [outer, 0, inner, 0] : [0, outer, 0, inner];
         const id = `carreau-grad-${gradients++}`;
         const g = mk("linearGradient", { id, gradientUnits: "userSpaceOnUse", x1, y1, x2, y2 }, defs);
-        mk("stop", { offset: 0, "stop-color": accent(c.ownerId, alpha, active ? 0.95 : 0.86) }, g);
-        mk("stop", { offset: 1, "stop-color": accent(c.ownerId, alpha, active ? 0.66 : 0.5) }, g);
+        const k = line.levels.indexOf(c);
+        mk("stop", { offset: 0, "stop-color": levelColor(k, alpha, active ? 0.97 : 0.86) }, g);
+        mk("stop", { offset: 1, "stop-color": levelColor(k, alpha, active ? 0.72 : 0.58) }, g);
         return `url(#${id})`;
       };
       const fills = new Map(line.levels.map((c) => [c, gradFor(c)]));
@@ -1290,4 +1490,16 @@ export const hasMoveBefore = typeof (Element.prototype as { moveBefore?: unknown
 
 function firstPaneId(n: LayoutNode): string {
   return n.type === "pane" ? n.id : firstPaneId(n.children[0]);
+}
+
+/** Show a shadow at either end of a tab scroller when there is more to see that way. */
+function updateTabShadows(scroller: HTMLElement): void {
+  const wrap = scroller.parentElement!;
+  const max = scroller.scrollWidth - scroller.clientWidth;
+  wrap.classList.toggle("more-left", scroller.scrollLeft > 1);
+  wrap.classList.toggle("more-right", scroller.scrollLeft < max - 1);
+}
+
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, v));
 }

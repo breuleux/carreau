@@ -1,38 +1,55 @@
-// Demo host. The keymap lives here, not in the library: Carreau only exposes commands.
+// Demo host. Key bindings live here, not in the library: Carreau takes them as configuration.
 
 import "./style.css";
 import { examples } from "./examples";
 import { deserialize, serialize } from "./model";
 import { hasMoveBefore, View } from "./view";
-import { Command, Workspace } from "./workspace";
+import { Workspace } from "./workspace";
+import { KeyboardNav, NavConfig } from "./keyboard";
 
-const keymap: Record<string, Command> = {
-  "Alt+ArrowLeft": "focusLeft",
-  "Alt+ArrowRight": "focusRight",
-  "Alt+ArrowUp": "focusUp",
-  "Alt+ArrowDown": "focusDown",
-  "Alt+Shift+ArrowLeft": "expandLeft",
-  "Alt+Shift+ArrowRight": "expandRight",
-  "Alt+Shift+ArrowUp": "expandUp",
-  "Alt+Shift+ArrowDown": "expandDown",
-  "Alt+KeyU": "unexpand",
-  "Alt+KeyH": "swapLeft",
-  "Alt+KeyL": "swapRight",
-  "Alt+KeyK": "swapUp",
-  "Alt+KeyJ": "swapDown",
-  "Alt+BracketRight": "nextTab",
-  "Alt+BracketLeft": "prevTab",
-  "Alt+KeyP": "parent",
-  "Alt+KeyC": "child",
-  "Alt+KeyM": "maximize",
-  "Alt+KeyB": "restore",
+// Navigation mode: hold Alt after Alt+Q (or Alt+Q, Q for sticky mode), then use these.
+const navConfig: NavConfig = {
+  activation: { modifier: "Alt", code: "KeyQ" },
+  bindings: {
+    ArrowLeft: "focusLeft",
+    ArrowRight: "focusRight",
+    ArrowUp: "focusUp",
+    ArrowDown: "focusDown",
+    KeyH: "focusLeft",
+    KeyL: "focusRight",
+    KeyK: "focusUp",
+    KeyJ: "focusDown",
+    "Shift+ArrowLeft": "expandLeft",
+    "Shift+ArrowRight": "expandRight",
+    "Shift+ArrowUp": "expandUp",
+    "Shift+ArrowDown": "expandDown",
+    "Shift+KeyH": "expandLeft",
+    "Shift+KeyL": "expandRight",
+    "Shift+KeyK": "expandUp",
+    "Shift+KeyJ": "expandDown",
+    KeyU: "unexpand",
+    KeyP: "parent",
+    KeyC: "child",
+    BracketRight: "nextTab",
+    BracketLeft: "prevTab",
+    KeyM: "toggleMaximize",
+    KeyF: "float",
+    KeyX: "closeTab",
+  },
+  // S, then a direction: swap. (Holding S swaps repeatedly.)
+  prefixes: {
+    KeyS: {
+      ArrowLeft: "swapLeft",
+      ArrowRight: "swapRight",
+      ArrowUp: "swapUp",
+      ArrowDown: "swapDown",
+      KeyH: "swapLeft",
+      KeyL: "swapRight",
+      KeyK: "swapUp",
+      KeyJ: "swapDown",
+    },
+  },
 };
-
-function chord(e: KeyboardEvent): string {
-  return [e.ctrlKey && "Ctrl", e.metaKey && "Meta", e.altKey && "Alt", e.shiftKey && "Shift", e.code]
-    .filter(Boolean)
-    .join("+");
-}
 
 const params = new URLSearchParams(location.search);
 const exIndex = Math.max(0, examples.findIndex((e) => e.name === params.get("example")));
@@ -81,21 +98,29 @@ const view = new View(ws, document.querySelector("#host")!, {
   },
 });
 
-window.addEventListener("keydown", (e) => {
-  const cmd = keymap[chord(e)];
-  if (cmd) {
-    e.preventDefault();
-    ws.run(cmd);
-  }
-});
+const nav = new KeyboardNav(ws, view, navConfig);
 
 // Help & serialization panel
 const help = document.querySelector("#keys")!;
-for (const [k, c] of Object.entries(keymap)) {
+const label = (k: string) => k.replace(/Key|Arrow|Bracket/g, "").replace("Right", "→").replace("Left", "←").replace("Up", "↑").replace("Down", "↓");
+const legend: [string, string][] = [
+  ["Alt+Q", "navigation mode (hold Alt)"],
+  ["Alt+Q Q", "sticky navigation mode (Q / Esc to leave)"],
+];
+// Group bindings by action, for a compact legend.
+const byAction = new Map<string, string[]>();
+for (const [k, a] of Object.entries(navConfig.bindings)) byAction.set(a, [...(byAction.get(a) ?? []), label(k)]);
+for (const [a, ks] of byAction) legend.push([ks.join(" "), a]);
+for (const [p, table] of Object.entries(navConfig.prefixes ?? {})) {
+  const byA = new Map<string, string[]>();
+  for (const [k, a] of Object.entries(table)) byA.set(a, [...(byA.get(a) ?? []), label(k)]);
+  for (const [a, ks] of byA) legend.push([`${label(p)}, ${ks.join(" ")}`, a]);
+}
+for (const [k, a] of legend) {
   const li = document.createElement("li");
   li.innerHTML = `<kbd></kbd> <span></span>`;
-  li.querySelector("kbd")!.textContent = k.replace(/Key|Arrow/g, "");
-  li.querySelector("span")!.textContent = c;
+  li.querySelector("kbd")!.textContent = k;
+  li.querySelector("span")!.textContent = a;
   help.append(li);
 }
 const json = document.querySelector<HTMLTextAreaElement>("#json")!;
@@ -104,10 +129,12 @@ const refresh = () => {
   if (document.activeElement !== json) json.value = serialize(ws.floating.length ? ws.data() : ws.root);
   const s = ws.selection;
   status.textContent =
+    (nav.mode !== "off" ? `[NAV${nav.mode === "sticky" ? " · sticky" : ""}${nav.prefix ? ` · ${label(nav.prefix)}…` : ""}] ` : "") +
     `selection: ${ws.node(s.id)?.type} ${s.id}${s.range ? ` [${s.range.join("–")}]` : ""}` +
     (ws.maximized ? ` · maximized: ${ws.maximized.id}${ws.maximized.range ? ` [${ws.maximized.range.join("–")}]` : ""}` : "");
 };
 ws.onChange(refresh);
+nav.onChange(refresh);
 refresh();
 document.querySelector("#load")!.addEventListener("click", () => {
   try {
