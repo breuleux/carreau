@@ -2,6 +2,21 @@
 // Everything in here is plain data and is JSON-serializable as-is.
 
 export type Orientation = "row" | "column";
+/**
+ * Plain splits share their space between children according to weights. Scroll splits let
+ * each child take its natural size along the axis and scroll when the content overflows.
+ * Scroll splits are never created by moving things around; only by building the layout.
+ */
+export type SplitType = Orientation | "scroll-row" | "scroll-column";
+
+/** The axis along which a split lays out its children. */
+export function axisOf(type: SplitType): Orientation {
+  return type === "row" || type === "scroll-row" ? "row" : "column";
+}
+
+export function isScroll(type: SplitType | "pane"): boolean {
+  return type === "scroll-row" || type === "scroll-column";
+}
 export type Side = "left" | "right" | "top" | "bottom";
 
 export interface Tab {
@@ -19,7 +34,7 @@ export interface PaneNode {
 }
 
 export interface SplitNode {
-  type: Orientation;
+  type: SplitType;
   id: string;
   weight: number;
   children: LayoutNode[];
@@ -61,6 +76,14 @@ export function column(children: LayoutNode[], weight = 1): SplitNode {
   return { type: "column", id: genId("c"), weight, children };
 }
 
+export function scrollRow(children: LayoutNode[], weight = 1): SplitNode {
+  return { type: "scroll-row", id: genId("sr"), weight, children };
+}
+
+export function scrollColumn(children: LayoutNode[], weight = 1): SplitNode {
+  return { type: "scroll-column", id: genId("sc"), weight, children };
+}
+
 // ---------------------------------------------------------------------------
 // Serialization
 
@@ -80,7 +103,7 @@ function validate(n: any): void {
   if (n.type === "pane") {
     if (!Array.isArray(n.tabs)) throw new Error("Pane without tabs");
     n.active = Math.max(0, Math.min(n.active ?? 0, n.tabs.length - 1));
-  } else if (n.type === "row" || n.type === "column") {
+  } else if (["row", "column", "scroll-row", "scroll-column"].includes(n.type)) {
     if (!Array.isArray(n.children)) throw new Error("Split without children");
     n.children.forEach(validate);
   } else {
@@ -155,7 +178,7 @@ export function computeRects(
   for (const c of root.children) {
     const frac = c.weight / total;
     const r =
-      root.type === "row"
+      axisOf(root.type) === "row"
         ? { x: frame.x + offset * frame.w, y: frame.y, w: frac * frame.w, h: frame.h }
         : { x: frame.x, y: frame.y + offset * frame.h, w: frame.w, h: frac * frame.h };
     computeRects(c, r, out);
@@ -205,7 +228,7 @@ export function insertBeside(
   const axis = sideAxis[side];
   const before = sideIsStart[side];
   const { node: target, parent, index } = loc;
-  if (parent && parent.type === axis) {
+  if (parent && axisOf(parent.type) === axis) {
     const w = target.weight / 2;
     target.weight = w;
     node.weight = w;
@@ -266,7 +289,12 @@ export function normalize(node: LayoutNode): LayoutNode | null {
   for (const c of node.children) {
     const n = normalize(c);
     if (!n) continue;
-    if (n.type === node.type) {
+    // Same type: flatten. A plain split inside a scroll split of the same axis is flattened
+    // too (its children are naturally sized either way); the reverse is not, since a scroll
+    // split inside a plain one is what provides the scrolling.
+    const sameAxisPlainInScroll =
+      n.type !== "pane" && !isScroll(n.type) && isScroll(node.type) && axisOf(n.type) === axisOf(node.type);
+    if (n.type !== "pane" && (n.type === node.type || sameAxisPlainInScroll)) {
       const total = n.children.reduce((s, k) => s + k.weight, 0) || 1;
       for (const k of n.children) {
         k.weight = (k.weight / total) * n.weight;
@@ -278,7 +306,8 @@ export function normalize(node: LayoutNode): LayoutNode | null {
   }
   node.children = kids;
   if (kids.length === 0) return null;
-  if (kids.length === 1) {
+  // A scroll split is kept even with a single child: it could not be recreated by dragging.
+  if (kids.length === 1 && !isScroll(node.type)) {
     kids[0].weight = node.weight;
     return kids[0];
   }

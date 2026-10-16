@@ -2,6 +2,8 @@
 
 import {
   applyDrop,
+  axisOf,
+  isScroll,
   DragSubject,
   DropResult,
   DropTarget,
@@ -109,6 +111,7 @@ export class View {
     tabBar: TabBar | null;
     near: SideLine | null;
     active: Choice | null;
+    lastEvent?: PointerEvent;
   } | null = null;
 
   constructor(
@@ -134,6 +137,20 @@ export class View {
     window.addEventListener("keydown", (e) => {
       if (e.key === "Escape" && this.drag) this.endDrag(false);
     });
+    // Scrolling a scroll split moves things around: refresh the selection outline and, during
+    // a drag, rebuild the indicators for the current cursor position.
+    this.el.addEventListener(
+      "scroll",
+      () => {
+        this.decorate();
+        const d = this.drag;
+        if (d?.lastEvent) {
+          d.hoverPane = null;
+          this.dragMove(d.lastEvent);
+        }
+      },
+      { capture: true },
+    );
     this.render();
   }
 
@@ -141,18 +158,45 @@ export class View {
   // Rendering
 
   render(): void {
+    // Re-rendering rebuilds the DOM, so carry scroll positions over by node id.
+    const scroll = new Map<string, [number, number]>();
+    for (const el of this.rootEl.querySelectorAll<HTMLElement>(".carreau-scroll"))
+      scroll.set(el.dataset.id!, [el.scrollLeft, el.scrollTop]);
     this.rootEl.replaceChildren(this.renderNode(this.ws.root));
+    for (const [id, [l, t]] of scroll) {
+      const el = this.elOf(id);
+      if (el) {
+        el.scrollLeft = l;
+        el.scrollTop = t;
+      }
+    }
     this.decorate();
+    // Bring a newly selected node into view (it may be scrolled out in a scroll split).
+    const key = JSON.stringify(this.ws.selection);
+    if (key !== this.lastSelection) {
+      this.lastSelection = key;
+      this.elOf(this.ws.selection.id)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
   }
+
+  private lastSelection = "";
 
   private elOf(id: string): HTMLElement | null {
     return this.rootEl.querySelector(`[data-id="${id}"]`);
   }
 
-  private renderNode(node: LayoutNode): HTMLElement {
+  /**
+   * `natural` tells, per axis, whether this node's size along that axis is determined by its
+   * content (inside a scroll split along that axis) rather than by the space available.
+   */
+  private renderNode(
+    node: LayoutNode,
+    natural: Record<"row" | "column", boolean> = { row: false, column: false },
+    sizedByContent = false,
+  ): HTMLElement {
     const el = document.createElement("div");
     el.dataset.id = node.id;
-    el.style.flex = `${node.weight} 1 0`;
+    el.style.flex = sizedByContent ? "none" : `${node.weight} 1 0`;
     el.style.setProperty("--accent", accent(node.id));
     if (node.type === "pane") {
       el.className = "carreau-pane";
@@ -171,10 +215,26 @@ export class View {
       });
       return el;
     }
-    el.className = `carreau-split carreau-${node.type}`;
+    const axis = axisOf(node.type);
+    const scroll = isScroll(node.type);
+    el.className = `carreau-split carreau-${axis}` + (scroll ? ` carreau-scroll carreau-${node.type}` : "");
+    // Children of a scroll split, or of a plain split whose own size along its axis is
+    // natural, size themselves along that axis. Weights mean nothing there: no splitters.
+    const childNatural = { ...natural, [axis]: natural[axis] || scroll };
+    const byContent = scroll || natural[axis];
     node.children.forEach((c, i) => {
-      if (i > 0) el.append(this.renderSplitter(node, i));
-      el.append(this.renderNode(c));
+      if (i > 0) {
+        if (byContent) {
+          const gap = document.createElement("div");
+          gap.className = "carreau-gap";
+          el.append(gap);
+        } else {
+          el.append(this.renderSplitter(node, i));
+        }
+      }
+      const child = this.renderNode(c, childNatural, byContent);
+      if (byContent) child.classList.add(`carreau-natural-${axis}`);
+      el.append(child);
     });
     return el;
   }
@@ -217,7 +277,7 @@ export class View {
       const b = parent.children[i];
       const ea = this.elOf(a.id)!;
       const eb = this.elOf(b.id)!;
-      const horiz = parent.type === "row";
+      const horiz = axisOf(parent.type) === "row";
       const size = (el: HTMLElement) =>
         horiz ? el.getBoundingClientRect().width : el.getBoundingClientRect().height;
       const pa = size(ea);
@@ -283,15 +343,13 @@ export class View {
 
     // Selection box
     const nodes = this.ws.selectedNodes();
-    const base = this.el.getBoundingClientRect();
-    const rs = nodes
-      .map((n) => this.elOf(n.id)?.getBoundingClientRect())
-      .filter((r): r is DOMRect => !!r && r.width > 0);
+    // Only the visible parts (selected nodes may be partly scrolled out).
+    const rs = nodes.map((n) => this.visRect(n.id)).filter((r): r is Rect => !!r);
     if (rs.length) {
-      const x0 = Math.min(...rs.map((r) => r.left)) - base.left;
-      const y0 = Math.min(...rs.map((r) => r.top)) - base.top;
-      const x1 = Math.max(...rs.map((r) => r.right)) - base.left;
-      const y1 = Math.max(...rs.map((r) => r.bottom)) - base.top;
+      const x0 = Math.min(...rs.map((r) => r.x));
+      const y0 = Math.min(...rs.map((r) => r.y));
+      const x1 = Math.max(...rs.map((r) => r.x + r.w));
+      const y1 = Math.max(...rs.map((r) => r.y + r.h));
       Object.assign(this.selBox.style, {
         display: "block",
         left: `${x0}px`,
@@ -361,6 +419,7 @@ export class View {
 
   private dragMove(ev: PointerEvent): void {
     const d = this.drag!;
+    d.lastEvent = ev;
     d.ghost.style.left = `${ev.clientX + 12}px`;
     d.ghost.style.top = `${ev.clientY + 8}px`;
     const base = this.el.getBoundingClientRect();
@@ -416,6 +475,21 @@ export class View {
     return u >= line.hit[0] && u <= line.hit[1];
   }
 
+  /** The part of a node that is visible, i.e. not scrolled out of its scroll ancestors. */
+  private visRect(id: string): Rect | null {
+    const el = this.elOf(id);
+    let r = this.pxRect(id);
+    if (!el || !r) return null;
+    const b = this.el.getBoundingClientRect();
+    for (let p = el.parentElement; p && p !== this.rootEl; p = p.parentElement) {
+      if (!p.classList.contains("carreau-scroll")) continue;
+      const c = p.getBoundingClientRect();
+      r = intersect(r, { x: c.left - b.left, y: c.top - b.top, w: p.clientWidth, h: p.clientHeight });
+      if (!r) return null;
+    }
+    return r;
+  }
+
   private pxRect(id: string): Rect | null {
     const el = this.elOf(id);
     if (!el) return null;
@@ -425,7 +499,7 @@ export class View {
   }
 
   /** Dots before the first tab, between tabs, and after the last tab. */
-  private buildTabBar(paneId: string, subject: DragSubject): TabBar {
+  private buildTabBar(paneId: string, subject: DragSubject): TabBar | null {
     const root = this.ws.root;
     const paneEl = this.elOf(paneId)!;
     const tabs = [...paneEl.querySelectorAll<HTMLElement>(".carreau-tab")];
@@ -435,9 +509,14 @@ export class View {
     const rects = tabs.map((t) => t.getBoundingClientRect());
     const xs = rects.length ? [rects[0].left, ...rects.map((r) => r.right)] : [br.left + 24];
     const y = br.top + br.height / 2 - b.top;
+    // The tab bar may be (partly) scrolled out of view.
+    const visible = this.visRect(paneId);
+    const barRect = visible && intersect({ x: br.left - b.left, y: br.top - b.top, w: br.width, h: br.height }, visible);
+    if (!barRect) return null;
     const dots: TabDot[] = [];
     xs.forEach((cx, index) => {
       if (cx > br.right - 4) return; // overflowed out of the bar
+      if (cx - b.left < barRect.x - 1 || cx - b.left > barRect.x + barRect.w + 1) return; // scrolled out
       const target: DropTarget = { kind: "tab", paneId, index };
       const result = applyDrop(root, subject, target);
       dots.push({
@@ -446,7 +525,7 @@ export class View {
         y,
       });
     });
-    return { rect: { x: br.left - b.left, y: br.top - b.top, w: br.width, h: br.height }, dots };
+    return { rect: barRect, dots };
   }
 
   /**
@@ -463,17 +542,24 @@ export class View {
   ): SideLine[] {
     const root = this.ws.root;
     const P = this.pxRect(paneId);
-    if (!P) return [];
+    const Pvis = this.visRect(paneId);
+    if (!P || !Pvis) return [];
     const lines: SideLine[] = [];
+    const edgeOf = (r: Rect, side: Side) =>
+      side === "left" ? r.x : side === "right" ? r.x + r.w : side === "top" ? r.y : r.y + r.h;
 
     for (const side of onlySide ? [onlySide] : SIDES) {
       const axis = sideAxis[side];
       const start = sideIsStart[side];
       const horizontal = axis === "row";
-      const span = (id: string): [number, number] | null => {
-        const r = this.pxRect(id);
-        return r ? (horizontal ? [r.y, r.y + r.h] : [r.x, r.x + r.w]) : null;
-      };
+      // A border scrolled out of view gets no line.
+      if (Math.abs(edgeOf(P, side) - edgeOf(Pvis, side)) > 0.5) continue;
+      // Spans are compared on full rects (to tell boundaries apart) but drawn clipped to
+      // what is visible.
+      const spanOf = (r: Rect | null): [number, number] | null =>
+        r ? (horizontal ? [r.y, r.y + r.h] : [r.x, r.x + r.w]) : null;
+      const span = (id: string) => spanOf(this.visRect(id));
+      const fullSpan = (id: string) => spanOf(this.pxRect(id));
 
       const chain: LayoutNode[] = [];
       let between: { split: SplitNode; index: number; before: LayoutNode; after: LayoutNode } | null = null;
@@ -482,7 +568,7 @@ export class View {
         chain.unshift(x);
         const loc = find(root, x.id)!;
         if (!loc.parent) break;
-        if (loc.parent.type === axis) {
+        if (axisOf(loc.parent.type) === axis) {
           const j = start ? loc.index - 1 : loc.index + 1;
           if (j >= 0 && j < loc.parent.children.length) {
             const lo = Math.min(j, loc.index);
@@ -521,11 +607,12 @@ export class View {
         if (group?.best) levels.push(group.best);
       };
       for (const n of rest) {
+        const full = fullSpan(n.id);
         const sp = span(n.id);
-        if (!sp) continue;
-        if (!group || Math.abs(sp[0] - group.span[0]) > 1 || Math.abs(sp[1] - group.span[1]) > 1) {
+        if (!full || !sp) continue;
+        if (!group || Math.abs(full[0] - group.span[0]) > 1 || Math.abs(full[1] - group.span[1]) > 1) {
           flush();
-          group = { span: sp, best: null };
+          group = { span: full, best: null };
         }
         const target: DropTarget = { kind: "side", targetId: n.id, side };
         const result = applyDrop(root, subject, target);
@@ -565,12 +652,13 @@ export class View {
         const otherSide = opposite[side];
         for (const q of panes(start ? between.before : between.after)) {
           const Q = this.pxRect(q.id);
-          if (!Q) continue;
+          const Qvis = this.visRect(q.id);
+          if (!Q || !Qvis) continue;
           const facing =
             otherSide === "left" ? Q.x : otherSide === "right" ? Q.x + Q.w
               : otherSide === "top" ? Q.y : Q.y + Q.h;
           if (Math.abs(facing - otherEdge) > 1.5) continue;
-          const qs: [number, number] = horizontal ? [Q.y, Q.y + Q.h] : [Q.x, Q.x + Q.w];
+          const qs: [number, number] = horizontal ? [Qvis.y, Qvis.y + Qvis.h] : [Qvis.x, Qvis.x + Qvis.w];
           const clip: [number, number] = [Math.max(qs[0], extent[0]), Math.min(qs[1], extent[1])];
           if (clip[1] <= clip[0]) continue;
           const [line] = this.buildLines(q.id, subject, otherSide, false);
@@ -618,10 +706,14 @@ export class View {
         const b = this.pxRect(d.active.straddle[1])!;
         const split = this.ws.node(t.splitId)!;
         r =
-          split.type === "row"
+          split.type !== "pane" && axisOf(split.type) === "row"
             ? { x: a.x + (a.w * 2) / 3, y: a.y, w: b.x + b.w / 3 - (a.x + (a.w * 2) / 3), h: a.h }
             : { x: a.x, y: a.y + (a.h * 2) / 3, w: a.w, h: b.y + b.h / 3 - (a.y + (a.h * 2) / 3) };
       }
+      // Clip to what is visible of the nodes involved.
+      const clipId = t.kind === "side" ? t.targetId : t.kind === "between" ? t.splitId : null;
+      const clipR = clipId ? this.visRect(clipId) : null;
+      r = r && clipR ? intersect(r, clipR) : null;
       if (r) {
         mk("rect", {
           x: r.x + 3,
@@ -744,3 +836,11 @@ function inRect(r: Rect, x: number, y: number): boolean {
   return x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
 }
 
+
+function intersect(a: Rect, b: Rect): Rect | null {
+  const x = Math.max(a.x, b.x);
+  const y = Math.max(a.y, b.y);
+  const w = Math.min(a.x + a.w, b.x + b.w) - x;
+  const h = Math.min(a.y + a.h, b.y + b.h) - y;
+  return w > 0 && h > 0 ? { x, y, w, h } : null;
+}

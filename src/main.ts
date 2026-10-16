@@ -53,6 +53,12 @@ const view = new View(ws, document.querySelector("#host")!, {
     d.innerHTML = `<h2></h2><p class="meta"></p>`;
     d.querySelector("h2")!.textContent = tab.title;
     d.querySelector(".meta")!.textContent = `pane ${p.id} · weight ${p.weight.toFixed(2)}`;
+    if (tab.content) {
+      const text = document.createElement("p");
+      text.className = "text";
+      text.textContent = tab.content;
+      d.append(text);
+    }
     return d;
   },
 });

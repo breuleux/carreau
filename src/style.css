@@ -66,3 +66,13 @@ kbd { background: #2a2c35; border-radius: 3px; padding: 0 4px; font-size: 11px; 
 }
 .carreau-indicator { transition: fill 80ms; }
 .carreau.is-dragging .carreau-selection { display: none !important; }
+
+/* scroll splits: children take their natural size along the axis */
+.carreau-scroll-column { overflow-y: auto; overflow-x: hidden; }
+.carreau-scroll-row { overflow-x: auto; overflow-y: hidden; }
+.carreau-gap { flex: 0 0 4px; }
+.carreau-natural-column { flex: none !important; min-height: 60px; }
+.carreau-natural-row { flex: none !important; min-width: 120px; }
+.carreau-natural-column > .carreau-body, .carreau-natural-row > .carreau-body { overflow: visible; }
+.demo-content .text { margin: 8px 0 0; white-space: pre-wrap; color: #bbb; line-height: 1.45; }
+.carreau-natural-row .demo-content .text { white-space: pre; }

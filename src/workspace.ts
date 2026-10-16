@@ -2,6 +2,7 @@
 // No keyboard shortcuts live here: commands are exposed by name and the host binds them.
 
 import {
+  axisOf,
   computeRects,
   find,
   LayoutNode,
@@ -335,7 +336,7 @@ export class Workspace {
     let x: LayoutNode | null = this.node(s.id);
     if (!x) return;
 
-    if (s.range && x.type === axis) {
+    if (s.range && x.type !== "pane" && axisOf(x.type) === axis) {
       const [lo, hi] = s.range;
       if (start && lo > 0) return this.commitExpand({ id: x.id, range: [lo - 1, hi] });
       if (!start && hi < x.children.length - 1)
@@ -346,7 +347,7 @@ export class Workspace {
       const loc: Located = find(this.root, x.id)!;
       const parent: SplitNode | null = loc.parent;
       if (!parent) return;
-      if (parent.type === axis) {
+      if (axisOf(parent.type) === axis) {
         const j = start ? loc.index - 1 : loc.index + 1;
         if (j >= 0 && j < parent.children.length) {
           const range: [number, number] = start ? [j, loc.index] : [loc.index, j];
