@@ -57,6 +57,9 @@ interface SideLine {
   levels: Choice[];
   /** The band occupied by the line, across the edge: [from, to] in pixels. */
   band: [number, number];
+  /** Hit area across the edge. Like `band`, but on a border between siblings it covers the
+   *  whole gap, so that the line doesn't vanish while the cursor is right on the separator. */
+  hit: [number, number];
   /** Whether the line borders the gap between two siblings (rather than the workspace edge). */
   straddles: boolean;
   /**
@@ -68,11 +71,16 @@ interface SideLine {
 
 /** A dot in the tab bar: insert the tab(s) at this position. */
 interface TabDot {
-  choice: Choice;
+  /** null when inserting at this position would be a no-op (the dot is not drawn) */
+  choice: Choice | null;
   x: number;
   y: number;
-  /** hit area */
+}
+
+/** The tab bar of the hovered pane: dropping anywhere in it picks the nearest gap. */
+interface TabBar {
   rect: Rect;
+  dots: TabDot[];
 }
 
 /** Length of each dash when several insertions share a stretch of boundary. */
@@ -98,7 +106,7 @@ export class View {
     sourceEl: HTMLElement;
     hoverPane: string | null;
     lines: SideLine[];
-    dots: TabDot[];
+    tabBar: TabBar | null;
     near: SideLine | null;
     active: Choice | null;
   } | null = null;
@@ -337,7 +345,7 @@ export class View {
     document.body.append(ghost);
     sourceEl.classList.add("carreau-drag-source");
     this.el.classList.add("is-dragging");
-    this.drag = { subject, label, ghost, sourceEl, hoverPane: null, lines: [], dots: [], near: null, active: null };
+    this.drag = { subject, label, ghost, sourceEl, hoverPane: null, lines: [], tabBar: null, near: null, active: null };
   }
 
   private endDrag(commit: boolean): void {
@@ -373,29 +381,31 @@ export class View {
     if (hover !== d.hoverPane) {
       d.hoverPane = hover;
       d.lines = hover ? this.buildLines(hover, d.subject) : [];
-      d.dots = hover ? this.buildTabDots(hover, d.subject) : [];
+      d.tabBar = hover ? this.buildTabBar(hover, d.subject) : null;
     }
     d.near = null;
     d.active = null;
     const P = hover ? this.pxRect(hover) : null;
     if (P) {
-      // Show the line of the nearest border, if close enough...
+      // The border line under the cursor (nearest border if two overlap, at corners).
       let best: { line: SideLine; dist: number } | null = null;
       for (const line of d.lines) {
+        if (!this.inLine(line, px, py)) continue;
         const dist = Math.abs(
           line.side === "left" ? px - P.x : line.side === "right" ? P.x + P.w - px
             : line.side === "top" ? py - P.y : P.y + P.h - py,
         );
-        const across = sideAxis[line.side] === "row" ? P.w : P.h;
-        const reach = Math.min(40, across * 0.3);
-        if (dist <= reach && (!best || dist < best.dist)) best = { line, dist };
+        if (!best || dist < best.dist) best = { line, dist };
       }
       d.near = best?.line ?? null;
-      // ...but only trigger it when the cursor is actually over it.
-      if (d.near && this.inLine(d.near, px, py)) {
+      if (d.near) {
         d.active = dashAt(d.near, sideAxis[d.near.side] === "row" ? py : px);
-      } else {
-        d.active = d.dots.find((dot) => inRect(dot.rect, px, py))?.choice ?? null;
+      } else if (d.tabBar && inRect(d.tabBar.rect, px, py)) {
+        // Anywhere in the tab bar: the nearest gap between tabs (nothing if that's a no-op).
+        let nearest: TabDot | null = null;
+        for (const dot of d.tabBar.dots)
+          if (!nearest || Math.abs(dot.x - px) < Math.abs(nearest.x - px)) nearest = dot;
+        d.active = nearest?.choice ?? null;
       }
     }
     this.drawOverlay();
@@ -403,7 +413,7 @@ export class View {
 
   private inLine(line: SideLine, px: number, py: number): boolean {
     const u = sideAxis[line.side] === "row" ? px : py;
-    return u >= line.band[0] && u <= line.band[1];
+    return u >= line.hit[0] && u <= line.hit[1];
   }
 
   private pxRect(id: string): Rect | null {
@@ -415,7 +425,7 @@ export class View {
   }
 
   /** Dots before the first tab, between tabs, and after the last tab. */
-  private buildTabDots(paneId: string, subject: DragSubject): TabDot[] {
+  private buildTabBar(paneId: string, subject: DragSubject): TabBar {
     const root = this.ws.root;
     const paneEl = this.elOf(paneId)!;
     const tabs = [...paneEl.querySelectorAll<HTMLElement>(".carreau-tab")];
@@ -423,29 +433,20 @@ export class View {
     const b = this.el.getBoundingClientRect();
     const br = bar.getBoundingClientRect();
     const rects = tabs.map((t) => t.getBoundingClientRect());
-    const xs = rects.length
-      ? [rects[0].left, ...rects.map((r) => r.right)]
-      : [br.left + 24];
+    const xs = rects.length ? [rects[0].left, ...rects.map((r) => r.right)] : [br.left + 24];
     const y = br.top + br.height / 2 - b.top;
     const dots: TabDot[] = [];
     xs.forEach((cx, index) => {
       if (cx > br.right - 4) return; // overflowed out of the bar
       const target: DropTarget = { kind: "tab", paneId, index };
       const result = applyDrop(root, subject, target);
-      if (!result) return;
-      // Hit area: halfway to the neighbouring dots, at most 24px wide.
-      const prev = xs[index - 1] ?? cx - 24;
-      const next = xs[index + 1] ?? cx + 24;
-      const x0 = Math.max((prev + cx) / 2, cx - 12);
-      const x1 = Math.min((cx + next) / 2, cx + 12);
       dots.push({
-        choice: { target, result, ownerId: paneId, span: [cx, cx] },
+        choice: result ? { target, result, ownerId: paneId, span: [cx, cx] } : null,
         x: cx - b.left,
         y,
-        rect: { x: x0 - b.left, y: br.top - b.top, w: x1 - x0, h: br.height },
       });
     });
-    return dots;
+    return { rect: { x: br.left - b.left, y: br.top - b.top, w: br.width, h: br.height }, dots };
   }
 
   /**
@@ -536,14 +537,18 @@ export class View {
       // Position of the line across the edge.
       const edge = side === "left" ? P.x : side === "right" ? P.x + P.w : side === "top" ? P.y : P.y + P.h;
       let band: [number, number];
+      let hit: [number, number];
       if (between) {
         const a = this.pxRect(between.before.id)!;
         const b = this.pxRect(between.after.id)!;
         const mid = horizontal ? (a.x + a.w + b.x) / 2 : (a.y + a.h + b.y) / 2;
         // Our half of the border: from the middle of the gap, inwards.
         band = start ? [mid, mid + LINE] : [mid - LINE, mid];
+        const far = horizontal ? (start ? a.x + a.w : b.x) : start ? a.y + a.h : b.y;
+        hit = start ? [far, mid + LINE] : [mid - LINE, far];
       } else {
         band = start ? [edge, edge + LINE] : [edge - LINE, edge];
+        hit = band;
       }
 
       // Panes on the other side of the border, and the border as they see it.
@@ -572,7 +577,7 @@ export class View {
           if (line) across.push({ line, clip });
         }
       }
-      lines.push({ side, levels, band, straddles: !!between, across });
+      lines.push({ side, levels, band, hit, straddles: !!between, across });
     }
     return lines;
   }
@@ -594,7 +599,7 @@ export class View {
     if (d.active) {
       const t = d.active.target;
       let r: Rect | null = null;
-      if (t.kind === "tab") r = this.pxRect(t.paneId);
+      if (t.kind === "tab") r = null; // the highlighted dot is the preview
       else if (t.kind === "side") {
         r = this.pxRect(t.targetId);
         if (r) {
@@ -631,7 +636,8 @@ export class View {
     }
 
     // Tab insertion dots.
-    for (const dot of d.dots) {
+    for (const dot of d.tabBar?.dots ?? []) {
+      if (!dot.choice) continue;
       const active = d.active === dot.choice;
       mk("circle", {
         cx: dot.x,
