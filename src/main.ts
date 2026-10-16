@@ -29,11 +29,13 @@ const navConfig: NavConfig = {
     "Shift+KeyJ": "expandDown",
     KeyU: "unexpand",
     KeyP: "parent",
+    KeyR: "root",
     KeyC: "child",
     BracketRight: "nextTab",
     BracketLeft: "prevTab",
     KeyM: "toggleMaximize",
     KeyF: "float",
+    KeyW: "closeTab",
     KeyX: "closeTab",
   },
   // S, then a direction: swap. (Holding S swaps repeatedly.)

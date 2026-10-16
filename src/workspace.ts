@@ -37,6 +37,7 @@ export type Command =
   | "nextTab"
   | "prevTab"
   | "parent"
+  | "root"
   | "child"
   | "focusLeft"
   | "focusRight"
@@ -58,6 +59,7 @@ export const COMMANDS: Command[] = [
   "nextTab",
   "prevTab",
   "parent",
+  "root",
   "child",
   "focusLeft",
   "focusRight",
@@ -295,6 +297,8 @@ export class Workspace {
         return this.cycleTab(-1);
       case "parent":
         return this.goParent();
+      case "root":
+        return this.goRoot();
       case "child":
         return this.goChild();
       case "focusLeft":
@@ -346,6 +350,16 @@ export class Workspace {
       if (!loc?.parent) return;
       this.select({ id: loc.parent.id }, false);
     }
+    this.widenMaximized();
+    this.emit();
+  }
+
+  /** Select the root of the tree holding the selection (main, or a floating window's). */
+  goRoot(): void {
+    const root = this.tree();
+    if (this.selection.id === root.id && !this.selection.range) return;
+    this.select({ id: root.id }, false);
+    this.widenMaximized(); // no-op for the main root: the top level clears the maximization
     this.emit();
   }
 
@@ -492,6 +506,7 @@ export class Workspace {
     const stack = this.expandStack;
     this.select(sel, false);
     this.expandStack = [...stack, prev];
+    this.widenMaximized();
     this.emit();
   }
 
@@ -545,8 +560,21 @@ export class Workspace {
    * Otherwise, follow only when the selection left the maximized region.
    */
   /**
-   * Navigation never changes the maximized group, except that when focus moves to a pane
-   * outside of it, the maximization follows (otherwise the selection would be hidden).
+   * Parent/expand may *widen* the maximization: when the new selection contains the whole
+   * maximized area, it becomes the maximization. They never narrow it (only the maximize
+   * command zooms in further), so child → child → parent keeps the original group.
+   */
+  private widenMaximized(): void {
+    const max = this.maximized;
+    if (!max || !this.inMain(this.selection.id) || sameSel(max, this.selection)) return;
+    const sel = this.selectedNodes();
+    const contains = this.selectedNodes(max).every((m) => sel.some((n) => pathTo(n, m.id)));
+    if (contains) this.maximized = { ...this.selection };
+  }
+
+  /**
+   * When focus moves to a pane outside the maximized area, the maximization follows it
+   * (otherwise the selection would be hidden).
    */
   private followMaximized(): void {
     if (!this.maximized || !this.inMain(this.selection.id)) return;
