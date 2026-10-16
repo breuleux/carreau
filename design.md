@@ -59,13 +59,18 @@ Normalization runs after every structural change, on construction, and on load. 
 
 * drops panes with no tabs and splits with no children;
 * collapses a split with a single child into that child, which inherits the split's weight;
+* **rescales each split's child weights to average 1**, keeping their ratios. Weights become flex-grow factors, and flex-grow factors summing to less than 1 only claim that fraction of the free space. Without rescaling, a few half-splitting moves (each taking half a neighbour's weight) leave children squeezed into part of their parent, with the rest empty;
 * flattens a split nested in a split of the same type. A row of rows is just a row. The inner children's weights are rescaled so that together they keep the inner split's share: `w_k' = w_k / sum(w) * inner.weight`.
 
-Scroll splits add three rules:
+Scroll splits add four rules:
+
+* **A scroll split always lives in a group tab.** Normalization wraps any scroll split that isn't the root of a group in a holder pane, with a single group tab titled "Scroll column" or "Scroll row". The holder takes the scroll split's weight. This also applies at a tree's root, via `normalizeTree`, used for the main tree and floating windows' trees, including on load.
+  * The whole scroll split can thus be moved around by its tab or header, renamed, and have other tabs dragged into its tab bar.
+  * A group whose root is a scroll split can't be collapsed, since normalization would wrap it right back.
 
 * A **scroll split is never collapsed** for having a single child. It could not be recreated by dragging.
 * A plain split of the same axis directly inside a scroll split is flattened into it, because its children are naturally sized either way.
-* A scroll split inside a plain split is **not** flattened; it is what provides the scrolling.
+* A scroll split inside a plain split is **not** flattened; it is what provides the scrolling. (It ends up wrapped in a group tab, per the first rule.)
 
 ### Logical geometry
 
@@ -129,6 +134,9 @@ No keyboard shortcut is hard-coded in the library. The workspace exposes named c
 All keyboard navigation happens in a **navigation mode**:
 
 * **Activation chord** (demo: **Alt+Q**, which is unlikely to clash with OS or browser shortcuts on macOS, Windows or Linux): enters the mode for as long as the modifier stays held. Releasing the modifier leaves it. So does losing window focus, since no keyup arrives then.
+* **Side of the modifier** (`activation.side`: `"left"`, `"right"`, or `"either"`, the default): which physical modifier key counts. For example, `"left"` leaves the right Option key free for typing special characters on macOS.
+  * A key event for Q doesn't tell which modifier key is down, so the controller tracks held modifier keys by `KeyboardEvent.code` (`AltLeft`, `AltRight`, …) from their own keydown/keyup events, clearing them on window blur.
+  * With a side configured, only that key activates, and only releasing that key ends held mode. Tapping the other one doesn't.
 * **Sticky mode**: pressing the activation key again while still holding the modifier (Alt+Q, Q) makes the mode sticky. The modifier can then be released. Pressing the activation key again (or Esc) leaves it.
 * **Bindings** are looked up from the chord of `KeyboardEvent.code` plus Shift/Alt/Ctrl/Meta prefixes, **leaving out the activation modifier**. The same bindings therefore work with the modifier held (held mode) or not (sticky mode).
   * Mapped keys `preventDefault`. Listen in the capture phase.
@@ -264,6 +272,7 @@ Commands:
 The hovered pane is the first `.carreau-pane` under the cursor, in the main tree or in a floating window, found with `elementsFromPoint`. The topmost window wins.
 
 * Pitfall: when the cursor is over a splitter gap, or anywhere inside the workspace that is not a pane, **keep the previously hovered pane**. Otherwise indicators flicker off while crossing borders.
+  * This includes the **gaps between a group's parts**. There, the hit test finds the holder's body, and that must count as a gap, not as hovering the whole holder.
 * Lines, tab dots and zones are rebuilt when the hovered pane changes, and when anything scrolls (see [Scroll splits](#scroll-splits)).
 
 ### Drop targets (model)
@@ -528,7 +537,9 @@ In a `scroll-column`, children take their **natural height** (their content deci
   * Give the scroll split a panel background of its own: slightly darker than panes, with rounded corners and the pane outline. Otherwise that padding shows the page background and the split looks as if it ended with its content.
   * A scroll split nested *inside* a scroll split along the other axis is naturally sized along the outer axis, as any child there.
 * **No splitters** between naturally sized children; draw a fixed 4px gap instead.
-* **Keep scroll positions across re-renders.** Save `scrollTop` and `scrollLeft` per scroll split id and restore them after rebuilding. Otherwise every click resets the scroll.
+* **Keep scroll positions across re-renders.** Keep the last known `scrollLeft`/`scrollTop` of every scroll split (by id), and of every tab scroller (by pane id), in a map, and restore it after rebuilding. Otherwise every click resets the scroll.
+  * Update the map from `scroll` events (capture phase on the workspace), and from the elements' current values before rebuilding, but **only for visible elements**.
+  * A scroll split hidden in an inactive group tab (`display: none`) has lost its offset and reads 0. Reading it would erase its position, and switching back to its tab would reset the scroll.
 * **Navigation** still uses logical rects from weights, which treats scroll children as equal shares. Within the scroll split, up and down follow the true order. Coming in from the side picks a pane by its logical position, which may be off-screen; scrolling the selection into view handles that.
 * **Clipping.** Every overlay is clipped to the *visible* rect of the nodes involved: the node's rect intersected with the client rect of each scroll ancestor, up to the tree's layer. This covers the selection outline, the border lines, tab dots, zones and previews.
   * A side whose border is scrolled out of view gets no line. Detect it by comparing the full rect's edge with the visible rect's edge.

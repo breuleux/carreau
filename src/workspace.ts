@@ -18,6 +18,8 @@ import {
   LayoutNode,
   Located,
   normalize,
+  normalizeTree,
+  isScroll,
   opposite,
   PaneNode,
   pathTo,
@@ -122,7 +124,7 @@ export class Workspace {
   private listeners: (() => void)[] = [];
 
   constructor(root: LayoutNode) {
-    this.root = normalize(root) ?? root;
+    this.root = normalizeTree(root) ?? root;
     this.selection = { id: panes(root)[0].id };
     this.selectImpl(this.selection, false);
   }
@@ -157,7 +159,7 @@ export class Workspace {
   // Layout replacement (after drops, resizes, deserialization)
 
   setRoot(root: LayoutNode, select?: string): void {
-    this.root = normalize(root) ?? this.root;
+    this.root = normalizeTree(root) ?? this.root;
     const valid = (s: Selection | null) => {
       if (!s) return null;
       const n = this.node(s.id);
@@ -183,7 +185,9 @@ export class Workspace {
   load(data: WorkspaceData): void {
     this.undoStack = [];
     this.redoStack = [];
-    this.floating = data.floating;
+    this.floating = data.floating
+      .map((w) => ({ ...w, root: normalizeTree(w.root) }))
+      .filter((w): w is FloatingWindow => !!w.root);
     this.setRoot(data.root);
   }
 
@@ -339,7 +343,7 @@ export class Workspace {
       if (index < pane.active || pane.active >= pane.tabs.length) pane.active = Math.max(0, pane.active - 1);
       // Normalize the windows (dropping emptied ones); setRoot normalizes the main tree.
       this.floating = this.floating
-        .map((w) => ({ ...w, root: normalize(w.root) }))
+        .map((w) => ({ ...w, root: normalizeTree(w.root) }))
         .filter((w): w is FloatingWindow => !!w.root);
       this.setRoot(this.root);
       return true;
@@ -415,7 +419,9 @@ export class Workspace {
   /** A pane can collapse if its only tab is a group. */
   canCollapse(paneId: string): boolean {
     const p = this.node(paneId);
-    return p?.type === "pane" && p.tabs.length === 1 && !!p.tabs[0].group?.children[0];
+    const root = p?.type === "pane" && p.tabs.length === 1 ? p.tabs[0].group?.children[0] : undefined;
+    // A scroll split always lives in a group tab: such a group can't be collapsed.
+    return !!root && !isScroll(root.type);
   }
 
   /**
@@ -457,7 +463,7 @@ export class Workspace {
   }
 
   private normalizeAll(): void {
-    this.root = normalize(this.root) ?? this.root;
+    this.root = normalizeTree(this.root) ?? this.root;
     this.floating = this.floating
       .map((w) => ({ ...w, root: normalize(w.root) }))
       .filter((w): w is FloatingWindow => !!w.root);

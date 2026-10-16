@@ -15,8 +15,12 @@ export type NavAction = Command | "toggleMaximize" | "float" | "closeTab" | "gro
 export type Modifier = "Control" | "Alt" | "Meta" | "Shift";
 
 export interface NavConfig {
-  /** The activation chord: a modifier plus a key (`KeyboardEvent.code`), e.g. Alt + KeyQ. */
-  activation: { modifier: Modifier; code: string };
+  /**
+   * The activation chord: a modifier plus a key (`KeyboardEvent.code`), e.g. Alt + KeyQ.
+   * `side` restricts which physical modifier key counts: "left", "right", or "either"
+   * (default). E.g. "left" leaves the right Option key free for typing special characters.
+   */
+  activation: { modifier: Modifier; code: string; side?: "left" | "right" | "either" };
   /**
    * Bindings while in navigation mode. Keys are chords of `KeyboardEvent.code` with optional
    * `Shift+`, `Alt+`, `Ctrl+`, `Meta+` prefixes (in that order), *not* counting the activation
@@ -42,6 +46,8 @@ const MOD_FLAG: Record<Modifier, "ctrlKey" | "altKey" | "metaKey" | "shiftKey"> 
 
 export class KeyboardNav {
   mode: NavMode = "off";
+  /** Physical modifier keys currently held (`KeyboardEvent.code`, e.g. "AltLeft"). */
+  private heldMods = new Set<string>();
   /** The pending prefix (its chord), if any. */
   prefix: string | null = null;
   /** Whether the prefix key is still held, and whether it has been used while held. */
@@ -59,6 +65,7 @@ export class KeyboardNav {
     target.addEventListener("keyup", (e) => this.keyup(e), { capture: true });
     // A modifier released while the window had no focus never sends keyup.
     target.addEventListener("blur", () => {
+      this.heldMods.clear();
       if (this.mode === "held") this.setMode("off");
     });
   }
@@ -77,8 +84,21 @@ export class KeyboardNav {
     for (const fn of this.listeners) fn(mode);
   }
 
+  /** Whether the activation modifier is held, on the configured side. */
   private modifierHeld(e: KeyboardEvent): boolean {
-    return e[MOD_FLAG[this.config.activation.modifier]];
+    const { modifier, side = "either" } = this.config.activation;
+    if (!e[MOD_FLAG[modifier]]) return false;
+    if (side === "either") return true;
+    // The event for the other key doesn't tell which modifier key is down: use the
+    // modifier key events we have seen.
+    return this.heldMods.has(modifier + (side === "left" ? "Left" : "Right"));
+  }
+
+  /** Whether a key event is for the activation modifier key on the configured side. */
+  private isActivationModifierKey(e: KeyboardEvent): boolean {
+    const { modifier, side = "either" } = this.config.activation;
+    if (e.key !== modifier) return false;
+    return side === "either" || e.code === modifier + (side === "left" ? "Left" : "Right");
   }
 
   /** The chord of a key event, leaving out the activation modifier. */
@@ -97,6 +117,7 @@ export class KeyboardNav {
 
   private keydown(e: KeyboardEvent): void {
     const { activation } = this.config;
+    if (/^(Alt|Control|Meta|Shift)(Left|Right)$/.test(e.code)) this.heldMods.add(e.code);
     // Typing in a text field (e.g. the group name prompt) is not navigation.
     const t = e.target as HTMLElement | null;
     if (t && (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName))) return;
@@ -175,13 +196,14 @@ export class KeyboardNav {
   }
 
   private keyup(e: KeyboardEvent): void {
+    this.heldMods.delete(e.code);
     // Releasing the prefix key: if it was used while held, it's done; otherwise it stays
     // pending for the next key (one-shot).
     if (this.prefix && e.code === this.prefix.split("+").pop()) {
       this.prefixHeld = false;
       if (this.prefixUsed) this.clearPrefix();
     }
-    if (this.mode === "held" && e.key === this.config.activation.modifier) {
+    if (this.mode === "held" && this.isActivationModifierKey(e)) {
       // On Windows/Linux, releasing a bare Alt focuses the browser's menu bar: not here.
       e.preventDefault();
       this.setMode("off");

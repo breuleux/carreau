@@ -9,7 +9,8 @@ import { KeyboardNav, NavConfig } from "./keyboard";
 
 // Navigation mode: hold Alt after Alt+Q (or Alt+Q, Q for sticky mode), then use these.
 const navConfig: NavConfig = {
-  activation: { modifier: "Alt", code: "KeyQ" },
+  // side: "left" | "right" | "either" (default): which Alt key counts.
+  activation: { modifier: "Alt", code: "KeyQ", side: "either" },
   bindings: {
     ArrowLeft: "focusLeft",
     ArrowRight: "focusRight",
@@ -160,4 +161,4 @@ document.querySelector("#load")!.addEventListener("click", () => {
   }
 });
 
-Object.assign(window, { ws, view });
+Object.assign(window, { ws, view, nav });

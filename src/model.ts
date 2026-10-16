@@ -342,6 +342,37 @@ export function removeNode(root: LayoutNode, id: string): LayoutNode | null {
  *  - collapse splits with a single child
  *  - flatten splits nested in a split of the same orientation
  */
+/**
+ * Normalize a whole tree (the main one or a floating window's). On top of `normalize`, a
+ * scroll split at the root is wrapped in a group tab, like everywhere else.
+ */
+export function normalizeTree(node: LayoutNode): LayoutNode | null {
+  const n = normalize(node);
+  return n && isScroll(n.type) ? wrapInGroupTab(n as SplitNode) : n;
+}
+
+/**
+ * Wrap a scroll split in a holder pane with a single group tab. Scroll splits are always the
+ * root of a group: that tab is how the whole scroll split is moved around.
+ */
+export function wrapInGroupTab(split: SplitNode): PaneNode {
+  const weight = split.weight;
+  split.weight = 1;
+  return {
+    type: "pane",
+    id: genId("p"),
+    weight,
+    active: 0,
+    tabs: [
+      {
+        id: genId("t"),
+        title: split.type === "scroll-row" ? "Scroll row" : "Scroll column",
+        group: { type: "group", id: genId("g"), weight: 1, children: [split] },
+      },
+    ],
+  };
+}
+
 export function normalize(node: LayoutNode): LayoutNode | null {
   if (node.type === "pane") {
     // Group tabs: normalize their layout; a group left empty disappears with its tab.
@@ -361,7 +392,7 @@ export function normalize(node: LayoutNode): LayoutNode | null {
   }
   const kids: LayoutNode[] = [];
   for (const c of node.children) {
-    const n = normalize(c);
+    let n = normalize(c);
     if (!n) continue;
     // Same type: flatten. A plain split inside a scroll split of the same axis is flattened
     // too (its children are naturally sized either way); the reverse is not, since a scroll
@@ -375,11 +406,18 @@ export function normalize(node: LayoutNode): LayoutNode | null {
         kids.push(k);
       }
     } else {
+      // Scroll splits always live in a group tab (so they can be moved as a whole).
+      if (isScroll(n.type)) n = wrapInGroupTab(n as SplitNode);
       kids.push(n);
     }
   }
   node.children = kids;
   if (kids.length === 0) return null;
+  // Rescale weights to average 1 (same ratios). Weights are used as flex-grow factors, and
+  // flex-grow factors summing to less than 1 only claim that fraction of the free space:
+  // after a few half-splitting moves, children would leave part of their parent empty.
+  const total = kids.reduce((s, k) => s + k.weight, 0);
+  if (total > 0) for (const k of kids) k.weight = (k.weight * kids.length) / total;
   // A scroll split is kept even with a single child: it could not be recreated by dragging.
   if (kids.length === 1 && !isScroll(node.type)) {
     kids[0].weight = node.weight;
@@ -488,7 +526,7 @@ function removeAt(parent: SplitNode, index: number): void {
 
 /** Normalize each tree of the forest separately. */
 function normalizeForest(forest: SplitNode): void {
-  forest.children = forest.children.map((c) => normalize(c) ?? emptyMarker());
+  forest.children = forest.children.map((c) => normalizeTree(c) ?? emptyMarker());
 }
 
 /** Structure of a layout, ignoring ids and sizes: nesting, orientation, tabs in each pane. */

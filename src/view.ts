@@ -255,7 +255,8 @@ export class View {
     // a drag, rebuild the indicators for the current cursor position.
     this.el.addEventListener(
       "scroll",
-      () => {
+      (e) => {
+        this.rememberScroll(e.target as HTMLElement);
         this.decorate();
         const d = this.drag;
         if (d?.lastEvent) {
@@ -272,13 +273,11 @@ export class View {
   // Rendering
 
   render(): void {
-    // Re-rendering rebuilds the DOM, so carry scroll positions over by node id.
-    const scroll = new Map<string, [number, number]>();
-    for (const el of this.el.querySelectorAll<HTMLElement>(".carreau-scroll"))
-      scroll.set(el.dataset.id!, [el.scrollLeft, el.scrollTop]);
-    const tabScroll = new Map<string, number>();
-    for (const el of this.el.querySelectorAll<HTMLElement>(".carreau-tabs"))
-      tabScroll.set(el.dataset.pane!, el.scrollLeft);
+    // Re-rendering rebuilds the DOM, so carry scroll positions over by node id. Only visible
+    // elements are read: a hidden one (in an inactive group tab) has lost its offset, and
+    // the position remembered from its scroll events must be kept instead.
+    for (const el of this.el.querySelectorAll<HTMLElement>(".carreau-scroll, .carreau-tabs"))
+      if (el.getClientRects().length) this.rememberScroll(el);
     // Attach the new tree *before* removing the old one, so that tab contents (iframes...)
     // can be moved across while staying connected: moveBefore only preserves state when
     // both the node and its destination are in the document.
@@ -289,17 +288,7 @@ export class View {
     this.floatLayer.append(...floats);
     this.placeContents([tree, ...floats]);
     for (const n of old) n.remove();
-    for (const [id, [l, t]] of scroll) {
-      const el = this.elOf(id);
-      if (el) {
-        el.scrollLeft = l;
-        el.scrollTop = t;
-      }
-    }
-    for (const el of this.el.querySelectorAll<HTMLElement>(".carreau-tabs")) {
-      const l = tabScroll.get(el.dataset.pane!);
-      if (l) el.scrollLeft = l;
-    }
+    this.restoreScroll();
     // Keep the selected tab (active tab of the focused pane) in view when it changes.
     const cur = this.ws.node(this.ws.selection.id);
     const tabKey = cur?.type === "pane" ? `${cur.id}:${cur.active}` : "";
@@ -323,6 +312,29 @@ export class View {
   }
 
   private lastSelection = "";
+  /** Last known scroll position of each scroll split / tab scroller, by node id. */
+  private scrollPos = new Map<string, [number, number]>();
+
+  private scrollKey(el: HTMLElement): string | null {
+    if (el.classList?.contains("carreau-scroll")) return el.dataset.id ?? null;
+    if (el.classList?.contains("carreau-tabs")) return el.dataset.pane ? `tabs:${el.dataset.pane}` : null;
+    return null;
+  }
+
+  private rememberScroll(el: HTMLElement): void {
+    const key = this.scrollKey(el);
+    if (key) this.scrollPos.set(key, [el.scrollLeft, el.scrollTop]);
+  }
+
+  /** Put every (visible) scroll split and tab scroller back where it was. */
+  private restoreScroll(): void {
+    for (const el of this.el.querySelectorAll<HTMLElement>(".carreau-scroll, .carreau-tabs")) {
+      const pos = this.scrollPos.get(this.scrollKey(el) ?? "");
+      if (!pos || !el.getClientRects().length) continue;
+      el.scrollLeft = pos[0];
+      el.scrollTop = pos[1];
+    }
+  }
   private lastTab = "";
   private floatLayer: HTMLElement;
   private menu: HTMLElement | null = null;
@@ -1043,6 +1055,10 @@ export class View {
     for (const el of document.elementsFromPoint(ev.clientX, ev.clientY)) {
       const p = (el as HTMLElement).closest?.(".carreau-pane") as HTMLElement | null;
       if (p && (this.rootEl.contains(p) || this.floatLayer.contains(p))) {
+        // The gaps between a group's parts show its holder's body: that's a gap, not the
+        // holder (which would make hovering flicker to the whole holder between cells).
+        const body = (el as HTMLElement).closest(".carreau-body");
+        if (body?.parentElement === p && body.classList.contains("shows-group")) break;
         hover = p.dataset.id!;
         break;
       }
