@@ -26,6 +26,20 @@ export const rootCtx = (floating = false): Ctx => ({
   floating,
 });
 
+/**
+ * How the host closes tab contents (ending a process, saving a file...). Only the host knows;
+ * nodes gather their tabs' closes through their kinds (`close`, `forceClose`).
+ */
+export interface Lifecycle {
+  /** Close a content tab. Resolves once closed; rejecting refuses the close (the tab stays). */
+  closeTab(tab: Tab): Promise<void>;
+  /** Close it now, whatever its state. Not waited for. */
+  forceCloseTab(tab: Tab): Promise<void>;
+}
+
+/** A lifecycle with nothing to wait for. */
+export const instantLifecycle: Lifecycle = { closeTab: async () => {}, forceCloseTab: async () => {} };
+
 export interface NodeKind {
   /**
    * Children, by index. For a pane, entry i is tab i's slot (undefined for content tabs), so
@@ -48,10 +62,24 @@ export interface NodeKind {
   childContext(n: LayoutNode, ctx: Ctx): Ctx;
   replaceChild(n: LayoutNode, i: number, child: LayoutNode): void;
   removeChild(n: LayoutNode, i: number): void;
+  /** Close everything in the node: resolves once all of it is closed (rejects if any refuses). */
+  close(n: LayoutNode, life: Lifecycle): Promise<void>;
+  /** Close everything in the node now (forcefully). */
+  forceClose(n: LayoutNode, life: Lifecycle): Promise<void>;
 }
+
+/** Close a tab: a group tab closes its layout, a content tab through the host. */
+export function closeTabWith(t: Tab, life: Lifecycle, force = false): Promise<void> {
+  if (t.group) return force ? kind(t.group).forceClose(t.group, life) : kind(t.group).close(t.group, life);
+  return force ? life.forceCloseTab(t) : life.closeTab(t);
+}
+
+const gather = (ps: Promise<void>[]) => Promise.all(ps).then(() => {});
 
 const splitBase = {
   children: (n: LayoutNode) => (n as SplitNode).children,
+  close: (n: LayoutNode, life: Lifecycle) => gather((n as SplitNode).children.map((c) => kind(c).close(c, life))),
+  forceClose: (n: LayoutNode, life: Lifecycle) => gather((n as SplitNode).children.map((c) => kind(c).forceClose(c, life))),
   replaceChild(n: LayoutNode, i: number, child: LayoutNode) {
     (n as SplitNode).children[i] = child;
   },
@@ -108,6 +136,8 @@ const pane: NodeKind = {
   removeChild(n, i) {
     (n as PaneNode).tabs.splice(i, 1);
   },
+  close: (n, life) => gather((n as PaneNode).tabs.map((t) => closeTabWith(t, life))),
+  forceClose: (n, life) => gather((n as PaneNode).tabs.map((t) => closeTabWith(t, life, true))),
 };
 
 export const KINDS: Record<LayoutNode["type"], NodeKind> = {

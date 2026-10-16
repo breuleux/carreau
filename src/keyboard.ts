@@ -10,7 +10,7 @@ import { PaneNode } from "./model";
 import { View } from "./view";
 import { Command, Workspace } from "./workspace";
 
-export type NavAction = Command | "toggleMaximize" | "float" | "closeTab" | "group" | "collapse" | "renameTab";
+export type NavAction = Command | "toggleMaximize" | "float" | "closeTab" | "closePane" | "group" | "collapse" | "renameTab";
 
 export type Modifier = "Control" | "Alt" | "Meta" | "Shift";
 
@@ -245,6 +245,9 @@ export class KeyboardNav {
         }
         return;
       }
+      case "closePane":
+        ws.closePane(ws.selection.id);
+        return;
       default:
         ws.run(action);
     }

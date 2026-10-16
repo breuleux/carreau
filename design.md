@@ -104,6 +104,8 @@ interface NodeKind {
   navStep: boolean;                   // false for slots and forests
   childContext(n, ctx): Ctx;
   replaceChild(n, i, child); removeChild(n, i);   // a pane: set / remove tab i's group
+  close(n, life): Promise<void>;      // close everything in it (see "Closing")
+  forceClose(n, life): Promise<void>;
 }
 interface Ctx {
   natural: { row: boolean; column: boolean };  // sized by content along these axes
@@ -142,6 +144,7 @@ interface Ctx {
   * **a ⋯ button** at the right end.
 * A drag starts only after the pointer has moved 5px; below that, it is a click.
 * **Closing tabs.** A pane left without tabs disappears, and a floating window left empty closes. The very last tab of the main tree can't be closed, so it gets no ×. A closed tab's persistent content element is dropped.
+* **Closing is asynchronous.** See [Closing](#closing).
 * **Where the focus goes on close.** If the closed tab doesn't have the focus, nothing special happens: the selection stays, and the tab's pane falls back to the tab before it. If it has the focus (it is the selected pane's active tab, or a group tab holding the selection), **the parent decides**. Walking up from what disappears, the first parent with something left picks:
   * a **pane** (tab group): its most recently activated other tab (else the tab before). If that tab is a group, the focus goes into it;
   * a **plain split**: its most recently focused other child (else a neighbour);
@@ -180,6 +183,7 @@ The ⋯ button opens a small menu **above** it (the header is at the bottom), ri
 
 * It offers **Float**, disabled for the last pane in the main tree. Panes inside floating windows have no ⋯ button.
 * **Collapse group**, when the pane can collapse (see [Group tabs](#group-tabs)).
+* **Close pane**: closes the pane and all its tabs (see [Closing](#closing)). Disabled for the main tree's last pane.
 * **Stick to bottom / top** (scroll-column) or **right / left** (scroll-row), when the pane shows a scroll split: toggles it sticky (`ws.toggleReverse(id)`; `ws.scrollOf(paneId)` finds it). Undoable.
 * Clicking ⋯ again toggles the menu closed, and any other pointerdown closes it. Exclude the anchor from the outside-click check, or the toggle reopens it immediately.
 * Stop `pointerdown` propagation on ⋯, so it doesn't select the pane and re-render (which would replace the anchor).
@@ -208,7 +212,8 @@ All keyboard navigation happens in a **navigation mode**:
 * **Actions** are the workspace commands plus three extras:
   * `toggleMaximize`: restore if anything is maximized, else maximize;
   * `float`: float the selected pane, as the ⋯ menu does;
-  * `closeTab`: close the selected pane's active tab.
+  * `closeTab`: close the selected pane's active tab;
+  * `closePane`: close the selected pane.
 * **Demo bindings**:
 
   | Keys | Action |
@@ -226,6 +231,7 @@ All keyboard navigation happens in a **navigation mode**:
   | M | toggle maximize |
   | F | float |
   | W, X | close the selected tab |
+  | Shift+W, Shift+X | close the selected pane |
 
   Since bindings leave the activation modifier out of the chord, no binding can use that modifier itself. Prefixes, like S for swap, avoid piling more modifiers on top of the held Alt.
   * Avoid chords the browser reserves (Ctrl+W, Ctrl+T, Ctrl+N, Ctrl+Tab), which can't be prevented.
@@ -299,7 +305,7 @@ Commands:
 
 * The workspace records a **snapshot** before each such action: the main tree, the floating windows (with their rects), the selection, the maximization and its history, the expand stack and the last pane. Undo restores it, so the selection that went with the layout comes back too, and pushes the current state onto the redo stack. Any new step clears the redo stack. The history is capped (200).
 * **What counts as a layout change**: compare a key made of the trees (structure, tabs, weights) *without* the panes' `active` indices or the windows' rects, before and after the action.
-* **Record at the entry points** (`run`, `select`, `activateTab`, `commitDrop`, `float`, `closeTab`, `maximize`, `restore`, `toggleMaximize`) with a wrapper. Only the outermost wrapper records, and only if the layout key changed. Navigation passes through the same wrapper and simply records nothing.
+* **Record at the entry points** (`run`, `select`, `activateTab`, `commitDrop`, `float`, `closeTab`/`closePane` (when the removal happens), `maximize`, `restore`, `toggleMaximize`) with a wrapper. Only the outermost wrapper records, and only if the layout key changed. Navigation passes through the same wrapper and simply records nothing.
 * **Splitter resizes**: the view calls `beginResize(key)` when a splitter drag starts and `endResize(token)` when it ends, where the key identifies the splitter (split id + index).
   * **Consecutive resizes of the same splitter coalesce** into one step, so a slow resize done in several drags undoes at once.
   * A different splitter, any other recorded step, or an undo/redo ends the coalescing. Navigation in between doesn't, since it's not a step.
@@ -568,6 +574,31 @@ A tab can hold **a whole layout** instead of content. The pane holding it then s
   * A slot is never selected; selecting one selects its root.
   * Maximization works through groups, since `pathTo` descends into them. When the maximization passes **through** a holder (the maximized node is inside its group), the holder's tab bar and outline are hidden, so only the maximized part shows. Maximizing the holder itself keeps its tabs.
 * **Drop lines**: when the walk up reaches a group's root, it continues from the **holder pane** (`LayoutIndex.holder`), as long as their borders coincide. Lines from inside a group can thus also insert beside the holder and further out.
+
+## Closing
+
+Closing a tab or a pane first **closes its contents**, which can take time (ending a process, saving a file) or never finish (an unresponsive process). Only the host knows how, so:
+
+```ts
+interface Lifecycle {
+  closeTab(tab: Tab): Promise<void>;       // resolves once closed; rejecting refuses the close
+  forceCloseTab(tab: Tab): Promise<void>;  // close now, whatever the state; not waited for
+}
+ws.lifecycle = { … };                       // default: instant (`instantLifecycle`)
+```
+
+* **Every node kind has `close(n, life)` and `forceClose(n, life)`.** A content tab closes through the lifecycle; a group tab closes its layout (`closeTabWith(tab, life, force?)`). A pane gathers its tabs' closes, and a split or slot its children's (`Promise.all`). So **a group's close waits for every tab in it**, at any depth.
+* `ws.closeTab(tabId)` and `ws.closePane(paneId)` return a `Promise<boolean>` (whether it closed):
+  1. Record a **pending close** for the tab (a pane's covers all its tabs), and re-render. Pending closes are transient UI state: not part of the layout, not undoable. Closing what is already closing is ignored.
+  2. Await the node's `close()`.
+  3. Resolved: remove the tab or pane (one undoable change), moving the focus as for any close. Rejected: the close is refused; drop the pending state, and the tab stays.
+* `ws.forceClose(tabId)`: for the pending close covering that tab (or the tab alone), call `forceClose()` **without waiting** (errors ignored), drop the pending state and remove it right away. The original `close()` resolving later then does nothing: completions check that their pending close is still the current one.
+* Removal checks again that it can happen (the main tree must keep a tab); if not, the tab stays.
+* **Display**: while a tab is closing, its × is replaced by an **idle animation**: a rotating arc (a conic gradient in the tab's accent, masked to a ring, 0.9s per turn). Its title and icon fade a little.
+  * **Hovering** it shows a small **red ×** inside the arc; clicking it force-closes. (It stops pointerdown, so it's not a drag.)
+  * Re-renders recreate the element: give it a negative animation delay from the clock (`-(now mod 0.9s)`), so the rotation doesn't restart on every render.
+  * A cell with no tab bar shows the arc at the right end of its top strip (an empty strip grows to fit it).
+* Demo lifecycle: shell cells (whose `long` starts with `$`) take 1.2s to close; tabs with status `"unresponsive"` never finish closing, until forced; everything else closes at once.
 
 ## Floating windows
 

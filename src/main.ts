@@ -43,6 +43,8 @@ const navConfig: NavConfig = {
     "Shift+KeyZ": "redo",
     KeyW: "closeTab",
     KeyX: "closeTab",
+    "Shift+KeyW": "closePane",
+    "Shift+KeyX": "closePane",
   },
   // S, then a direction: swap. (Holding S swaps repeatedly.)
   prefixes: {
@@ -72,6 +74,13 @@ document.querySelector("#description")!.textContent =
   example.description + (hasMoveBefore ? "" : " ⚠ This browser has no Element.moveBefore: iframes will reload when moved.");
 
 const ws = new Workspace(example.build());
+// Demo lifecycle: shell cells take a moment to end their process; unresponsive tabs never
+// finish closing (hover the spinner and click its red × to force them); others close at once.
+ws.lifecycle = {
+  closeTab: (t) =>
+    t.status === "unresponsive" ? new Promise(() => {}) : new Promise((done) => setTimeout(done, t.long?.startsWith("$") ? 1200 : 0)),
+  forceCloseTab: async (t) => console.log(`force closed ${t.title}`),
+};
 const view = new View(ws, document.querySelector("#host")!, {
   renderTab: (tab) => {
     const data = tab.data ?? {};

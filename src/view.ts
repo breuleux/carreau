@@ -338,6 +338,12 @@ export class View implements DndHost {
       const long = Object.assign(document.createElement("div"), { className: "carreau-long", title: "Drag to move this pane" });
       if (display.showLong && activeTab.long) long.innerHTML = activeTab.long;
       else long.classList.add("empty");
+      // No tab bar: the closing indicator goes on the strip.
+      const closingTab = node.tabs.find((t) => this.ws.isClosing(t.id));
+      if (closingTab) {
+        long.classList.add("closing");
+        long.append(this.closingSpinner(closingTab.id));
+      }
       long.style.setProperty("--cell-accent", cellAccent(activeTab));
       long.addEventListener("pointerdown", (e) => this.dnd.arm(e, { kind: "pane", paneId: node.id }, activeTab.title, el));
       body.append(long);
@@ -412,7 +418,10 @@ export class View implements DndHost {
     if (t.group) tab.classList.add("is-group");
     if (t.status) tab.classList.add(`status-${t.status}`);
     tab.style.setProperty("--tab-accent", cellAccent(t));
-    if (this.ws.canCloseTab(t.id)) {
+    if (this.ws.isClosing(t.id)) {
+      tab.classList.add("closing");
+      tab.append(this.closingSpinner(t.id));
+    } else if (this.ws.canCloseTab(t.id)) {
       const close = Object.assign(document.createElement("span"), { className: "carreau-tab-close", title: "Close tab" });
       close.addEventListener("pointerdown", (e) => e.stopPropagation()); // not a drag
       close.addEventListener("click", (e) => {
@@ -433,6 +442,22 @@ export class View implements DndHost {
         else this.ws.maximize();
       });
     return tab;
+  }
+
+  /**
+   * Shown instead of a tab's × while it closes: a rotating arc. Hovered, it shows a red ×:
+   * clicking it closes forcefully, without waiting.
+   */
+  private closingSpinner(tabId: string): HTMLElement {
+    const s = Object.assign(document.createElement("span"), { className: "carreau-closing", title: "Closing… click to force close" });
+    // Re-rendering recreates it: keep the rotation continuous, in phase with the clock.
+    s.style.setProperty("--phase", `-${performance.now() % 900}ms`);
+    s.addEventListener("pointerdown", (e) => e.stopPropagation()); // not a drag
+    s.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.ws.forceClose(tabId);
+    });
+    return s;
   }
 
   private renderSplitter(parent: SplitNode, i: number): HTMLElement {
@@ -525,6 +550,7 @@ export class View implements DndHost {
     };
     item("Float", panes(this.ws.root).length > 1 && !!find(this.ws.root, node.id), () => this.floatPane(node.id));
     if (this.ws.canCollapse(node.id)) item("Collapse group", true, () => this.ws.collapse(node.id));
+    item("Close pane", this.ws.canClosePane(node.id), () => this.ws.closePane(node.id));
     const sc = this.ws.scrollOf(node.id);
     if (sc) {
       const [start, end] = kind(sc).axis === "row" ? ["left", "right"] : ["top", "bottom"];

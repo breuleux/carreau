@@ -16,6 +16,9 @@ import {
   WorkspaceData,
   activeGroup,
   applyDropForest,
+  closeTabWith,
+  instantLifecycle,
+  Lifecycle,
   canCollapse,
   collapseGroup,
   computeRects,
@@ -82,6 +85,13 @@ interface Snapshot {
   lastPane: string | null;
 }
 
+/** A pending close: of a tab, or of a pane (with all its tabs). */
+interface CloseOp {
+  kind: "tab" | "pane";
+  id: string;
+  tabIds: string[];
+}
+
 function sameSel(a: Selection | null, b: Selection | null): boolean {
   if (!a || !b) return a === b;
   return a.id === b.id && a.range?.[0] === b.range?.[0] && a.range?.[1] === b.range?.[1];
@@ -106,6 +116,10 @@ export class Workspace {
   /** selections preceding each expand, so that they can be undone */
   private expandStack: Selection[] = [];
   private listeners: (() => void)[] = [];
+  /** How tab contents close (set by the host). */
+  lifecycle: Lifecycle = instantLifecycle;
+  /** Pending closes, by tab id (a pane's covers all its tabs). Not part of the layout. */
+  private closing = new Map<string, CloseOp>();
 
   constructor(root: LayoutNode) {
     this.root = normalizeTree(root) ?? root;
@@ -346,20 +360,94 @@ export class Workspace {
     return !(main.length === 1 && main[0].tabs.length === 1 && main[0].tabs[0].id === tabId);
   }
 
+  /** Whether a pane can be closed: anything but the main tree's last pane. */
+  canClosePane(paneId: string): boolean {
+    const main = panes(this.root);
+    return this.node(paneId)?.type === "pane" && !(main.length === 1 && main[0].id === paneId);
+  }
+
+  /** Whether a tab is being closed (its close() hasn't returned yet). */
+  isClosing(tabId: string): boolean {
+    return this.closing.has(tabId);
+  }
+
   /**
-   * Close a tab, wherever it is. Emptied panes disappear, emptied windows close. If the focus
-   * was in that tab, it moves where the parents decide (see `focusAfterClose`); otherwise it
-   * stays where it is.
+   * Close a tab, wherever it is: its contents close first (`kind.close`, through the host's
+   * `lifecycle`; a group closes everything in it). Meanwhile the tab shows as closing; it is
+   * then removed. If closing is refused (rejected), the tab stays. Resolves to whether it closed.
    */
-  closeTab(tabId: string): boolean {
-    if (!this.canCloseTab(tabId)) return false;
-    const next = this.hasFocus(tabId) ? this.focusAfterClose(tabId) : null;
+  closeTab(tabId: string): Promise<boolean> {
+    const ft = this.findTab(tabId);
+    if (!ft || !this.canCloseTab(tabId) || this.closing.has(tabId)) return Promise.resolve(false);
+    return this.runClose({ kind: "tab", id: tabId, tabIds: [tabId] }, closeTabWith(ft.pane.tabs[ft.index], this.lifecycle));
+  }
+
+  /** Close a pane and all its tabs, like `closeTab`. */
+  closePane(paneId: string): Promise<boolean> {
+    const p = this.node(paneId);
+    if (p?.type !== "pane" || !this.canClosePane(paneId)) return Promise.resolve(false);
+    return this.runClose({ kind: "pane", id: paneId, tabIds: p.tabs.map((t) => t.id) }, kind(p).close(p, this.lifecycle));
+  }
+
+  /**
+   * Close what a tab's pending close is about (the tab, or its whole pane) right away: call
+   * the forceful close without waiting for it, and remove it.
+   */
+  forceClose(tabId: string): boolean {
+    const op = this.closing.get(tabId) ?? { kind: "tab" as const, id: tabId, tabIds: [tabId] };
+    const n = op.kind === "pane" ? this.node(op.id) : null;
+    const ft = op.kind === "tab" ? this.findTab(op.id) : null;
+    if (!n && !ft) return false;
+    (n ? kind(n).forceClose(n, this.lifecycle) : closeTabWith(ft!.pane.tabs[ft!.index], this.lifecycle, true)).catch(() => {});
+    this.endClose(op);
+    return this.remove(op);
+  }
+
+  private async runClose(op: CloseOp, closed: Promise<void>): Promise<boolean> {
+    for (const id of op.tabIds) this.closing.set(id, op);
+    this.emit();
+    try {
+      await closed;
+    } catch {
+      // refused: the tab stays
+      if (this.endClose(op)) this.emit();
+      return false;
+    }
+    if (!this.endClose(op)) return false; // forced meanwhile
+    if (!this.remove(op)) {
+      this.emit();
+      return false;
+    }
+    return true;
+  }
+
+  /** Forget a pending close; returns whether it was still pending. */
+  private endClose(op: CloseOp): boolean {
+    let pending = false;
+    for (const id of op.tabIds)
+      if (this.closing.get(id) === op) {
+        this.closing.delete(id);
+        pending = true;
+      }
+    return pending;
+  }
+
+  /**
+   * Remove a closed tab or pane. Emptied panes disappear, emptied windows close. If the focus
+   * was in it, it moves where the parents decide (see `focusAfterClose`); otherwise it stays.
+   */
+  private remove(op: CloseOp): boolean {
+    const next = this.hasFocus(op) ? this.focusAfterClose(op) : null;
     return this.change(
       (forest) => {
-        const ft = findTab(forest, tabId);
-        if (!ft) return false;
-        ft.pane.tabs.splice(ft.index, 1);
-        if (ft.index < ft.pane.active || ft.pane.active >= ft.pane.tabs.length) ft.pane.active = Math.max(0, ft.pane.active - 1);
+        if (op.kind === "pane") {
+          if (!removeNode(forest, op.id)) return false;
+        } else {
+          const ft = findTab(forest, op.id);
+          if (!ft) return false;
+          ft.pane.tabs.splice(ft.index, 1);
+          if (ft.index < ft.pane.active || ft.pane.active >= ft.pane.tabs.length) ft.pane.active = Math.max(0, ft.pane.active - 1);
+        }
         const a = next?.activate;
         const p = a && find(forest, a.paneId)?.node;
         if (p?.type === "pane") p.active = Math.max(0, p.tabs.findIndex((t) => t.id === a!.tabId));
@@ -368,11 +456,20 @@ export class Workspace {
     );
   }
 
-  /** Whether the focus is in a tab: it is the selected pane's active tab, or a group holding the selection. */
-  private hasFocus(tabId: string): boolean {
+  private findTab(tabId: string) {
+    return this.trees().map((t) => findTab(t, tabId)).find(Boolean) ?? null;
+  }
+
+  /** Whether the focus is in what closes: the selected pane's active tab (or the pane), or a
+   *  group in it holding the selection. */
+  private hasFocus(op: CloseOp): boolean {
+    if (op.kind === "pane") {
+      const p = this.node(op.id);
+      return !!p && !!find(p, this.selection.id);
+    }
     const n = this.node(this.selection.id);
-    if (n?.type === "pane" && !this.selection.range && n.tabs[n.active]?.id === tabId) return true;
-    const ft = this.trees().map((t) => findTab(t, tabId)).find(Boolean);
+    if (n?.type === "pane" && !this.selection.range && n.tabs[n.active]?.id === op.id) return true;
+    const ft = this.findTab(op.id);
     const g = ft?.pane.tabs[ft.index].group;
     return !!g && !!find(g, this.selection.id);
   }
@@ -388,14 +485,21 @@ export class Workspace {
    *  - a tree's root (a window closing): the most recently selected pane left elsewhere.
    * The focus then goes down to a pane, through what was last focused in what was picked.
    */
-  private focusAfterClose(tabId: string): { select: string; activate?: { paneId: string; tabId: string } } | null {
+  private focusAfterClose(op: CloseOp): { select: string; activate?: { paneId: string; tabId: string } } | null {
     const idx = this.index();
-    const ft = this.trees().map((t) => findTab(t, tabId)).find(Boolean);
-    if (!ft) return null;
-    let pane: PaneNode = ft.pane;
-    let gone = tabId;
+    let pane: PaneNode;
+    let gone: string | null;
+    if (op.kind === "pane") {
+      pane = this.node(op.id) as PaneNode;
+      gone = null; // the whole pane
+    } else {
+      const ft = this.findTab(op.id);
+      if (!ft) return null;
+      pane = ft.pane;
+      gone = op.id;
+    }
     for (;;) {
-      const others = pane.tabs.filter((t) => t.id !== gone);
+      const others = gone === null ? [] : pane.tabs.filter((t) => t.id !== gone);
       if (others.length) {
         const i = pane.tabs.findIndex((t) => t.id === gone);
         const tab = this.mostRecent(`tabs:${pane.id}`, others) ?? others[Math.max(0, i - 1)];
