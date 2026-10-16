@@ -1,0 +1,411 @@
+// Layout model: a tree of rows/columns whose leaves are panes holding tabs.
+// Everything in here is plain data and is JSON-serializable as-is.
+
+export type Orientation = "row" | "column";
+export type Side = "left" | "right" | "top" | "bottom";
+
+export interface Tab {
+  id: string;
+  title: string;
+  content?: string;
+}
+
+export interface PaneNode {
+  type: "pane";
+  id: string;
+  weight: number;
+  tabs: Tab[];
+  active: number;
+}
+
+export interface SplitNode {
+  type: Orientation;
+  id: string;
+  weight: number;
+  children: LayoutNode[];
+}
+
+export type LayoutNode = PaneNode | SplitNode;
+
+export interface Rect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+// ---------------------------------------------------------------------------
+// Construction helpers
+
+let counter = 0;
+export function genId(prefix = "n"): string {
+  counter++;
+  return `${prefix}${counter.toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+}
+
+export function pane(tabs: (string | Tab)[], weight = 1): PaneNode {
+  return {
+    type: "pane",
+    id: genId("p"),
+    weight,
+    active: 0,
+    tabs: tabs.map((t) => (typeof t === "string" ? { id: genId("t"), title: t } : t)),
+  };
+}
+
+export function row(children: LayoutNode[], weight = 1): SplitNode {
+  return { type: "row", id: genId("r"), weight, children };
+}
+
+export function column(children: LayoutNode[], weight = 1): SplitNode {
+  return { type: "column", id: genId("c"), weight, children };
+}
+
+// ---------------------------------------------------------------------------
+// Serialization
+
+export function serialize(node: LayoutNode): string {
+  return JSON.stringify(node, null, 2);
+}
+
+export function deserialize(text: string): LayoutNode {
+  const data = JSON.parse(text);
+  validate(data);
+  return data;
+}
+
+function validate(n: any): void {
+  if (!n || typeof n !== "object" || typeof n.id !== "string") throw new Error("Invalid node");
+  if (typeof n.weight !== "number") n.weight = 1;
+  if (n.type === "pane") {
+    if (!Array.isArray(n.tabs)) throw new Error("Pane without tabs");
+    n.active = Math.max(0, Math.min(n.active ?? 0, n.tabs.length - 1));
+  } else if (n.type === "row" || n.type === "column") {
+    if (!Array.isArray(n.children)) throw new Error("Split without children");
+    n.children.forEach(validate);
+  } else {
+    throw new Error(`Unknown node type ${n.type}`);
+  }
+}
+
+export function clone<T>(x: T): T {
+  return structuredClone(x);
+}
+
+// ---------------------------------------------------------------------------
+// Queries
+
+export interface Located {
+  node: LayoutNode;
+  parent: SplitNode | null;
+  index: number;
+}
+
+export function* walk(
+  node: LayoutNode,
+  parent: SplitNode | null = null,
+  index = 0,
+): Generator<Located> {
+  yield { node, parent, index };
+  if (node.type !== "pane") {
+    for (let i = 0; i < node.children.length; i++) {
+      yield* walk(node.children[i], node, i);
+    }
+  }
+}
+
+export function find(root: LayoutNode, id: string): Located | null {
+  for (const loc of walk(root)) if (loc.node.id === id) return loc;
+  return null;
+}
+
+/** Path of nodes from the root to the node with the given id (inclusive). */
+export function pathTo(root: LayoutNode, id: string): LayoutNode[] | null {
+  if (root.id === id) return [root];
+  if (root.type === "pane") return null;
+  for (const c of root.children) {
+    const p = pathTo(c, id);
+    if (p) return [root, ...p];
+  }
+  return null;
+}
+
+export function panes(root: LayoutNode): PaneNode[] {
+  return [...walk(root)].map((l) => l.node).filter((n): n is PaneNode => n.type === "pane");
+}
+
+export function findTab(root: LayoutNode, tabId: string): { pane: PaneNode; index: number } | null {
+  for (const p of panes(root)) {
+    const i = p.tabs.findIndex((t) => t.id === tabId);
+    if (i >= 0) return { pane: p, index: i };
+  }
+  return null;
+}
+
+/** Logical rectangles of every node, in the given frame (defaults to the unit square). */
+export function computeRects(
+  root: LayoutNode,
+  frame: Rect = { x: 0, y: 0, w: 1, h: 1 },
+  out = new Map<string, Rect>(),
+): Map<string, Rect> {
+  out.set(root.id, frame);
+  if (root.type === "pane") return out;
+  const total = root.children.reduce((s, c) => s + c.weight, 0) || 1;
+  let offset = 0;
+  for (const c of root.children) {
+    const frac = c.weight / total;
+    const r =
+      root.type === "row"
+        ? { x: frame.x + offset * frame.w, y: frame.y, w: frac * frame.w, h: frame.h }
+        : { x: frame.x, y: frame.y + offset * frame.h, w: frame.w, h: frac * frame.h };
+    computeRects(c, r, out);
+    offset += frac;
+  }
+  return out;
+}
+
+export const sideAxis: Record<Side, Orientation> = {
+  left: "row",
+  right: "row",
+  top: "column",
+  bottom: "column",
+};
+
+export const sideIsStart: Record<Side, boolean> = {
+  left: true,
+  top: true,
+  right: false,
+  bottom: false,
+};
+
+export const opposite: Record<Side, Side> = {
+  left: "right",
+  right: "left",
+  top: "bottom",
+  bottom: "top",
+};
+
+// ---------------------------------------------------------------------------
+// Mutations (in place). Call normalize() afterwards.
+
+/**
+ * Insert `node` on the given side of the node `targetId`.
+ * If the target's parent is split along the side's axis, the node becomes a sibling
+ * and takes half of the target's space; otherwise the target is wrapped in a new split.
+ * Returns the (possibly new) root.
+ */
+export function insertBeside(
+  root: LayoutNode,
+  targetId: string,
+  side: Side,
+  node: LayoutNode,
+): LayoutNode {
+  const loc = find(root, targetId);
+  if (!loc) throw new Error(`No node ${targetId}`);
+  const axis = sideAxis[side];
+  const before = sideIsStart[side];
+  const { node: target, parent, index } = loc;
+  if (parent && parent.type === axis) {
+    const w = target.weight / 2;
+    target.weight = w;
+    node.weight = w;
+    parent.children.splice(before ? index : index + 1, 0, node);
+    return root;
+  }
+  const wrapper: SplitNode = {
+    type: axis,
+    id: genId(axis === "row" ? "r" : "c"),
+    weight: target.weight,
+    children: before ? [node, target] : [target, node],
+  };
+  target.weight = 1;
+  node.weight = 1;
+  if (parent) {
+    parent.children[index] = wrapper;
+    return root;
+  }
+  return wrapper;
+}
+
+/**
+ * Exchange the positions of two disjoint nodes. Weights stay with the positions,
+ * so the geometry of the layout is unchanged.
+ */
+export function swapNodes(root: LayoutNode, idA: string, idB: string): void {
+  const a = find(root, idA);
+  const b = find(root, idB);
+  if (!a?.parent || !b?.parent) return;
+  if (pathTo(a.node, idB) || pathTo(b.node, idA)) return; // nested: not swappable
+  [a.node.weight, b.node.weight] = [b.node.weight, a.node.weight];
+  a.parent.children[a.index] = b.node;
+  b.parent.children[b.index] = a.node;
+}
+
+/** Remove a node from the tree. Returns the new root (null if the tree became empty). */
+export function removeNode(root: LayoutNode, id: string): LayoutNode | null {
+  if (root.id === id) return null;
+  const loc = find(root, id);
+  if (!loc || !loc.parent) return root;
+  loc.parent.children.splice(loc.index, 1);
+  return normalize(root);
+}
+
+/**
+ * Clean up the tree:
+ *  - drop empty panes and empty splits
+ *  - collapse splits with a single child
+ *  - flatten splits nested in a split of the same orientation
+ */
+export function normalize(node: LayoutNode): LayoutNode | null {
+  if (node.type === "pane") {
+    if (node.tabs.length === 0) return null;
+    node.active = Math.max(0, Math.min(node.active, node.tabs.length - 1));
+    return node;
+  }
+  const kids: LayoutNode[] = [];
+  for (const c of node.children) {
+    const n = normalize(c);
+    if (!n) continue;
+    if (n.type === node.type) {
+      const total = n.children.reduce((s, k) => s + k.weight, 0) || 1;
+      for (const k of n.children) {
+        k.weight = (k.weight / total) * n.weight;
+        kids.push(k);
+      }
+    } else {
+      kids.push(n);
+    }
+  }
+  node.children = kids;
+  if (kids.length === 0) return null;
+  if (kids.length === 1) {
+    kids[0].weight = node.weight;
+    return kids[0];
+  }
+  return node;
+}
+
+// ---------------------------------------------------------------------------
+// Drops
+
+export type DropTarget =
+  | { kind: "side"; targetId: string; side: Side }
+  | { kind: "tab"; paneId: string; index: number }
+  /** Insert as child `index` of split `splitId`, sized to 1/N of the split. */
+  | { kind: "between"; splitId: string; index: number };
+
+export type DragSubject = { kind: "tab"; tabId: string } | { kind: "pane"; paneId: string };
+
+export interface DropResult {
+  root: LayoutNode;
+  /** id of the pane that ends up holding the dragged thing */
+  paneId: string;
+}
+
+/** Apply a drop to a copy of the layout. Returns null if the drop is a no-op or invalid. */
+export function applyDrop(
+  original: LayoutNode,
+  subject: DragSubject,
+  target: DropTarget,
+): DropResult | null {
+  const r = applyDropRaw(original, subject, target);
+  // A drop that leaves the arrangement as it was (e.g. a lone tab dropped on a border it
+  // already occupies) is pointless, even if sizes would change.
+  if (r && shape(r.root) === shape(original)) return null;
+  return r;
+}
+
+/** Structure of a layout, ignoring ids and sizes: nesting, orientation, tabs in each pane. */
+export function shape(node: LayoutNode): string {
+  if (node.type === "pane") return `[${node.tabs.map((t) => t.id).join(",")}]`;
+  return `${node.type}(${node.children.map(shape).join(" ")})`;
+}
+
+function applyDropRaw(
+  original: LayoutNode,
+  subject: DragSubject,
+  target: DropTarget,
+): DropResult | null {
+  let root = clone(original);
+  const TOMB = "__tombstone__";
+
+  // 1. Detach the subject, leaving a tombstone so that ids along the target path stay valid.
+  let moving: PaneNode;
+  if (subject.kind === "pane") {
+    const loc = find(root, subject.paneId);
+    if (!loc || loc.node.type !== "pane") return null;
+    if (target.kind === "side" && target.targetId === subject.paneId) return null;
+    if (target.kind === "tab" && target.paneId === subject.paneId) return null;
+    if (target.kind === "between" && isNeighbourOf(root, subject.paneId, target)) return null;
+    moving = loc.node;
+    const tomb: PaneNode = { type: "pane", id: TOMB, weight: moving.weight, tabs: [], active: 0 };
+    if (loc.parent) loc.parent.children[loc.index] = tomb;
+    else return null; // the only pane cannot move anywhere
+  } else {
+    const ft = findTab(root, subject.tabId);
+    if (!ft) return null;
+    const [tab] = ft.pane.tabs.splice(ft.index, 1);
+    if (ft.pane.active >= ft.pane.tabs.length) ft.pane.active = ft.pane.tabs.length - 1;
+    if (ft.index < ft.pane.active) ft.pane.active--;
+    if (target.kind === "tab") {
+      const dest = find(root, target.paneId)?.node;
+      if (!dest || dest.type !== "pane") return null;
+      let idx = target.index;
+      if (dest === ft.pane && (idx === ft.index || idx === ft.index + 1)) return null; // no-op
+      if (dest === ft.pane && ft.index < idx) idx--;
+      dest.tabs.splice(idx, 0, tab);
+      dest.active = idx;
+      const r = normalize(root);
+      return r ? { root: r, paneId: dest.id } : null;
+    }
+    if (ft.pane.tabs.length === 0) {
+      if (target.kind === "side" && target.targetId === ft.pane.id) return null;
+      if (target.kind === "between" && isNeighbourOf(root, ft.pane.id, target)) return null;
+    }
+    moving = { type: "pane", id: genId("p"), weight: 1, tabs: [tab], active: 0 };
+  }
+
+  // 2. Insert.
+  if (target.kind === "tab") {
+    const dest = find(root, target.paneId)?.node;
+    if (!dest || dest.type !== "pane") return null;
+    dest.tabs.splice(target.index, 0, ...moving.tabs);
+    dest.active = target.index + moving.active;
+    root = removeTomb(root, TOMB)!;
+    return { root, paneId: dest.id };
+  }
+  if (target.kind === "between") {
+    const split = find(root, target.splitId)?.node;
+    if (!split || split.type === "pane") return null;
+    // Size to 1/N of the split, N counting the new pane but not what is leaving.
+    const staying = split.children.filter(
+      (c) => c.id !== TOMB && !(c.type === "pane" && c.tabs.length === 0),
+    );
+    const total = staying.reduce((s, c) => s + c.weight, 0);
+    moving.weight = staying.length ? total / staying.length : 1;
+    split.children.splice(target.index, 0, moving);
+  } else {
+    root = insertBeside(root, target.targetId, target.side, moving);
+  }
+
+  // 3. Remove tombstone & normalize (empty panes get dropped by normalize).
+  const r = removeTomb(root, TOMB);
+  return r ? { root: r, paneId: moving.id } : null;
+}
+
+/** Whether dropping `paneId` at `target` would put it right back where it is. */
+function isNeighbourOf(
+  root: LayoutNode,
+  paneId: string,
+  target: { splitId: string; index: number },
+): boolean {
+  const loc = find(root, paneId);
+  return !!loc?.parent && loc.parent.id === target.splitId &&
+    (loc.index === target.index || loc.index === target.index - 1);
+}
+
+function removeTomb(root: LayoutNode, tombId: string): LayoutNode | null {
+  const loc = find(root, tombId);
+  if (loc?.parent) loc.parent.children.splice(loc.index, 1);
+  return normalize(root);
+}
