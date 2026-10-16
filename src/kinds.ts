@@ -1,7 +1,8 @@
 // Node kinds: what each kind of node knows about itself. The data stays plain (types.ts);
 // code asks a node's kind instead of testing types and nesting all over the place.
 
-import { LayoutNode, Orientation, PaneNode, SplitNode, Tab } from "./types";
+import { SIDES } from "./geometry";
+import { LayoutNode, Orientation, PaneNode, Side, SplitNode, Tab } from "./types";
 
 /**
  * What a node learns from its parent about where it is. Computed top-down: each kind tells
@@ -35,9 +36,13 @@ export interface NodeKind {
   axis: Orientation | null;
   /** Children size themselves along the axis, and the split scrolls. */
   scroll: boolean;
-  /** Nodes can be inserted beside this one (not a scroll split: that would look like a split
-   *  but just wrap it; nor a slot or forest). */
-  acceptsBeside: boolean;
+  /**
+   * The sides on which something can be inserted (a `side` drop). Along the node's own axis,
+   * that inserts into it as its first or last child; across, beside it (as a sibling, or by
+   * wrapping it in a new split). A scroll split only takes insertions along its axis: across,
+   * it would be wrapped in a split inside its group, which isn't what the line suggests.
+   */
+  sides: Side[];
   /** This node is a step when navigating (parent/child). See `isNavStep` for the rule. */
   navStep: boolean;
   childContext(n: LayoutNode, ctx: Ctx): Ctx;
@@ -60,7 +65,7 @@ function split(axis: Orientation, scroll: boolean): NodeKind {
     ...splitBase,
     axis,
     scroll,
-    acceptsBeside: !scroll,
+    sides: scroll ? SIDES.filter((s) => (axis === "row") === (s === "left" || s === "right")) : SIDES,
     navStep: true,
     childContext(_n, ctx) {
       // Children of a scroll split, or of a plain split whose own size along its axis is
@@ -81,7 +86,7 @@ const slot: NodeKind = {
   ...splitBase,
   axis: null,
   scroll: false,
-  acceptsBeside: false,
+  sides: [],
   navStep: false,
   childContext: (_n, ctx) => ({ ...ctx, sizedAlong: null, cellOf: null }),
   // Removing the root leaves the slot empty (normalization then drops what held it).
@@ -92,7 +97,7 @@ const pane: NodeKind = {
   children: (n) => (n as PaneNode).tabs.map((t) => t.group),
   axis: null,
   scroll: false,
-  acceptsBeside: true,
+  sides: SIDES,
   navStep: true,
   // A group's layout fills the holder's body, and inherits its natural-size context (inside
   // a scroll split the holder sizes to its content, so the group's parts must too).

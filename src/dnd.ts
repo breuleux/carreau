@@ -5,6 +5,7 @@ import { grey, levelColor } from "./colors";
 import {
   DragSubject,
   DropTarget,
+  Entry,
   FloatingWindow,
   ForestResult,
   LayoutIndex,
@@ -24,6 +25,7 @@ import {
   opposite,
   paneDisplay,
   panes,
+  shape,
   sideAxis,
   sideIsStart,
   slice,
@@ -308,11 +310,7 @@ export class DragDrop {
       return result && { target, result, span: [0, 0] };
     };
     const sides: Zones["sides"] = {};
-    for (const side of SIDES) {
-      // A cell of a scroll split, along the split's axis: only separators (lines) apply.
-      if (e.ctx.cellOf === sideAxis[side]) continue;
-      sides[side] = choice({ kind: "side", targetId: paneId, side }) ?? undefined;
-    }
+    for (const side of SIDES) sides[side] = this.zoneSide(e, side) ?? undefined;
     // Center icons. Over its own pane: float the dragged thing. Elsewhere: swap, plus a tab
     // icon for a pane whose tab bar is hidden (no dots to drop on).
     const s = this.state!.subject;
@@ -333,48 +331,66 @@ export class DragDrop {
     return { rect, sides, centers };
   }
 
+  /** A pane's edge third: insert beside it. Not for a scroll split's cell along the split's
+   *  axis: that would look like a split, but isn't; only the lines apply there. */
+  private zoneSide(e: Entry, side: Side): Choice | null {
+    if (e.ctx.cellOf === sideAxis[side]) return null;
+    const target: DropTarget = { kind: "side", targetId: e.node.id, side };
+    const result = this.tryDrop(target);
+    return result && { target, result, span: [0, 0] };
+  }
+
+  /** How much of a node a `side` drop on it takes: half, or 1/N at a split's start/end. */
+  private sideShare(id: string, side: Side): number {
+    const n = this.ws.node(id);
+    if (!n || n.type === "pane" || kind(n).axis !== sideAxis[side]) return 1 / 2;
+    const s = this.state!.subject;
+    const staying = n.children.filter((c) => !(s.kind === "pane" && c.id === s.paneId)).length;
+    return 1 / (staying + 1);
+  }
+
+  /** Where a node's border is, for lines: a scroll split ends where its content does. */
+  private lineEdge(n: LayoutNode, r: Rect, side: Side): number {
+    const k = kind(n);
+    if (!k.scroll || k.axis !== sideAxis[side]) return edge(r, side);
+    const kids = (n as SplitNode).children;
+    const end = this.host.pxRect(kids[sideIsStart[side] ? 0 : kids.length - 1]?.id ?? "");
+    return end ? edge(end, side) : edge(r, side);
+  }
+
   /**
-   * Border lines. For each side of the hovered pane, walk outward through the nodes sharing
-   * that boundary, collecting where things can be inserted, outermost first:
-   *  - stopping between two siblings (a straddling separator inserting between them);
-   *  - at a scroll split's start/end, along its axis: a separator inserting there (and, where
-   *    the holder's edge coincides, continuing at the holder);
-   *  - through a slot: continuing at the pane holding it;
-   *  - one `side` choice per distinct boundary length (innermost valid node), leaving out the
-   *    hovered pane's own boundary (its edge thirds offer that).
+   * Border lines. For each side of the hovered pane P, the nodes whose border lies on P's
+   * border on that side (P's ancestors, walking up through group holders, while their edge
+   * coincides with P's) each offer an insertion there if their kind accepts that side. Walking
+   * up stops where P's side borders a sibling: there, the line straddles the gap and offers
+   * insertion between the two. Levels come outermost first. Insertions that are the same
+   * (same resulting shape) appear once, innermost; those P's own edge thirds offer don't.
    */
   private lines(idx: LayoutIndex, paneId: string, onlySide?: Side, withAcross = true): SideLine[] {
     const { host } = this;
     const P = host.pxRect(paneId);
     const Pvis = host.visRect(paneId);
-    if (!P || !Pvis) return [];
+    const pe0 = idx.get(paneId);
+    if (!P || !Pvis || !pe0) return [];
     const out: SideLine[] = [];
     for (const side of onlySide ? [onlySide] : SIDES) {
       const start = sideIsStart[side];
       // A border scrolled out of view gets no line (2px tolerance: fractional pixels).
       if (Math.abs(edge(P, side) - edge(Pvis, side)) > 2) continue;
+      const pe = edge(P, side);
       const vspan = (id: string) => {
         const r = host.visRect(id);
         return r && span(r, side);
       };
 
-      const chain: LayoutNode[] = [];
+      // Walk up: the nodes on the line (innermost first), and the gap to a sibling, if any.
+      const onLine: LayoutNode[] = [];
       let between: { split: SplitNode; index: number; before: LayoutNode; after: LayoutNode } | null = null;
-      let scrollEdge: { split: SplitNode; index: number; cell: LayoutNode } | null = null;
-      let x: LayoutNode = idx.node(paneId)!;
-      for (;;) {
-        chain.unshift(x);
+      for (let x: LayoutNode = idx.node(paneId)!; ; ) {
         const e = idx.get(x.id)!;
-        const p = e.parent;
-        if (!p) break;
-        if (p.type === "slot") {
-          const h = idx.holder(x.id); // a group's root shares its edges with its holder
-          if (!h) break;
-          x = h;
-          continue;
-        }
-        const k = kind(p);
-        if (k.axis === sideAxis[side]) {
+        const p = e.parent?.type === "slot" ? idx.holder(x.id) : e.parent;
+        if (!p || p.type === "forest") break;
+        if (kind(p).axis === sideAxis[side]) {
           const kids = (p as SplitNode).children;
           const j = start ? e.index - 1 : e.index + 1;
           if (j >= 0 && j < kids.length) {
@@ -382,73 +398,48 @@ export class DragDrop {
             between = { split: p as SplitNode, index: lo + 1, before: kids[lo], after: kids[lo + 1] };
             break;
           }
-          if (k.scroll && !scrollEdge) {
-            scrollEdge = { split: p as SplitNode, index: start ? 0 : kids.length, cell: x };
-            // Where the scroll split's edge is also its holder's (the top: the header is at
-            // the bottom), the holder's options are at the same location: same line.
-            const holder = idx.holder(p.id);
-            const S = host.pxRect(p.id);
-            const H = holder && host.pxRect(holder.id);
-            if (holder && S && H && Math.abs(edge(S, side) - edge(H, side)) <= 1.5) {
-              x = holder;
-              continue;
-            }
-            break;
-          }
         }
+        const pr = host.pxRect(p.id);
+        if (!pr || Math.abs(this.lineEdge(p, pr, side) - pe) > 1.5) break;
+        onLine.push(p);
         x = p;
       }
 
+      // Already offered: P's own edge third on that side, and the insertion between siblings.
+      // (Same layout *and sizes*: halving P and taking 1/N of its parent are different drops.)
+      const key = (r: ForestResult) => r.trees.map((t) => (t ? shape(t, true) : "-")).join(";");
+      const seen = new Set<string>();
+      const third = this.zoneSide(pe0, side);
+      if (third) seen.add(key(third.result));
       const levels: Choice[] = [];
-      const push = (target: DropTarget, sp: [number, number] | null, extra: Partial<Choice> = {}) => {
-        const result = sp && this.tryDrop(target);
-        if (result) levels.push({ target, result, span: sp!, ...extra });
-      };
-      let rest = chain;
       if (between) {
-        push({ kind: "between", splitId: between.split.id, index: between.index }, vspan(chain[0].id), {
-          straddle: [between.before.id, between.after.id],
-        });
-        rest = chain.slice(1);
-      }
-      // A scroll edge splits the rest: levels outside the scroll split, the separator, the
-      // levels inside the cell.
-      let outer: LayoutNode[] = [];
-      if (scrollEdge) {
-        const i = rest.indexOf(scrollEdge.cell);
-        outer = rest.slice(0, i);
-        rest = rest.slice(i + 1);
-      }
-      const sideLevels = (nodes: LayoutNode[]) => {
-        let group: { span: [number, number]; best: Choice | null; self: boolean } | null = null;
-        const flush = () => group?.best && !group.self && levels.push(group.best);
-        for (const n of nodes) {
-          const full = host.pxRect(n.id);
-          const sp = vspan(n.id);
-          if (!full || !sp) continue;
-          const fs = span(full, side);
-          if (!group || Math.abs(fs[0] - group.span[0]) > 1 || Math.abs(fs[1] - group.span[1]) > 1) {
-            flush();
-            group = { span: fs, best: null, self: false };
-          }
-          if (n.id === paneId) group.self = true;
-          const target: DropTarget = { kind: "side", targetId: n.id, side };
-          const result = this.tryDrop(target);
-          if (result) group.best = { target, result, span: sp };
+        const target: DropTarget = { kind: "between", splitId: between.split.id, index: between.index };
+        const result = this.tryDrop(target);
+        const sp = vspan((start ? between.after : between.before).id);
+        if (result && sp) {
+          seen.add(key(result));
+          levels.push({ target, result, span: sp, straddle: [between.before.id, between.after.id] });
         }
-        flush();
-      };
-      sideLevels(outer);
-      if (scrollEdge)
-        push({ kind: "between", splitId: scrollEdge.split.id, index: scrollEdge.index }, vspan(scrollEdge.cell.id), {
-          edge: { nodeId: scrollEdge.cell.id, side },
-        });
-      sideLevels(rest);
+      }
+      const sides: Choice[] = [];
+      for (const n of onLine) {
+        const sp = vspan(n.id);
+        if (!sp || !kind(n).sides.includes(side)) continue;
+        const target: DropTarget = { kind: "side", targetId: n.id, side };
+        const result = this.tryDrop(target);
+        if (!result || seen.has(key(result))) continue;
+        seen.add(key(result));
+        // Into a scroll split at its start/end: previewed on its end child.
+        const k = kind(n);
+        const endChild = k.scroll && k.axis === sideAxis[side] ? (n as SplitNode).children[start ? 0 : (n as SplitNode).children.length - 1] : null;
+        sides.push({ target, result, span: endChild ? (vspan(endChild.id) ?? sp) : sp, ...(endChild ? { edge: { nodeId: endChild.id, side } } : {}) });
+      }
+      levels.push(...sides.reverse());
       if (!levels.length) continue;
 
       // Where the line is (inward from P's edge). Between siblings: our half starts at the
-      // middle of the gap, and the hit area covers the whole gap.
-      const pe = edge(P, side);
+      // middle of the gap, and the hit area covers the whole gap. At a scroll split's end, it
+      // reaches a little outward (the end can be flush with the viewport's).
       const inward = (c: number) => (start ? c - pe : pe - c);
       let line: [number, number] = [0, LINE];
       let hit = line;
@@ -459,7 +450,7 @@ export class DragDrop {
         const mid = inward((aEnd + bStart) / 2);
         line = [mid, mid + LINE];
         hit = [inward(start ? aEnd : bStart), line[1]];
-      } else if (scrollEdge) hit = [-EDGE_REACH, LINE];
+      } else if (levels.some((c) => c.edge)) hit = [-EDGE_REACH, LINE];
 
       // The same border seen from the panes across it.
       const acrossLines: SideLine["across"] = [];
@@ -510,7 +501,8 @@ export class DragDrop {
         const v = host.visRect(id);
         return r && v ? intersect(r, v) : null;
       };
-      if (t.kind === "side") outline(visible(t.targetId, slice(host.pxRect(t.targetId)!, t.side, 1 / 2)));
+      if (c.edge) outline(visible(targetIdOf(t), slice(host.pxRect(c.edge.nodeId)!, c.edge.side, 1 / 3)));
+      else if (t.kind === "side") outline(visible(t.targetId, slice(host.pxRect(t.targetId)!, t.side, this.sideShare(t.targetId, t.side))));
       else if (t.kind === "float") outline(host.floatRect(t.paneId));
       else if (t.kind === "swap") {
         // Both panes that trade contents.
@@ -521,8 +513,7 @@ export class DragDrop {
         // Into a tab bar: the highlighted dot is the preview; into a pane with no tab bar
         // (the center tab icon): outline the pane.
         if (d.zones?.centers.some((z) => z.choice === c)) outline(host.visRect(t.paneId));
-      } else if (c.edge) outline(visible(t.splitId, slice(host.pxRect(c.edge.nodeId)!, c.edge.side, 1 / 3)));
-      else if (c.straddle) {
+      } else if (c.straddle) {
         // Last third of the node before, first third of the one after.
         const [a, b] = c.straddle.map((id) => host.pxRect(id)!);
         const axisRow = a.x + a.w <= b.x + 0.5;
@@ -603,6 +594,10 @@ export class DragDrop {
     drawLine(d.near);
     for (const { line, clip } of d.near.across) drawLine(line, clip);
   }
+}
+
+function targetIdOf(t: DropTarget): string {
+  return t.kind === "side" ? t.targetId : t.kind === "between" ? t.splitId : t.paneId;
 }
 
 /** A band of a line, inward from its edge, along a given stretch. */

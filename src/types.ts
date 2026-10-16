@@ -47,6 +47,12 @@ export interface SplitNode {
   id: string;
   weight: number;
   children: LayoutNode[];
+  /**
+   * Scroll splits only: stick to the end (bottom / right) instead of the start, like a
+   * terminal or a chat. Short content sits at the end; scrolled to the end, it stays there as
+   * content grows. The order of the children is unchanged.
+   */
+  reverse?: boolean;
 }
 
 export type LayoutNode = PaneNode | SplitNode;

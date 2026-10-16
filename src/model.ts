@@ -64,14 +64,12 @@ export function serialize(data: WorkspaceData | LayoutNode): string {
   return JSON.stringify(data, null, 2);
 }
 
-/** Accepts either a bare tree or `{root, floating}` (and older formats). */
+/** Accepts either a bare tree or `{root, floating}`. */
 export function deserialize(text: string): WorkspaceData {
   const data = JSON.parse(text);
   if (data && typeof data === "object" && "root" in data) {
     validate(data.root);
-    const floating: FloatingWindow[] = (Array.isArray(data.floating) ? data.floating : []).map(
-      (f: any) => ({ root: f.root ?? f.pane, rect: f.rect }), // older: {pane, rect}
-    );
+    const floating: FloatingWindow[] = Array.isArray(data.floating) ? data.floating : [];
     for (const f of floating) validate(f.root);
     return { root: data.root, floating };
   }
@@ -82,7 +80,6 @@ export function deserialize(text: string): WorkspaceData {
 function validate(n: any): void {
   if (!n || typeof n !== "object" || typeof n.id !== "string") throw new Error("Invalid node");
   if (typeof n.weight !== "number") n.weight = 1;
-  if (n.type === "group") n.type = "slot"; // older name
   if (n.type === "pane") {
     if (!Array.isArray(n.tabs)) throw new Error("Pane without tabs");
     n.active = Math.max(0, Math.min(n.active ?? 0, n.tabs.length - 1));
@@ -90,6 +87,7 @@ function validate(n: any): void {
   } else if (["row", "column", "scroll-row", "scroll-column", "slot"].includes(n.type)) {
     if (!Array.isArray(n.children)) throw new Error("Split without children");
     if (n.type === "slot" && n.children.length !== 1) throw new Error("A slot holds one node");
+    if (n.reverse !== undefined && (typeof n.reverse !== "boolean" || !n.type.startsWith("scroll-"))) throw new Error("Only scroll splits reverse");
     n.children.forEach(validate);
   } else {
     throw new Error(`Unknown node type ${n.type}`);
@@ -100,11 +98,16 @@ export function clone<T>(x: T): T {
   return structuredClone(x);
 }
 
-/** Structure of a layout, ignoring ids and sizes: nesting, types, tabs in each pane. */
-export function shape(node: LayoutNode): string {
+/**
+ * Structure of a layout, ignoring ids: nesting, types, tabs in each pane; and, with
+ * `withWeights`, the (normalized) weights too.
+ */
+export function shape(node: LayoutNode, withWeights = false): string {
+  const w = withWeights ? `:${node.weight.toFixed(4)}` : "";
+  const sub = (n: LayoutNode) => shape(n, withWeights);
   if (node.type === "pane")
-    return `[${node.tabs.map((t) => (t.group ? `${t.id}{${t.group.children.map(shape).join(" ")}}` : t.id)).join(",")}]`;
-  return `${node.type}(${node.children.map(shape).join(" ")})`;
+    return `[${node.tabs.map((t) => (t.group ? `${t.id}{${t.group.children.map(sub).join(" ")}}` : t.id)).join(",")}]${w}`;
+  return `${node.type}(${node.children.map(sub).join(" ")})${w}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -193,9 +196,11 @@ export function inForest<R>(trees: LayoutNode[], fn: (forest: SplitNode) => R): 
 // Mutations (in place; normalize afterwards)
 
 /**
- * Insert `node` on a side of the node `targetId`. If the target's parent lays out its
- * children along that side's axis, the node becomes a sibling taking half of the target's
- * space; otherwise the target is wrapped in a new split (in place, through its parent).
+ * Insert `node` on a side of the node `targetId` (which must accept it: `kind(n).sides`).
+ *  - The target's parent lays out its children along that side's axis: the node becomes a
+ *    sibling taking half of the target's space.
+ *  - Otherwise the target is wrapped in a new split (in place, through its parent).
+ * (On a split along that axis, a drop inserts at its start/end instead: see `applyDropRaw`.)
  */
 export function insertBeside(root: LayoutNode, targetId: string, side: Side, node: LayoutNode): void {
   const loc = find(root, targetId);
@@ -327,7 +332,10 @@ function applyDropRaw(root: SplitNode, subject: DragSubject, target: DropTarget)
   if (wouldNestInItself(root, subject, target)) return null;
   if (target.kind === "side") {
     const t = find(root, target.targetId)?.node;
-    if (!t || !kind(t).acceptsBeside) return null;
+    if (!t || !kind(t).sides.includes(target.side)) return null;
+    // A side of a split along that side's axis: its start or end, sized 1/N like a separator.
+    if (t.type !== "pane" && kind(t).axis === sideAxis[target.side])
+      target = { kind: "between", splitId: t.id, index: sideIsStart[target.side] ? 0 : t.children.length };
   }
 
   if (target.kind === "float") {

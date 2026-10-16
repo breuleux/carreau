@@ -104,6 +104,10 @@ kbd { background: #3c3f4b; border-radius: 3px; padding: 0 4px; font-size: 11px; 
    the space left after short content reads as part of it (padding), not as a gap. */
 .carreau-scroll { background: #141519; border-radius: 4px; box-shadow: inset 0 0 0 1px #2c2e38; }
 .carreau-gap { flex: 0 0 4px; }
+/* Sticky scroll splits: short content sits at the end. (An auto margin, not justify-content:
+   flex-end, which would make overflowing content unreachable at the start.) */
+.carreau-scroll-column.carreau-reverse > :first-child { margin-top: auto; }
+.carreau-scroll-row.carreau-reverse > :first-child { margin-left: auto; }
 .carreau-natural-column { flex: none !important; min-height: 60px; }
 .carreau-natural-row { flex: none !important; min-width: 120px; }
 .carreau-natural-column > .carreau-body, .carreau-natural-row > .carreau-body { overflow: visible; }

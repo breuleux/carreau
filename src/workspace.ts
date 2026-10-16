@@ -14,6 +14,7 @@ import {
   Side,
   SplitNode,
   WorkspaceData,
+  activeGroup,
   applyDropForest,
   canCollapse,
   collapseGroup,
@@ -23,6 +24,7 @@ import {
   genId,
   groupPane,
   inForest,
+  isScroll,
   kind,
   normalizeTree,
   opposite,
@@ -92,8 +94,11 @@ export class Workspace {
   selection: Selection;
   maximized: Selection | null = null;
   private maxHistory: (Selection | null)[] = [];
-  /** container id -> id of the child last focused in it */
-  private lastChild = new Map<string, string>();
+  /**
+   * Activation order, most recent first: container id -> child ids (focus moving through
+   * them); `tabs:<pane id>` -> tab ids (tabs becoming active); "" -> pane ids (panes selected).
+   */
+  private recent = new Map<string, string[]>();
   /** `${nodeId}:${side}` -> selection we came from through that side */
   private boundary = new Map<string, Selection>();
   /** The latest single pane selected (multi-selections don't stick). */
@@ -113,7 +118,32 @@ export class Workspace {
   }
 
   emit(): void {
+    // Tabs can become active in many ways (clicks, commands, drops): record them all here.
+    for (const t of this.trees()) for (const p of panes(t)) if (p.tabs[p.active]) this.touch(`tabs:${p.id}`, p.tabs[p.active].id);
     for (const fn of this.listeners) fn();
+  }
+
+  /** Record `id` as the most recently activated under `key`. */
+  private touch(key: string, id: string): void {
+    const l = this.recent.get(key) ?? [];
+    const i = l.indexOf(id);
+    if (i === 0) return;
+    if (i > 0) l.splice(i, 1);
+    l.unshift(id);
+    if (l.length > 64) l.length = 64;
+    this.recent.set(key, l);
+  }
+
+  /** The most recently activated of `candidates` under `key`, if any was. */
+  private mostRecent<T extends { id: string }>(key: string, candidates: T[]): T | undefined {
+    const l = this.recent.get(key) ?? [];
+    let best: T | undefined;
+    let bi = Infinity;
+    for (const c of candidates) {
+      const i = l.indexOf(c.id);
+      if (i >= 0 && i < bi) [best, bi] = [c, i];
+    }
+    return best;
   }
 
   /** All trees: the main one first, then the floating windows' (minus `exclude`). */
@@ -316,15 +346,98 @@ export class Workspace {
     return !(main.length === 1 && main[0].tabs.length === 1 && main[0].tabs[0].id === tabId);
   }
 
-  /** Close a tab, wherever it is. Emptied panes disappear, emptied windows close. */
+  /**
+   * Close a tab, wherever it is. Emptied panes disappear, emptied windows close. If the focus
+   * was in that tab, it moves where the parents decide (see `focusAfterClose`); otherwise it
+   * stays where it is.
+   */
   closeTab(tabId: string): boolean {
     if (!this.canCloseTab(tabId)) return false;
-    return this.change((forest) => {
-      const ft = findTab(forest, tabId);
-      if (!ft) return false;
-      ft.pane.tabs.splice(ft.index, 1);
-      if (ft.index < ft.pane.active || ft.pane.active >= ft.pane.tabs.length) ft.pane.active = Math.max(0, ft.pane.active - 1);
-    });
+    const next = this.hasFocus(tabId) ? this.focusAfterClose(tabId) : null;
+    return this.change(
+      (forest) => {
+        const ft = findTab(forest, tabId);
+        if (!ft) return false;
+        ft.pane.tabs.splice(ft.index, 1);
+        if (ft.index < ft.pane.active || ft.pane.active >= ft.pane.tabs.length) ft.pane.active = Math.max(0, ft.pane.active - 1);
+        const a = next?.activate;
+        const p = a && find(forest, a.paneId)?.node;
+        if (p?.type === "pane") p.active = Math.max(0, p.tabs.findIndex((t) => t.id === a!.tabId));
+      },
+      () => next?.select,
+    );
+  }
+
+  /** Whether the focus is in a tab: it is the selected pane's active tab, or a group holding the selection. */
+  private hasFocus(tabId: string): boolean {
+    const n = this.node(this.selection.id);
+    if (n?.type === "pane" && !this.selection.range && n.tabs[n.active]?.id === tabId) return true;
+    const ft = this.trees().map((t) => findTab(t, tabId)).find(Boolean);
+    const g = ft?.pane.tabs[ft.index].group;
+    return !!g && !!find(g, this.selection.id);
+  }
+
+  /**
+   * Where the focus goes when a tab that has it closes. Walking up from what disappears, the
+   * first parent with something left decides:
+   *  - a pane (tab group): its most recently activated other tab (else the one before);
+   *  - a plain split: its most recently focused other child (else a neighbour);
+   *  - a scroll split: the neighbour that moves into the closed one's place, i.e. the one
+   *    further from its sticky end (after it, or before it if it sticks to its end);
+   *  - a group's slot: its tab disappears from the holder pane, which decides in turn;
+   *  - a tree's root (a window closing): the most recently selected pane left elsewhere.
+   * The focus then goes down to a pane, through what was last focused in what was picked.
+   */
+  private focusAfterClose(tabId: string): { select: string; activate?: { paneId: string; tabId: string } } | null {
+    const idx = this.index();
+    const ft = this.trees().map((t) => findTab(t, tabId)).find(Boolean);
+    if (!ft) return null;
+    let pane: PaneNode = ft.pane;
+    let gone = tabId;
+    for (;;) {
+      const others = pane.tabs.filter((t) => t.id !== gone);
+      if (others.length) {
+        const i = pane.tabs.findIndex((t) => t.id === gone);
+        const tab = this.mostRecent(`tabs:${pane.id}`, others) ?? others[Math.max(0, i - 1)];
+        const inner = tab.group?.children[0];
+        return { select: inner ? this.descend(inner) : pane.id, activate: { paneId: pane.id, tabId: tab.id } };
+      }
+      // The pane disappears: up until a parent has something left.
+      let x: LayoutNode = pane;
+      let holder: PaneNode | null = null;
+      for (;;) {
+        const parent = idx.parent(x.id);
+        if (!parent) {
+          const p = this.mostRecent("", panes(this.root).concat(...this.floating.map((w) => panes(w.root))).filter((p) => !find(x, p.id)));
+          return p ? { select: p.id } : null;
+        }
+        if (parent.type === "slot") {
+          holder = idx.parent(parent.id) as PaneNode;
+          gone = holder.tabs.find((t) => t.group?.id === parent.id)!.id;
+          break;
+        }
+        const kids = (parent as SplitNode).children;
+        const i = kids.indexOf(x);
+        if (kids.length > 1) {
+          const k = kind(parent);
+          const order = k.scroll ? (parent.type !== "pane" && parent.reverse ? [i - 1, i + 1] : [i + 1, i - 1]) : [i - 1, i + 1];
+          const near = order.map((j) => kids[j]).find(Boolean)!;
+          const pick = k.scroll ? near : (this.mostRecent(parent.id, kids.filter((c) => c !== x)) ?? near);
+          return { select: this.descend(pick) };
+        }
+        x = parent;
+      }
+      pane = holder;
+    }
+  }
+
+  /** Down to a pane, through what was last focused (a pane showing a group: into the group). */
+  private descend(n: LayoutNode): string {
+    if (n.type === "pane") {
+      const g = activeGroup(n)?.children[0];
+      return g ? this.descend(g) : n.id;
+    }
+    return this.descend(this.mostRecent(n.id, n.children) ?? n.children[0]);
   }
 
   /** Rename a tab (wherever it is): replaces its title and any HTML `short`. */
@@ -367,6 +480,23 @@ export class Workspace {
   }
 
   /** A pane can collapse if its only tab is a group (not a scroll split's). */
+  /** The scroll split a pane shows (as its active group's root), if any. */
+  scrollOf(paneId: string): SplitNode | null {
+    const p = this.node(paneId);
+    const root = p?.type === "pane" ? activeGroup(p)?.children[0] : undefined;
+    return root && isScroll(root) ? root : null;
+  }
+
+  /** Make a scroll split stick to its end, or back to its start. Undoable. */
+  toggleReverse(scrollId: string): boolean {
+    return this.change((forest) => {
+      const n = find(forest, scrollId)?.node;
+      if (!n || !isScroll(n)) return false;
+      if (n.reverse) delete n.reverse;
+      else n.reverse = true;
+    });
+  }
+
   canCollapse(paneId: string): boolean {
     const p = this.node(paneId);
     return p?.type === "pane" && canCollapse(p);
@@ -440,11 +570,14 @@ export class Workspace {
       sel = { id: sel.id };
     this.selection = sel;
     this.expandStack = [];
-    if (!sel.range && n.type === "pane") this.lastPane = sel.id;
+    if (!sel.range && n.type === "pane") {
+      this.lastPane = sel.id;
+      this.touch("", sel.id);
+    }
     // At the top level, maximization is cleared unconditionally.
     if (sel.id === this.root.id && !sel.range) this.clearMaximization();
     const path = pathTo(this.treeOf(sel.id)!, sel.id)!;
-    for (let i = 0; i < path.length - 1; i++) this.lastChild.set(path[i].id, path[i + 1].id);
+    for (let i = 0; i < path.length - 1; i++) this.touch(path[i].id, path[i + 1].id);
     if (emit) this.emit();
   }
 
@@ -526,7 +659,7 @@ export class Workspace {
     if (!n) return;
     const pick = (split: SplitNode, range = [0, split.children.length - 1]) => {
       const allowed = split.children.slice(range[0], range[1] + 1);
-      return allowed.find((c) => c.id === this.lastChild.get(split.id)) ?? allowed[0];
+      return this.mostRecent(split.id, allowed) ?? allowed[0];
     };
     const child =
       n.type !== "pane" && s.range ? pick(n, s.range) : this.index().navChild(n, (split) => pick(split));

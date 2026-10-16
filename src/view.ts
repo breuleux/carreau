@@ -55,7 +55,14 @@ export class View implements DndHost {
   /** One persistent element per tab, created once and moved around, never recreated. */
   private contents = new Map<string, HTMLElement>();
   /** Last known scroll position of each scroll split / tab scroller, by node id. */
-  private scrollPos = new Map<string, [number, number]>();
+  private scrollPos = new Map<string, { left: number; top: number; atEnd: boolean }>();
+  /** Keeps sticky (reverse) scroll splits at their end while their content grows. */
+  private sticky = new ResizeObserver((entries) => {
+    for (const e of entries) {
+      const sc = e.target.parentElement;
+      if (sc && this.stuck(sc)) toEnd(sc);
+    }
+  });
   private lastSelection = "";
   private lastTab = "";
 
@@ -237,13 +244,22 @@ export class View implements DndHost {
 
   private rememberScroll(el: HTMLElement): void {
     const key = this.scrollKey(el);
-    if (key) this.scrollPos.set(key, [el.scrollLeft, el.scrollTop]);
+    if (key) this.scrollPos.set(key, { left: el.scrollLeft, top: el.scrollTop, atEnd: atEnd(el) });
+  }
+
+  /** A sticky scroll split that should be at its end: it was (or it was never scrolled). */
+  private stuck(el: HTMLElement): boolean {
+    if (!el.classList.contains("carreau-reverse") || !el.getClientRects().length) return false;
+    return this.scrollPos.get(this.scrollKey(el) ?? "")?.atEnd ?? true;
   }
 
   private restoreScroll(): void {
+    this.sticky.disconnect();
     for (const el of this.el.querySelectorAll<HTMLElement>(".carreau-scroll, .carreau-tabs")) {
+      if (el.classList.contains("carreau-reverse")) for (const c of el.children) this.sticky.observe(c);
       const pos = this.scrollPos.get(this.scrollKey(el) ?? "");
-      if (pos && el.getClientRects().length) [el.scrollLeft, el.scrollTop] = pos;
+      if (this.stuck(el)) toEnd(el);
+      else if (pos && el.getClientRects().length) [el.scrollLeft, el.scrollTop] = [pos.left, pos.top];
     }
   }
 
@@ -295,6 +311,7 @@ export class View implements DndHost {
     const k = kind(node);
     el.classList.add("carreau-split", `carreau-${k.axis}`);
     if (k.scroll) el.classList.add("carreau-scroll", `carreau-${node.type}`);
+    if (node.reverse) el.classList.add("carreau-reverse");
     const childCtx = k.childContext(node, ctx);
     node.children.forEach((c, i) => {
       // Children sized by their content get a fixed gap; others, a splitter.
@@ -508,6 +525,11 @@ export class View implements DndHost {
     };
     item("Float", panes(this.ws.root).length > 1 && !!find(this.ws.root, node.id), () => this.floatPane(node.id));
     if (this.ws.canCollapse(node.id)) item("Collapse group", true, () => this.ws.collapse(node.id));
+    const sc = this.ws.scrollOf(node.id);
+    if (sc) {
+      const [start, end] = kind(sc).axis === "row" ? ["left", "right"] : ["top", "bottom"];
+      item(`Stick to ${sc.reverse ? start : end}`, true, () => this.ws.toggleReverse(sc.id));
+    }
     // The header is at the bottom of panes: open upwards.
     const g = anchor.getBoundingClientRect();
     const b = this.el.getBoundingClientRect();
@@ -754,6 +776,18 @@ function move(parent: HTMLElement, node: HTMLElement): void {
 }
 
 export const hasMoveBefore = typeof (Element.prototype as { moveBefore?: unknown }).moveBefore === "function";
+
+/** Whether a scroll split is scrolled to its end, along its axis (1px tolerance). */
+function atEnd(el: HTMLElement): boolean {
+  return el.classList.contains("carreau-scroll-row")
+    ? el.scrollLeft >= el.scrollWidth - el.clientWidth - 1
+    : el.scrollTop >= el.scrollHeight - el.clientHeight - 1;
+}
+
+function toEnd(el: HTMLElement): void {
+  if (el.classList.contains("carreau-scroll-row")) el.scrollLeft = el.scrollWidth;
+  else el.scrollTop = el.scrollHeight;
+}
 
 /** Show a shadow at either end of a tab scroller when there is more to see that way. */
 function updateTabShadows(scroller: HTMLElement): void {
