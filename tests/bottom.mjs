@@ -1,0 +1,12 @@
+import { chromium } from "playwright";
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1300, height: 800 }, deviceScaleFactor: 2 });
+page.on("pageerror", (e) => console.log("PAGEERROR", e.message));
+await page.goto("http://localhost:5317/?example=IDE");
+await page.locator(".carreau-tab", { hasText: /^Terminal$/ }).click();
+const pane = page.locator(".carreau-pane", { has: page.locator(".carreau-tab", { hasText: /^Terminal$/ }) });
+await pane.locator(".carreau-more").click();
+const m = await page.locator(".carreau-menu").boundingBox(), d = await pane.locator(".carreau-more").boundingBox();
+console.log("menu bottom", Math.round(m.y + m.height), "dots top", Math.round(d.y));
+await page.screenshot({ path: "/tmp/bottom.png", clip: { x: 0, y: 30, width: 1000, height: 770 } });
+await browser.close();

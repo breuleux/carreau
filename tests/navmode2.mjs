@@ -1,0 +1,22 @@
+import { chromium } from "playwright";
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1300, height: 800 } });
+page.on("pageerror", (e) => console.log("PAGEERROR", e.message));
+await page.goto("http://localhost:5317/?example=IDE");
+const show = () => page.evaluate(() => { const f = (n) => (n.type === "pane" ? n.tabs.map((t) => t.title).join("+") : `${n.type}(${n.children.map(f).join(", ")})`); return f(window.ws.root) + (window.ws.floating.length ? " | floats: " + window.ws.floating.map((w) => f(w.root) + "@" + Math.round(w.rect.x)).join(" ; ") : ""); });
+await page.locator(".carreau-tab", { hasText: /^model\.ts$/ }).click();
+await page.keyboard.down("Alt"); await page.keyboard.press("KeyQ");
+await page.keyboard.press("KeyX");
+console.log("X closes model.ts:", await show());
+await page.keyboard.press("ArrowRight");
+await page.keyboard.press("KeyF");
+console.log("→ F floats Outline:", await show());
+await page.keyboard.up("Alt");
+// in held mode, drag the window from its body
+await page.keyboard.down("Alt"); await page.keyboard.press("KeyQ");
+const w = await page.locator(".carreau-float").boundingBox();
+await page.mouse.move(w.x + w.width / 2, w.y + w.height / 2); await page.mouse.down();
+await page.mouse.move(w.x + w.width / 2 - 300, w.y + w.height / 2, { steps: 8 }); await page.mouse.up();
+await page.keyboard.up("Alt");
+console.log("window moved from body:", await show());
+await browser.close();

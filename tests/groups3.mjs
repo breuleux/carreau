@@ -1,0 +1,10 @@
+import { chromium } from "playwright";
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1300, height: 800 }, deviceScaleFactor: 2 });
+await page.goto("http://localhost:5317/?example=IDE");
+await page.locator(".carreau-tab", { hasText: /^Terminal$/ }).click();
+await page.keyboard.down("Alt"); await page.keyboard.press("KeyQ"); await page.keyboard.press("KeyP"); await page.keyboard.press("KeyG"); await page.keyboard.up("Alt");
+await page.keyboard.press("Enter");
+await page.locator(".carreau-root .carreau-tab", { hasText: /^Files$/ }).click();
+await page.screenshot({ path: "/tmp/g-style.png", clip: { x: 0, y: 30, width: 1000, height: 770 } });
+await browser.close();

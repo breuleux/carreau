@@ -77,7 +77,7 @@ export const examples: Example[] = [
         scrollColumn(
           [
             pane([cell("ls", SHELL, "$ ls -la ~/projects/carreau", "oklch(0.75 0.12 160)", "done",
-              ["total 48", "drwxr-xr-x  src/", "drwxr-xr-x  testscripts/", "-rw-r--r--  design.md", "-rw-r--r--  package.json"].join("\n"))]),
+              ["total 48", "drwxr-xr-x  src/", "drwxr-xr-x  tests/", "-rw-r--r--  design.md", "-rw-r--r--  package.json"].join("\n"))]),
             pane([cell("Explain", PROMPT, "Explain what normalizeTree does, in two sentences.", "oklch(0.72 0.13 300)", undefined,
               "It normalizes a whole layout tree, then wraps a root scroll split in a group tab. Scroll splits thereby always live in a tab, so they can be moved around as a whole.")]),
             pane([cell("make test", SHELL, "$ make test", "oklch(0.72 0.15 25)", "error",
@@ -242,7 +242,7 @@ export const examples: Example[] = [
         row(
           [
             { ...scrollColumn([
-              pane([cell("ls", SHELL, "$ ls", "oklch(0.75 0.12 160)", "done", "src/  testscripts/  design.md")]),
+              pane([cell("ls", SHELL, "$ ls", "oklch(0.75 0.12 160)", "done", "src/  tests/  design.md")]),
               pane([cell("make", SHELL, "$ make", "oklch(0.75 0.12 160)", "done", "build ok")]),
               pane([cell("make test", SHELL, "$ make test", "oklch(0.72 0.15 25)", "error", "FAIL weights preserved")]),
             ]), reverse: true },
@@ -265,7 +265,7 @@ export const examples: Example[] = [
         pane([t("Notes", 1)], 1),
         promptColumn(
           [
-            pane([cell("ls", SHELL, "$ ls", "oklch(0.75 0.12 160)", "done", "src/  demo/  testscripts/  design.md")]),
+            pane([cell("ls", SHELL, "$ ls", "oklch(0.75 0.12 160)", "done", "src/  demo/  tests/  design.md")]),
             pane([cell("Explain", PROMPT, "What is a prompt-column?", "oklch(0.72 0.13 300)", undefined, "A scroll-column that sticks to its bottom, with a prompt below its cells.")]),
             pane([cell("make test", SHELL, "$ make test", "oklch(0.72 0.15 25)", "error", "FAIL weights preserved")]),
           ],

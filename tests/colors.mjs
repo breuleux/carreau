@@ -1,0 +1,32 @@
+import { chromium } from "playwright";
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1300, height: 800 } });
+page.on("pageerror", (e) => console.log("PAGEERROR", e.message));
+await page.goto("http://localhost:5317/?example=IDE");
+await page.locator(".carreau-tab", { hasText: /^Terminal$/ }).click();
+await page.screenshot({ path: "/tmp/c-rest.png", clip: { x: 0, y: 30, width: 1000, height: 770 } });
+await page.keyboard.press("Alt+KeyP");
+await page.screenshot({ path: "/tmp/c-parent.png", clip: { x: 0, y: 30, width: 1000, height: 770 } });
+// drag over a third (preview)
+const t = await page.locator(".carreau-tab", { hasText: /^Outline$/ }).boundingBox();
+const m = await page.locator(".carreau-pane", { has: page.locator(".carreau-tab", { hasText: /^main\.ts$/ }) }).boundingBox();
+await page.mouse.move(t.x + 5, t.y + 5); await page.mouse.down();
+await page.mouse.move(t.x - 60, t.y + 60, { steps: 5 });
+await page.mouse.move(m.x + m.width * 0.85, m.y + m.height / 2, { steps: 6 });
+await page.screenshot({ path: "/tmp/c-third.png", clip: { x: 0, y: 30, width: 1000, height: 770 } });
+await page.mouse.move(m.x + m.width / 2, m.y + m.height / 2, { steps: 4 });
+await page.screenshot({ path: "/tmp/c-swap.png", clip: { x: 300, y: 200, width: 400, height: 250 } });
+await page.mouse.up();
+// lines in deep nesting
+await page.goto("http://localhost:5317/?example=Deep%20nesting");
+const e = await page.locator(".carreau-tab", { hasText: /^E$/ }).boundingBox();
+const a = await page.locator(".carreau-pane", { has: page.locator(".carreau-tab", { hasText: /^A$/ }) }).boundingBox();
+await page.mouse.move(e.x + 5, e.y + 5); await page.mouse.down();
+await page.mouse.move(e.x + 40, e.y + 40, { steps: 5 });
+await page.mouse.move(a.x + 3, a.y + a.height / 2, { steps: 6 });
+await page.screenshot({ path: "/tmp/c-lines.png", clip: { x: 0, y: 30, width: 700, height: 770 } });
+const c = await page.locator(".carreau-pane", { has: page.locator(".carreau-tab", { hasText: /^C$/ }) }).boundingBox();
+await page.mouse.move(c.x + 2, c.y + c.height / 2, { steps: 6 });
+await page.screenshot({ path: "/tmp/c-line1.png", clip: { x: 200, y: 30, width: 300, height: 600 } });
+await page.mouse.up();
+await browser.close();

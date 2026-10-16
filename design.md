@@ -39,7 +39,7 @@ The prototype consists of:
 * Optional modules, plugged in through the core's extension points (see [Extending](#extending-other-node-types)); the core never mentions them:
   * prompt columns: `prompt.ts` (no DOM), `prompt-view.ts` (rendering), `prompt.css` (see [Prompt columns](#prompt-columns)).
 
-The library is `src/` and has nothing demo-specific. The demo lives in `demo/` (`index.html`, at the root, loads `demo/main.ts`); test scripts are in `testscripts/` (not committed).
+The library is `src/` and has nothing demo-specific. The demo lives in `demo/` (`index.html`, at the root, loads `demo/main.ts`); test scripts are in `tests/`: headless suites (`npm test`) and browser scripts driving the demo (see `tests/README.md`).
 
 * A demo page (`demo/`):
   * `main.ts`: the page, the keyboard configuration, the demo lifecycle (closing delays, cell spawning); `demo.css`: the page's styles and the demo's tab contents;

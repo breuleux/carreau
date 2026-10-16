@@ -1,0 +1,10 @@
+import { webkit } from "playwright";
+const browser = await webkit.launch();
+const page = await browser.newPage({ viewport: { width: 1300, height: 800 } });
+page.on("pageerror", (e) => console.log("PAGEERROR", e.message));
+await page.goto("http://localhost:5317/?example=IDE");
+await page.locator(".carreau-tab", { hasText: "Terminal" }).click();
+await page.keyboard.press("Alt+KeyP");
+console.log(await page.locator("#status").textContent());
+await page.screenshot({ path: "/tmp/repro-webkit.png" });
+await browser.close();

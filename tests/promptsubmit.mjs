@@ -1,0 +1,12 @@
+import { chromium } from "playwright";
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1300, height: 800 } });
+await page.goto("http://localhost:5317/?example=" + encodeURIComponent("Prompt column"));
+const input = page.locator(".carreau-prompt-input");
+const st = () => page.locator("#status").textContent();
+await input.click(); console.log("click:", await st());
+await input.fill("a"); await input.press("Enter"); await page.waitForTimeout(50); console.log("submit 1:", await st());
+await input.click(); console.log("click again:", await st());
+await input.fill("b"); await input.press("Enter"); await page.waitForTimeout(50); console.log("submit 2:", await st());
+console.log("focused:", await page.evaluate(() => document.activeElement?.className));
+await browser.close();

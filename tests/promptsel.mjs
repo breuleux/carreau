@@ -1,0 +1,20 @@
+import { chromium } from "playwright";
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1300, height: 800 } });
+page.on("pageerror", (e) => console.log("PAGEERROR", e.message));
+await page.goto("http://localhost:5317/?example=" + encodeURIComponent("Prompt column"));
+const input = page.locator(".carreau-prompt-input");
+await input.click();
+await page.waitForTimeout(100);
+console.log("status:", await page.locator("#status").textContent());
+console.log("prompt id:", await page.locator(".carreau-prompt").getAttribute("data-id"), "classes:", await page.locator(".carreau-prompt").getAttribute("class"));
+console.log("focused input:", await page.evaluate(() => document.activeElement?.className));
+// navigation: Alt+Q, then up/down
+await page.keyboard.down("Alt"); await page.keyboard.press("KeyQ");
+await page.keyboard.press("ArrowUp"); await page.waitForTimeout(50);
+console.log("after up:", await page.locator("#status").textContent(), "| prompt classes:", await page.locator(".carreau-prompt").getAttribute("class"));
+await page.keyboard.press("ArrowDown"); await page.waitForTimeout(50);
+console.log("after down:", await page.locator("#status").textContent(), "| prompt classes:", await page.locator(".carreau-prompt").getAttribute("class"));
+console.log("secondary:", await page.locator(".carreau-pane.secondary").count());
+await page.screenshot({ path: "/tmp/carreau-check/nav.png" });
+await browser.close();

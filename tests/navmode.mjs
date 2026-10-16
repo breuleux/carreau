@@ -1,0 +1,54 @@
+import { chromium } from "playwright";
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1300, height: 800 }, deviceScaleFactor: 2 });
+page.on("pageerror", (e) => console.log("PAGEERROR", e.message));
+await page.goto("http://localhost:5317/?example=IDE");
+const st = () => page.evaluate(() => {
+  const n = window.ws.node(window.ws.selection.id);
+  const sel = n?.type === "pane" ? n.tabs[n.active].title : n?.type + (window.ws.selection.range ? "[range]" : "");
+  return `${document.querySelector("#status").textContent.match(/^\[[^\]]*\]/)?.[0] ?? "[off]"} sel=${sel} max=${window.ws.maximized ? "yes" : "no"}`;
+});
+await page.locator(".carreau-tab", { hasText: /^Files$/ }).click();
+// held mode
+await page.keyboard.down("Alt");
+await page.keyboard.press("KeyQ");
+console.log("Ctrl+Q held:      ", await st());
+await page.keyboard.press("ArrowRight");
+console.log("→                 ", await st());
+await page.screenshot({ path: "/tmp/nav.png", clip: { x: 0, y: 30, width: 1000, height: 770 } });
+await page.keyboard.press("ArrowDown");
+console.log("↓                 ", await st());
+await page.keyboard.press("Shift+ArrowRight");
+console.log("Shift+→           ", await st());
+await page.keyboard.press("KeyU");
+console.log("U                 ", await st());
+await page.keyboard.press("KeyM");
+console.log("M                 ", await st());
+await page.keyboard.press("KeyM");
+console.log("M again           ", await st());
+await page.keyboard.up("Alt");
+console.log("release Ctrl:     ", await st());
+await page.keyboard.press("ArrowLeft");
+console.log("→ when off (no-op)", await st());
+// sticky mode
+await page.keyboard.down("Alt");
+await page.keyboard.press("KeyQ");
+await page.keyboard.press("KeyQ");
+await page.keyboard.up("Alt");
+console.log("Ctrl+Q Q, release:", await st());
+await page.keyboard.press("ArrowUp");
+console.log("↑ (sticky)        ", await st());
+await page.keyboard.press("KeyS"); await page.keyboard.press("ArrowDown");
+console.log("Alt+↓ swap        ", await st(), "| column:", await page.evaluate(() => window.ws.root.children[1].children.map((p) => p.tabs[0].title).join(",")));
+// drag a pane from anywhere inside (its body) onto Outline's center swap
+const term = await page.locator(".carreau-pane", { has: page.locator(".carreau-tab", { hasText: /^Terminal$/ }) }).boundingBox();
+const out = await page.locator(".carreau-pane", { has: page.locator(".carreau-tab", { hasText: /^Outline$/ }) }).boundingBox();
+await page.mouse.move(term.x + term.width / 2, term.y + 40); await page.mouse.down();
+await page.mouse.move(term.x + term.width / 2 + 30, term.y + 60, { steps: 4 });
+await page.mouse.move(out.x + out.width * 0.5, out.y + out.height * 0.85, { steps: 8 });
+console.log("drag body ->      ", await page.evaluate(() => window.view.drag?.active?.target.kind + ":" + window.view.drag?.active?.target.side));
+await page.mouse.up();
+console.log("layout:", await page.evaluate(() => { const show = (n) => (n.type === "pane" ? n.tabs.map((t) => t.title).join("+") : `${n.type}(${n.children.map(show).join(", ")})`); return show(window.ws.root); }));
+await page.keyboard.press("KeyQ");
+console.log("Q leaves sticky:  ", await st());
+await browser.close();

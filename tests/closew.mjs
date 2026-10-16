@@ -1,0 +1,11 @@
+import { chromium } from "playwright";
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1300, height: 800 } });
+await page.goto("http://localhost:5317/?example=IDE");
+await page.locator(".carreau-tab", { hasText: /^view\.ts$/ }).click();
+await page.keyboard.down("Alt"); await page.keyboard.press("KeyQ"); await page.keyboard.press("KeyW"); await page.keyboard.up("Alt");
+console.log("held Alt+Q W:", (await page.locator(".carreau-pane", { has: page.locator(".carreau-tab", { hasText: /^main\.ts$/ }) }).locator(".carreau-tab").allTextContents()).join(","));
+await page.keyboard.down("Alt"); await page.keyboard.press("KeyQ"); await page.keyboard.press("KeyQ"); await page.keyboard.up("Alt");
+await page.keyboard.press("KeyW");
+console.log("sticky W:   ", (await page.locator(".carreau-pane", { has: page.locator(".carreau-tab", { hasText: /^main\.ts$/ }) }).locator(".carreau-tab").allTextContents()).join(","));
+await browser.close();

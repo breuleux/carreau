@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node tests/test-ws.mjs && node tests/test-drop.mjs",
+    "serve:test": "vite --port 5317 --strictPort"
   },
   "devDependencies": {
     "playwright": "1.57",

@@ -1,0 +1,16 @@
+import { chromium } from "playwright";
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1300, height: 800 } });
+page.on("pageerror", (e) => console.log("PAGEERROR", e.message));
+await page.goto("http://localhost:5317/?example=Deep%20nesting");
+const st = () => page.evaluate(() => { const n = window.ws.node(window.ws.selection.id); return `${n.type === "pane" ? n.tabs[0].title : n.type}${n.id === window.ws.root.id ? " (root)" : ""} max=${window.ws.maximized ? "yes" : "no"}`; });
+await page.locator(".carreau-tab", { hasText: /^A$/ }).click();
+await page.keyboard.down("Alt"); await page.keyboard.press("KeyQ");
+await page.keyboard.press("KeyP"); await page.keyboard.press("KeyM");
+console.log("P, M:   ", await st());
+await page.keyboard.press("KeyR");
+console.log("R:      ", await st());
+await page.keyboard.press("KeyC");
+console.log("then C: ", await st());
+await page.keyboard.up("Alt");
+await browser.close();

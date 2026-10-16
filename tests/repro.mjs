@@ -1,0 +1,11 @@
+import { chromium } from "playwright";
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1300, height: 800 } });
+page.on("pageerror", (e) => console.log("PAGEERROR", e.message));
+await page.goto("http://localhost:5317/?example=IDE");
+await page.locator(".carreau-tab", { hasText: "Terminal" }).click();
+await page.keyboard.press("Alt+KeyL");
+await page.screenshot({ path: "/tmp/swap1.png" });
+await page.keyboard.press("Alt+KeyH");
+console.log(await page.locator("#status").textContent(), await page.locator(".carreau-pane").evaluateAll(ps => ps.map(p => p.querySelector(".carreau-tab").textContent).join(",")));
+await browser.close();

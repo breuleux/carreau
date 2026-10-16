@@ -1,0 +1,16 @@
+import { chromium } from "playwright";
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1300, height: 800 } });
+await page.goto("http://localhost:5317/?example=Embeds");
+await page.waitForTimeout(1000);
+const srcdocFrames = () => page.frames().filter((f) => f.url() === "about:srcdoc");
+const f = srcdocFrames()[0];
+console.log("frames:", srcdocFrames().length, "n=", await f.locator("#n").textContent());
+await f.locator("#b").click(); await f.locator("#b").click();
+console.log("after clicks n=", await f.locator("#n").textContent(), "age", await f.locator("#age").textContent());
+await page.locator(".carreau-tab", { hasText: /^Notes$/ }).click();
+await page.locator(".carreau-tab", { hasText: /^Counter A$/ }).click();
+await page.waitForTimeout(600);
+console.log("frames:", srcdocFrames().length, "same frame detached?", f.isDetached());
+for (const g of srcdocFrames()) console.log("  n=", await g.locator("#n").textContent(), "age", await g.locator("#age").textContent());
+await browser.close();

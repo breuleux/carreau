@@ -1,0 +1,10 @@
+import { chromium } from "playwright";
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1300, height: 800 }, deviceScaleFactor: 2 });
+page.on("pageerror", (e) => console.log("PAGEERROR", e.message));
+await page.goto("http://localhost:5317/?example=Notebook");
+await page.waitForTimeout(300);
+console.log("tab bars shown in the scroll column:", await page.evaluate(() => [...document.querySelectorAll(".carreau-scroll .carreau-pane")].map((p) => `${p.querySelector(".carreau-tab-short")?.textContent}:${p.querySelector(":scope > .carreau-tabbar").hidden ? "hidden" : "shown"}${p.querySelector(":scope > .carreau-body > .carreau-long") ? "+long" : ""}`).join(" ")));
+console.log("outside (sidebar):", await page.evaluate(() => { const p = document.querySelector(".carreau-root > .carreau-split > .carreau-pane"); return `${p.querySelector(":scope > .carreau-tabbar").hidden ? "hidden" : "shown"} long=${!!p.querySelector(".carreau-long")} icons=${[...p.querySelectorAll(".carreau-tab")].map((t) => t.className.replace("carreau-tab", "").trim() || "-").join(" | ")}`; }));
+await page.screenshot({ path: "/tmp/cells.png" });
+await browser.close();

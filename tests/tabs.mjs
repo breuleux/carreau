@@ -1,0 +1,30 @@
+import { chromium } from "playwright";
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1300, height: 800 }, deviceScaleFactor: 2 });
+page.on("pageerror", (e) => console.log("PAGEERROR", e.message));
+await page.goto("http://localhost:5317/?example=IDE");
+await page.locator(".carreau-tab", { hasText: /^Terminal$/ }).click();
+await page.screenshot({ path: "/tmp/tabs-rest.png", clip: { x: 0, y: 30, width: 1000, height: 640 } });
+const files = page.locator(".carreau-pane", { has: page.locator(".carreau-tab", { hasText: /^Files$/ }) });
+const sc = files.locator(".carreau-tabs");
+const info = () => sc.evaluate((e) => `scrollLeft=${e.scrollLeft} client=${e.clientWidth} scroll=${e.scrollWidth} shadows=${e.parentElement.className}`);
+console.log("Files tabs:", await info());
+const b = await sc.boundingBox();
+await page.mouse.move(b.x + 20, b.y + 10);
+await page.mouse.wheel(0, 60);
+await page.waitForTimeout(100);
+console.log("after wheel:", await info());
+await page.screenshot({ path: "/tmp/tabs-scrolled.png", clip: { x: 0, y: 30, width: 200, height: 40 } });
+// re-render keeps the scroll
+await page.locator(".carreau-tab", { hasText: /^main\.ts$/ }).click();
+console.log("after re-render:", await info());
+// drag a tab over the Files header right part -> append
+const t = await page.locator(".carreau-tab", { hasText: /^Outline$/ }).boundingBox();
+const space = await files.locator(".carreau-tabspace").boundingBox();
+await page.mouse.move(t.x + 5, t.y + 5); await page.mouse.down();
+await page.mouse.move(t.x - 100, t.y + 60, { steps: 5 });
+await page.mouse.move(space.x + space.width / 2, space.y + space.height / 2, { steps: 8 });
+console.log("over Files header empty area ->", await page.evaluate(() => { const t = window.view.drag.active?.target; return t ? `${t.kind}:${t.index}` : "none"; }));
+await page.mouse.up();
+console.log("Files tabs now:", (await files.locator(".carreau-tab").allTextContents()).join(","));
+await browser.close();

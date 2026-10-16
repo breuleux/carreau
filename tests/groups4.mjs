@@ -1,0 +1,17 @@
+import { chromium } from "playwright";
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1300, height: 800 } });
+page.on("pageerror", (e) => console.log("PAGEERROR", e.message));
+await page.goto("http://localhost:5317/?example=IDE");
+const sel = () => page.evaluate(() => { const n = window.ws.node(window.ws.selection.id); return n.type === "pane" ? n.tabs.map((t) => t.title).join("+") : n.type; });
+await page.locator(".carreau-tab", { hasText: /^Terminal$/ }).click();
+await page.keyboard.down("Alt"); await page.keyboard.press("KeyQ"); await page.keyboard.press("KeyQ"); await page.keyboard.up("Alt");
+await page.keyboard.press("KeyP"); await page.keyboard.press("KeyG");
+await page.locator(".carreau-tab-edit").fill("Zazz"); await page.keyboard.press("Enter");
+console.log("grouped, selected:", await sel());
+await page.keyboard.press("KeyC"); console.log("C:", await sel());
+await page.keyboard.press("KeyP"); console.log("P:", await sel());
+await page.keyboard.press("KeyP"); console.log("P:", await sel());
+await page.keyboard.press("KeyC"); console.log("C:", await sel());
+await page.keyboard.press("KeyC"); console.log("C:", await sel());
+await browser.close();

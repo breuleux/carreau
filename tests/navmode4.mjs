@@ -1,0 +1,28 @@
+import { chromium } from "playwright";
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1300, height: 800 } });
+page.on("pageerror", (e) => console.log("PAGEERROR", e.message));
+await page.goto("http://localhost:5317/?example=Grid%203%C3%973");
+const st = () => page.evaluate(() => {
+  const n = window.ws.node(window.ws.selection.id);
+  return (n?.type === "pane" ? n.tabs[0].title : n?.type + (window.ws.selection.range ? `[${window.ws.selection.range}]` : "")) + (window.ws.maximized ? " (maximized)" : "");
+});
+await page.locator(".carreau-tab", { hasText: /^B2$/ }).click();
+await page.keyboard.down("Alt"); await page.keyboard.press("KeyQ");
+await page.keyboard.press("Shift+ArrowUp");
+console.log("Shift+↑:          ", await st());
+await page.keyboard.press("ArrowRight");
+console.log("→ (clears only):  ", await st());
+await page.keyboard.press("ArrowRight");
+console.log("→ again (moves):  ", await st());
+await page.keyboard.press("KeyP");
+console.log("P:                ", await st());
+await page.keyboard.press("KeyS"); await page.keyboard.press("ArrowLeft");
+console.log("S ← (clears only):", await st());
+await page.keyboard.press("Shift+ArrowLeft");
+console.log("Shift+←:          ", await st());
+await page.keyboard.press("KeyM");
+console.log("M:                ", await st());
+await page.keyboard.up("Alt");
+console.log("release Alt:      ", await st());
+await browser.close();

@@ -1,0 +1,14 @@
+import { createServer } from "vite";
+const server = await createServer({ server: { middlewareMode: true }, appType: "custom", logLevel: "error" });
+const { Workspace } = await server.ssrLoadModule("/src/workspace.ts");
+const { row, pane, scrollColumn, panes, applyDropForest } = await server.ssrLoadModule("/src/model.ts");
+const ws = new Workspace(scrollColumn([pane(["top"]), row([pane(["X"]), pane(["Y"])])]));
+const r = () => ws.root.tabs[0].group.children[0].children[1];
+const w = () => r().children.map((c) => `${c.tabs[0].title}:${c.weight.toFixed(2)}`).join(" ") + ` (sum ${r().children.reduce((s, c) => s + c.weight, 0).toFixed(2)})`;
+const id = (t) => panes(ws.root).find((p) => p.tabs[0].title === t).id;
+console.log("start:      ", w());
+ws.commitDrop(applyDropForest(ws.trees(), { kind: "pane", paneId: id("Y") }, { kind: "side", targetId: id("X"), side: "left" }));
+console.log("Y left of X:", w());
+ws.commitDrop(applyDropForest(ws.trees(), { kind: "pane", paneId: id("X") }, { kind: "side", targetId: id("Y"), side: "left" }));
+console.log("X left of Y:", w());
+await server.close();

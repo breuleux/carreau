@@ -1,0 +1,23 @@
+import { chromium } from "playwright";
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1300, height: 800 } });
+page.on("pageerror", (e) => console.log("PAGEERROR", e.message));
+const show = () => page.evaluate(() => { const f = (n) => (n.type === "pane" ? n.tabs.map((t) => (t.group ? `${t.title}{${f(t.group.children[0])}}` : t.title)).join("+") : `${n.type}(${n.children.length > 4 ? n.children.length + " cells" : n.children.map(f).join(", ")})`); return f(window.ws.root); });
+await page.goto("http://localhost:5317/?example=" + encodeURIComponent("Scroll column"));
+console.log("Scroll column:", await show());
+await page.screenshot({ path: "/tmp/scrolltab.png" });
+// drag the "Scroll column" tab onto Inspector's left third (moves the whole scroll column)
+const t = await page.locator(".carreau-tab", { has: page.locator(".carreau-tab-short", { hasText: /^Scroll column$/ }) }).boundingBox();
+const insp = await page.locator(".carreau-pane", { has: page.locator(".carreau-tab", { has: page.locator(".carreau-tab-short", { hasText: /^Inspector$/ }) }) }).boundingBox();
+await page.mouse.move(t.x + 10, t.y + 5); await page.mouse.down();
+await page.mouse.move(t.x + 60, t.y - 60, { steps: 5 });
+await page.mouse.move(insp.x + insp.width * 0.85, insp.y + insp.height / 2, { steps: 8 });
+await page.mouse.up();
+console.log("moved right of Inspector:", await show());
+const sc = await page.evaluate(() => { const e = document.querySelector(".carreau-scroll"); return `${e.clientHeight} tall, scrolls ${e.scrollHeight}`; });
+console.log("scroll column after the move:", sc);
+await page.goto("http://localhost:5317/?example=" + encodeURIComponent("Scroll row"));
+console.log("Scroll row:", await show());
+await page.goto("http://localhost:5317/?example=Embeds");
+console.log("Embeds:", await show());
+await browser.close();
