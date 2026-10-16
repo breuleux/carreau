@@ -151,10 +151,12 @@ export class KeyboardNav {
     this.mode = mode;
     this.view.setNavMode(mode);
     if (was === "off") {
+      // Take the keyboard focus back from inside the workspace (an iframe, a text field of
+      // its own): the following keys are navigation.
       const a = document.activeElement;
-      if (a instanceof HTMLIFrameElement) {
+      if (a instanceof HTMLElement && this.view.el.contains(a)) {
         a.blur();
-        window.focus();
+        if (a instanceof HTMLIFrameElement) window.focus();
       }
     }
     for (const fn of this.listeners) fn(mode);
@@ -195,9 +197,13 @@ export class KeyboardNav {
   private keydown(e: KeyboardEvent): void {
     const { activation } = this.config;
     if (/^(Alt|Control|Meta|Shift)(Left|Right)$/.test(e.code)) this.heldMods.add(e.code);
-    // Typing in a text field (e.g. the group name prompt) is not navigation.
+    // Typing in a text field is not navigation. But in the workspace's own fields (e.g. a
+    // title being edited), the activation chord still works: that's the way out of them.
     const t = e.target as HTMLElement | null;
-    if (t && (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName))) return;
+    if (t && (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName))) {
+      const chord = this.mode === "off" && e.code === activation.code && this.modifierHeld(e);
+      if (!chord || !this.view.el.contains(t)) return;
+    }
     if (e.key === activation.modifier) return; // the modifier itself (incl. autorepeat)
 
     if (this.mode === "off") {
@@ -293,14 +299,21 @@ export class KeyboardNav {
     }
   }
 
+  /** The node cell operations act on (see `Workspace.operand`). */
+  private operand() {
+    const op = this.ws.operand();
+    return op && !op.range ? this.ws.node(op.id) : null;
+  }
+
   run(action: NavAction): void {
     const ws = this.ws;
     switch (action) {
       case "toggleMaximize":
         ws.toggleMaximize();
         return;
+      // Cell operations act on the operand: usually the selection (see `Workspace.operand`).
       case "float": {
-        const n = ws.node(ws.selection.id);
+        const n = this.operand();
         if (n?.type === "pane") this.view.floatPane(n.id);
         return;
       }
@@ -310,7 +323,7 @@ export class KeyboardNav {
         this.view.groupAndName();
         return;
       case "renameTab": {
-        const n = ws.node(ws.selection.id);
+        const n = this.operand();
         if (n?.type === "pane") {
           const tab = (n as PaneNode).tabs[(n as PaneNode).active];
           if (tab) this.view.editTabTitle(tab.id);
@@ -321,16 +334,18 @@ export class KeyboardNav {
         ws.collapse();
         return;
       case "closeTab": {
-        const n = ws.node(ws.selection.id);
+        const n = this.operand();
         if (n?.type === "pane") {
           const tab = (n as PaneNode).tabs[(n as PaneNode).active];
           if (tab) ws.closeTab(tab.id);
         }
         return;
       }
-      case "closePane":
-        ws.closePane(ws.selection.id);
+      case "closePane": {
+        const n = this.operand();
+        if (n) ws.closePane(n.id);
         return;
+      }
       default: {
         const m = /^(insert|move)(Into)?(Left|Right|Up|Down)$/.exec(action);
         if (!m) return ws.run(action as Command);

@@ -1,0 +1,10 @@
+/* Prompt columns (see prompt.ts): the prompt, below the cells (the frame is in style.css) */
+.carreau-prompt { display: flex; padding: 6px 0 2px; }
+.carreau-prompt.carreau-natural-column { min-height: 0; }
+.carreau-prompt-input {
+  flex: 1; min-width: 0; font: 13px ui-monospace, monospace; padding: 7px 10px; border-radius: 4px; outline: none;
+  color: light-dark(#1d1e22, #e6e7ea); background: var(--carreau-pane-bg); border: 1px solid light-dark(#c9ccd4, #33353f);
+}
+.carreau-prompt-input::placeholder { color: light-dark(#9a9da6, #5c5f69); }
+.carreau-prompt.selected .carreau-prompt-input, .carreau-prompt-input:focus { border-color: light-dark(#7d808b, #8a8d96); }
+.carreau.nav-mode .carreau-prompt.selected .carreau-prompt-input { outline: 1px solid light-dark(#3a3c43, #d6d8de); outline-offset: -1px; }

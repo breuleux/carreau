@@ -8,8 +8,19 @@ export type Side = "left" | "right" | "top" | "bottom";
  * child take its natural size along the axis and scroll. A "slot" holds a single layout root
  * (a group tab's layout; also, internally, each tree's root). A "forest" (internal only)
  * holds the root slots of several trees, so that operations can span them.
+ *
+ * Open: a module can add split types (`declare module "./types" { interface SplitTypes
+ * { "my-split": true } }`), and register their kind (`registerKind`).
  */
-export type SplitType = Orientation | "scroll-row" | "scroll-column" | "slot" | "forest";
+export interface SplitTypes {
+  row: true;
+  column: true;
+  "scroll-row": true;
+  "scroll-column": true;
+  slot: true;
+  forest: true;
+}
+export type SplitType = keyof SplitTypes;
 
 /**
  * A cell, shown as a tab. HTML parts: `content` (rendered by the host), `icon`, `short`
@@ -55,7 +66,17 @@ export interface SplitNode {
   reverse?: boolean;
 }
 
-export type LayoutNode = PaneNode | SplitNode;
+/**
+ * Node types, by `type` field. Open, like `SplitTypes`: a module can add leaf node types
+ * (`interface NodeTypes { "my-leaf": MyLeafNode }`), with their kind (`registerKind`) and
+ * their renderer (`registerRenderer`).
+ */
+export interface NodeTypes {
+  pane: PaneNode;
+  split: SplitNode;
+}
+
+export type LayoutNode = NodeTypes[keyof NodeTypes];
 
 export interface Rect {
   x: number;

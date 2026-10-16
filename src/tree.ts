@@ -1,7 +1,7 @@
 // Generic tree queries (through node kinds), and the LayoutIndex: everything about where each
 // node is, computed in one pass, so that nobody re-derives it.
 
-import { Ctx, activeGroup, kind, rootCtx } from "./kinds";
+import { Ctx, activeGroup, isSplit, kind, rootCtx } from "./kinds";
 import { LayoutNode, PaneNode, Rect, SplitNode } from "./types";
 
 export interface Located {
@@ -56,6 +56,7 @@ export function computeRects(root: LayoutNode, frame: Rect = { x: 0, y: 0, w: 1,
     if (g?.children[0]) computeRects(g.children[0], frame, out);
     return out;
   }
+  if (!isSplit(root)) return out;
   const kids = root.children;
   const total = kids.reduce((s, c) => s + c.weight, 0) || 1;
   let offset = 0;
@@ -132,15 +133,15 @@ export class LayoutIndex {
 
   /** A navigation child: through slots and groups' root splits, to the first real step. */
   navChild(n: LayoutNode, pick: (split: SplitNode) => LayoutNode): LayoutNode | null {
-    let c: LayoutNode | null | undefined =
-      n.type === "pane" ? activeGroup(n) : pick(n as SplitNode);
-    while (c && !isNavStep(this, c)) c = c.type === "pane" ? activeGroup(c) : pick(c as SplitNode);
-    return c ?? null;
+    const down = (x: LayoutNode): LayoutNode | null => (x.type === "pane" ? activeGroup(x) : isSplit(x) ? pick(x) : null);
+    let c = down(n);
+    while (c && !isNavStep(this, c)) c = down(c);
+    return c;
   }
 }
 
 /** Navigation steps: not slots, and not a split that is a group's root (its holder is). */
 function isNavStep(idx: LayoutIndex, n: LayoutNode): boolean {
   if (!kind(n).navStep) return false;
-  return !(n.type !== "pane" && idx.parent(n.id)?.type === "slot");
+  return !(isSplit(n) && idx.parent(n.id)?.type === "slot");
 }

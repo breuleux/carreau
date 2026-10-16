@@ -1,4 +1,5 @@
 import { column, genId, LayoutNode, pane, row, scrollColumn, scrollRow, Tab } from "../src/model";
+import { promptColumn } from "../src/prompt";
 
 const LOREM =
   "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.";
@@ -253,6 +254,23 @@ export const examples: Example[] = [
           3,
         ),
         { ...scrollRow([pane([t("Card 1", lines(3, 20))]), pane([t("Card 2", lines(3, 30))]), pane([t("Card 3", lines(3, 15))])], 1), reverse: true },
+      ]),
+  },
+  {
+    name: "Prompt column",
+    description:
+      "Cells stick to the bottom, above a prompt: type in it, Enter (start with $ for a command). In navigation mode the prompt can be focused (↓ from the last cell): the cell above it (dotted) is what W, S, A, I… act on.",
+    build: () =>
+      row([
+        pane([t("Notes", 1)], 1),
+        promptColumn(
+          [
+            pane([cell("ls", SHELL, "$ ls", "oklch(0.75 0.12 160)", "done", "src/  demo/  testscripts/  design.md")]),
+            pane([cell("Explain", PROMPT, "What is a prompt-column?", "oklch(0.72 0.13 300)", undefined, "A scroll-column that sticks to its bottom, with a prompt below its cells.")]),
+            pane([cell("make test", SHELL, "$ make test", "oklch(0.72 0.15 25)", "error", "FAIL weights preserved")]),
+          ],
+          3,
+        ),
       ]),
   },
   {

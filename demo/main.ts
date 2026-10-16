@@ -1,13 +1,17 @@
 // Demo host. Key bindings live here, not in the library: Carreau takes them as configuration.
 
 import "../src/style.css";
+import "../src/prompt.css";
 import "./demo.css";
 import { examples } from "./examples";
-import { commitCellFocus, spawnCell } from "./cellclasses";
+import { commitCellFocus, promptCell, spawnCell } from "./cellclasses";
 import { deserialize, serialize } from "../src/model";
 import { hasMoveBefore, View } from "../src/view";
 import { Workspace } from "../src/workspace";
 import { bridgeFrameKeys, KeyboardNav, NavConfig } from "../src/keyboard";
+// Prompt columns (an optional module): their rendering, and their configuration below.
+import "../src/prompt-view";
+import { configurePrompts } from "../src/prompt";
 
 // Navigation mode: hold Alt after Alt+Q (or Alt+Q, Q for sticky mode), then use these.
 const navConfig: NavConfig = {
@@ -136,6 +140,8 @@ ws.lifecycle = {
   // Leaving navigation mode on a cell: it takes the keyboard focus, as its class sees fit.
   commitFocus: commitCellFocus,
 };
+// What's typed in a prompt (Enter) becomes a cell above it.
+configurePrompts(ws, { submit: promptCell, placeholder: "Type a prompt, or $ a command — Enter" });
 const view = new View(ws, document.querySelector("#host")!, {
   renderTab: (tab) => {
     const data = tab.data ?? {};

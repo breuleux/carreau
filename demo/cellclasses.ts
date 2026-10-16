@@ -90,6 +90,21 @@ const CLASSES: CellClass[] = [
   },
 ];
 
+/**
+ * What a prompt's submitted text becomes: "$ cmd" a shell cell (with canned output for the
+ * commands it knows), anything else a prompt cell with a (fake) answer.
+ */
+export function promptCell(text: string): Tab {
+  if (text.startsWith("$")) {
+    const cmd = text.replace(/^\$\s*/, "");
+    const out = COMMANDS.find(([c]) => c === cmd)?.[1] ?? `${cmd.split(" ")[0]}: command not found`;
+    const known = COMMANDS.some(([c]) => c === cmd);
+    return cell(cmd.split(" ")[0] || "$", SHELL, `$ ${cmd}`, known ? "oklch(0.75 0.12 160)" : "oklch(0.72 0.15 25)", known ? "done" : "error", out);
+  }
+  const short = text.split(/\s+/).slice(0, 2).join(" ");
+  return cell(short.length > 16 ? short.slice(0, 15) + "…" : short, PROMPT, text, "oklch(0.72 0.13 300)", undefined, `(an answer to "${text}")`);
+}
+
 /** The class of a cell. */
 const classOf = (tab: Tab) => CLASSES.find((c) => c.matches(tab))!;
 

@@ -2,8 +2,8 @@
 // Data types are in types.ts; per-kind behaviour in kinds.ts; queries in tree.ts.
 
 import { sideAxis, sideIsStart } from "./geometry";
-import { canCollapse, isScroll, kind } from "./kinds";
-import { find, findTab, pathTo } from "./tree";
+import { canCollapse, isScroll, isSplit, kind, kindOf } from "./kinds";
+import { find, findTab, panes, pathTo } from "./tree";
 import { LayoutNode, PaneNode, Side, SplitNode, Tab, WorkspaceData, FloatingWindow } from "./types";
 
 export * from "./types";
@@ -80,17 +80,17 @@ export function deserialize(text: string): WorkspaceData {
 function validate(n: any): void {
   if (!n || typeof n !== "object" || typeof n.id !== "string") throw new Error("Invalid node");
   if (typeof n.weight !== "number") n.weight = 1;
+  const k = n.type === "forest" ? undefined : kindOf(n.type); // (forests are internal only)
+  if (!k) throw new Error(`Unknown node type ${n.type}`);
   if (n.type === "pane") {
     if (!Array.isArray(n.tabs)) throw new Error("Pane without tabs");
     n.active = Math.max(0, Math.min(n.active ?? 0, n.tabs.length - 1));
     for (const t of n.tabs) if (t.group) validate(t.group);
-  } else if (["row", "column", "scroll-row", "scroll-column", "slot"].includes(n.type)) {
+  } else if (!k.leaf) {
     if (!Array.isArray(n.children)) throw new Error("Split without children");
     if (n.type === "slot" && n.children.length !== 1) throw new Error("A slot holds one node");
-    if (n.reverse !== undefined && (typeof n.reverse !== "boolean" || !n.type.startsWith("scroll-"))) throw new Error("Only scroll splits reverse");
+    if (n.reverse !== undefined && (typeof n.reverse !== "boolean" || !k.scroll)) throw new Error("Only scroll splits reverse");
     n.children.forEach(validate);
-  } else {
-    throw new Error(`Unknown node type ${n.type}`);
   }
 }
 
@@ -107,6 +107,7 @@ export function shape(node: LayoutNode, withWeights = false): string {
   const sub = (n: LayoutNode) => shape(n, withWeights);
   if (node.type === "pane")
     return `[${node.tabs.map((t) => (t.group ? `${t.id}{${t.group.children.map(sub).join(" ")}}` : t.id)).join(",")}]${w}`;
+  if (!isSplit(node)) return `${(node as LayoutNode).type}${w}`; // (other leaf types, if any)
   return `${node.type}(${node.children.map(sub).join(" ")})${w}`;
 }
 
@@ -120,6 +121,7 @@ export function shape(node: LayoutNode, withWeights = false): string {
  *    a scroll split); rescale weights to average 1; collapse a single child (not scroll
  *    splits: they could not be recreated by dragging)
  *  - scroll splits always live in a group tab: any that isn't a slot's child gets wrapped
+ *  - pinned children go, unless their parent's kind keeps them (`normalizeChildren`)
  */
 export function normalize(node: LayoutNode): LayoutNode | null {
   if (node.type === "pane") {
@@ -137,13 +139,14 @@ export function normalize(node: LayoutNode): LayoutNode | null {
     node.active = Math.max(0, Math.min(node.active, node.tabs.length - 1));
     return node;
   }
+  if (!isSplit(node)) return node; // other leaves
   const k = kind(node);
-  const kids: LayoutNode[] = [];
+  let kids: LayoutNode[] = [];
   for (const c of node.children) {
     const n = normalize(c);
     if (!n) continue;
     const nk = kind(n);
-    const flatten = n.type === node.type || (k.scroll && !nk.scroll && nk.axis === k.axis && n.type !== "pane");
+    const flatten = n.type === node.type || (k.scroll && !nk.scroll && nk.axis === k.axis && isSplit(n));
     if (flatten) {
       const total = (n as SplitNode).children.reduce((s, x) => s + x.weight, 0) || 1;
       for (const x of (n as SplitNode).children) {
@@ -154,6 +157,7 @@ export function normalize(node: LayoutNode): LayoutNode | null {
       kids.push(nk.scroll ? groupPane(scrollTitle(n), n, n.weight) : n);
     }
   }
+  kids = k.normalizeChildren ? k.normalizeChildren(node, kids) : kids.filter((x) => !kind(x).pinned);
   node.children = kids;
   if (kids.length === 0) return null;
   // Weights are flex-grow factors: summing to less than 1, they'd leave part of the parent
@@ -174,7 +178,7 @@ export function normalizeTree(node: LayoutNode): LayoutNode | null {
 }
 
 function scrollTitle(n: LayoutNode): string {
-  return n.type === "scroll-row" ? "Scroll row" : "Scroll column";
+  return kind(n).groupTitle ?? n.type;
 }
 
 // ---------------------------------------------------------------------------
@@ -334,7 +338,7 @@ function applyDropRaw(root: SplitNode, subject: DragSubject, target: DropTarget)
     const t = find(root, target.targetId)?.node;
     if (!t || !kind(t).sides.includes(target.side)) return null;
     // A side of a split along that side's axis: its start or end, sized 1/N like a separator.
-    if (t.type !== "pane" && kind(t).axis === sideAxis[target.side])
+    if (isSplit(t) && kind(t).axis === sideAxis[target.side])
       target = { kind: "between", splitId: t.id, index: sideIsStart[target.side] ? 0 : t.children.length };
   }
 
@@ -409,19 +413,17 @@ function applyDropRaw(root: SplitNode, subject: DragSubject, target: DropTarget)
   }
   if (target.kind === "between") {
     const s = find(root, target.splitId)?.node;
-    if (!s || s.type === "pane") return null;
+    if (!s || !isSplit(s)) return null;
+    // Nothing goes after a fixed last child: just before it.
+    const index = kind(s).lastFixed ? Math.min(target.index, s.children.length - 1) : target.index;
     // 1/N of the split, N counting the new node but not what is leaving.
     const staying = s.children.filter((c) => c.id !== TOMB && !(c.type === "pane" && c.tabs.length === 0));
     moving.weight = staying.length ? staying.reduce((x, c) => x + c.weight, 0) / staying.length : 1;
-    s.children.splice(target.index, 0, moving);
+    s.children.splice(index, 0, moving);
   } else {
     insertBeside(root, target.targetId, target.side, moving);
   }
   // 3. Remove the tombstone (the caller normalizes).
   removeNode(root, TOMB);
-  return { paneId: firstPane(moving).id };
-}
-
-function firstPane(n: LayoutNode): PaneNode {
-  return n.type === "pane" ? n : firstPane(n.children[0]);
+  return { paneId: (panes(moving)[0] ?? moving).id };
 }

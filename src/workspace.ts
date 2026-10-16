@@ -27,9 +27,13 @@ import {
   find,
   findTab,
   genId,
+  walk,
   groupPane,
   inForest,
+  isCell,
   isScroll,
+  isSplit,
+  isSticky,
   kind,
   normalizeTree,
   opposite,
@@ -106,6 +110,26 @@ export interface PlaceSpec {
 export type Placeable = Tab | LayoutNode | { id: string };
 
 const DIRECTION_SIDES: Record<string, Side> = { left: "left", right: "right", up: "top", down: "bottom" };
+
+/** How the workspace treats a selected node of some type, where it differs from the default. */
+export interface NodeBehavior {
+  /**
+   * What cell operations (close, swap, move, insert, float, rename, group) act on, instead of
+   * the node (see `Workspace.operand`). Null: on nothing.
+   */
+  operand?(ws: Workspace, node: LayoutNode): Selection | null;
+  /**
+   * What maximizing it maximizes instead of the node; the selection then moves there (see
+   * `Workspace.maximize`). Null: nothing is maximized.
+   */
+  maximize?(ws: Workspace, node: LayoutNode): Selection | null;
+}
+const BEHAVIORS: Record<string, NodeBehavior> = {};
+
+/** Customize how the workspace treats selected nodes of a type (merged with what was set). */
+export function registerBehavior(type: LayoutNode["type"], b: NodeBehavior): void {
+  BEHAVIORS[type] = { ...BEHAVIORS[type], ...b };
+}
 
 /** A pending close: of a tab, or of a pane (with all its tabs). */
 interface CloseOp {
@@ -243,7 +267,7 @@ export class Workspace {
     const valid = (s: Selection | null) => {
       const n = s && this.node(s.id);
       if (!n) return null;
-      return s.range && (n.type === "pane" || s.range[1] >= n.children.length) ? { id: s.id } : s;
+      return s.range && (!isSplit(n) || s.range[1] >= n.children.length) ? { id: s.id } : s;
     };
     if (select) this.selection = { id: select };
     this.selection = valid(this.selection) ?? { id: panes(this.root)[0].id };
@@ -382,7 +406,6 @@ export class Workspace {
     return !(main.length === 1 && main[0].tabs.length === 1 && main[0].tabs[0].id === tabId);
   }
 
-  /** Whether a pane can be closed: anything but the main tree's last pane. */
   // -------------------------------------------------------------------------
   // Relative addressing and placement (for hosts; see cells.ts for the handles)
 
@@ -463,9 +486,7 @@ export class Workspace {
     const subject = target && this.subjectOf(what);
     const result = subject && this.tryDrop(subject, target!);
     if (!result) return null;
-    const before = this.selection;
-    this.commitDrop(result);
-    if (spec.focus === false && this.node(before.id)) this.select(before);
+    this.commitDrop(result, undefined, undefined, spec.focus !== false);
     return result.paneId;
   }
 
@@ -475,12 +496,14 @@ export class Workspace {
    * recently focused pane's. Returns the pane holding it, or null.
    */
   spawn(spec: PlaceSpec): Cell | null {
-    const sel = this.node(this.selection.id);
-    const pane = sel && this.node(sel.type === "pane" ? sel.id : this.descend(sel));
-    const from = pane?.type === "pane" ? pane.tabs[pane.active] : undefined;
-    if (!from) return null;
-    const tab = this.lifecycle.spawn ? this.lifecycle.spawn(from) : { id: genId("t"), title: "New tab" };
-    return tab ? this.placer(spec).apply(tab) : null;
+    return this.withOperand(() => {
+      const sel = this.node(this.selection.id);
+      const pane = sel && this.node(sel.type === "pane" ? sel.id : this.descend(sel));
+      const from = pane?.type === "pane" ? pane.tabs[pane.active] : undefined;
+      if (!from) return null;
+      const tab = this.lifecycle.spawn ? this.lifecycle.spawn(from) : { id: genId("t"), title: "New tab" };
+      return tab ? this.placer(spec).apply(tab) : null;
+    }, null);
   }
 
   /**
@@ -488,9 +511,11 @@ export class Workspace {
    * Returns the pane that ends up holding it, or null (e.g. a lone tab beside its own pane).
    */
   moveTab(spec: PlaceSpec): Cell | null {
-    const sel = this.node(this.selection.id);
-    const tab = sel?.type === "pane" && !this.selection.range ? sel.tabs[sel.active] : undefined;
-    return tab ? this.placer(spec).apply({ id: tab.id }) : null;
+    return this.withOperand(() => {
+      const sel = this.node(this.selection.id);
+      const tab = sel?.type === "pane" && !this.selection.range ? sel.tabs[sel.active] : undefined;
+      return tab ? this.placer(spec).apply({ id: tab.id }) : null;
+    }, null);
   }
 
   /** What placing something drags: an existing tab or pane, or a new node. */
@@ -507,6 +532,7 @@ export class Workspace {
     return null;
   }
 
+  /** Whether a pane can be closed: anything but the main tree's last pane. */
   canClosePane(paneId: string): boolean {
     const main = panes(this.root);
     return this.node(paneId)?.type === "pane" && !(main.length === 1 && main[0].id === paneId);
@@ -670,7 +696,7 @@ export class Workspace {
         const i = kids.indexOf(x);
         if (kids.length > 1) {
           const k = kind(parent);
-          const order = k.scroll ? (parent.type !== "pane" && parent.reverse ? [i - 1, i + 1] : [i + 1, i - 1]) : [i - 1, i + 1];
+          const order = k.scroll ? (isSticky(parent) ? [i - 1, i + 1] : [i + 1, i - 1]) : [i - 1, i + 1];
           const near = order.map((j) => kids[j]).find(Boolean)!;
           const pick = k.scroll ? near : (this.mostRecent(parent.id, kids.filter((c) => c !== x)) ?? near);
           return { select: this.descend(pick) };
@@ -681,12 +707,13 @@ export class Workspace {
     }
   }
 
-  /** Down to a pane, through what was last focused (a pane showing a group: into the group). */
-  private descend(n: LayoutNode): string {
+  /** Down to a cell, through what was last focused (a pane showing a group: into the group). */
+  descend(n: LayoutNode): string {
     if (n.type === "pane") {
       const g = activeGroup(n)?.children[0];
       return g ? this.descend(g) : n.id;
     }
+    if (!isSplit(n)) return (n as LayoutNode).id; // another leaf type, if any
     return this.descend(this.mostRecent(n.id, n.children) ?? n.children[0]);
   }
 
@@ -701,18 +728,21 @@ export class Workspace {
   }
 
   /**
-   * Group the selection into a new pane holding a single group tab named `name`, taking the
-   * selection's place and size. A range is wrapped in a split of the same axis.
+   * Group the selection (by default, the operand: see `operand`) into a new pane holding a
+   * single group tab named `name`, taking the selection's place and size. A range is wrapped
+   * in a split of the same axis. The new group is selected (e.g. to name it).
    */
   group(name: string, selection?: Selection): boolean {
-    const sel = selection && this.node(selection.id) ? selection : this.selection;
+    const sel = selection && this.node(selection.id) ? selection : this.operand();
+    // Pinned nodes stay where they are.
+    if (!sel || this.selectedNodes(sel).some((n) => kind(n).pinned)) return false;
     let holderId: string | undefined;
     return this.change(
       (forest) => {
         const n = find(forest, sel.id)?.node;
         if (!n || n.type === "slot") return false;
         let holder: PaneNode;
-        if (sel.range && n.type !== "pane") {
+        if (sel.range && isSplit(n)) {
           const [lo, hi] = sel.range;
           const kids = n.children.slice(lo, hi + 1);
           const type = kind(n).axis ?? "column";
@@ -729,7 +759,50 @@ export class Workspace {
     );
   }
 
+  // -------------------------------------------------------------------------
+  // Operand: what cell operations act on
+
+  /**
+   * What cell operations (close, swap, move, insert, float, rename, group) act on: the
+   * selection, unless the selected node's type redirects them (`NodeBehavior.operand`).
+   * Null: nothing.
+   */
+  operand(): Selection | null {
+    return this.redirect("operand");
+  }
+
+  /** The selection, or what the selected node's type redirects it to for some purpose. */
+  private redirect(what: keyof NodeBehavior): Selection | null {
+    const n = this.selection.range ? null : this.node(this.selection.id);
+    const fn = n && BEHAVIORS[n.type]?.[what];
+    return fn ? fn(this, n) : this.selection;
+  }
+
+  /**
+   * Run a cell operation on the operand. If it isn't the selection, the selection is set to
+   * it for the operation, then goes back (one undo step, restoring the selection).
+   */
+  withOperand<T>(fn: () => T, none: T): T {
+    const sel = this.selection;
+    const op = this.operand();
+    if (!op) return none;
+    if (sameSel(op, sel)) return fn();
+    return this.record(() => {
+      this.selection = op;
+      try {
+        return fn();
+      } finally {
+        if (this.node(sel.id)) this.selectImpl(sel, true);
+      }
+    });
+  }
+
   /** A pane can collapse if its only tab is a group (not a scroll split's). */
+  canCollapse(paneId: string): boolean {
+    const p = this.node(paneId);
+    return p?.type === "pane" && canCollapse(p);
+  }
+
   /** The scroll split a pane shows (as its active group's root), if any. */
   scrollOf(paneId: string): SplitNode | null {
     const p = this.node(paneId);
@@ -745,11 +818,6 @@ export class Workspace {
       if (n.reverse) delete n.reverse;
       else n.reverse = true;
     });
-  }
-
-  canCollapse(paneId: string): boolean {
-    const p = this.node(paneId);
-    return p?.type === "pane" && canCollapse(p);
   }
 
   /**
@@ -779,7 +847,7 @@ export class Workspace {
    * Commit a drop computed by tryDrop. `consumed`: the window that was excluded (docked).
    * `floatRect`: where to show the new window, for `float` drops.
    */
-  commitDrop(result: ForestResult, consumed?: FloatingWindow, floatRect?: Rect): void {
+  commitDrop(result: ForestResult, consumed?: FloatingWindow, floatRect?: Rect, focus = true): void {
     this.record(() => {
       const windows = this.floating.filter((w) => w !== consumed);
       const trees = [...result.trees];
@@ -788,7 +856,7 @@ export class Workspace {
         trees.push(result.floated);
       }
       const main = result.trees[0]!;
-      this.setTrees(trees, windows, find(main, result.paneId) ? result.paneId : undefined);
+      this.setTrees(trees, windows, focus && find(main, result.paneId) ? result.paneId : undefined);
     });
   }
 
@@ -816,11 +884,11 @@ export class Workspace {
       if (!n) return;
       sel = { id: n.id };
     }
-    if (sel.range && n.type !== "pane" && sel.range[0] === 0 && sel.range[1] === n.children.length - 1)
+    if (sel.range && isSplit(n) && sel.range[0] === 0 && sel.range[1] === n.children.length - 1)
       sel = { id: sel.id };
     this.selection = sel;
     this.expandStack = [];
-    if (!sel.range && n.type === "pane") {
+    if (!sel.range && isCell(n)) {
       this.lastPane = sel.id;
       this.touch("", sel.id);
     }
@@ -835,7 +903,7 @@ export class Workspace {
   selectedNodes(sel: Selection = this.selection): LayoutNode[] {
     const n = this.node(sel.id);
     if (!n) return [];
-    if (!sel.range || n.type === "pane") return [n];
+    if (!sel.range || !isSplit(n)) return [n];
     return n.children.slice(sel.range[0], sel.range[1] + 1);
   }
 
@@ -895,7 +963,7 @@ export class Workspace {
       const allowed = split.children.slice(range[0], range[1] + 1);
       return this.mostRecent(split.id, allowed) ?? allowed[0];
     };
-    return n.type !== "pane" && s.range ? pick(n, s.range) : idx.navChild(n, (split) => pick(split));
+    return isSplit(n) && s.range ? pick(n, s.range) : idx.navChild(n, (split) => pick(split));
   }
 
   private goParent(): void {
@@ -928,9 +996,10 @@ export class Workspace {
    */
   clearMultiSelection(): boolean {
     const n = this.node(this.selection.id);
-    if (n?.type === "pane" && !this.selection.range) return false;
-    if (!this.lastPane || this.node(this.lastPane)?.type !== "pane") return false;
-    this.select({ id: this.lastPane }, false);
+    if (n && isCell(n) && !this.selection.range) return false;
+    const last = this.lastPane && this.node(this.lastPane);
+    if (!last || !isCell(last)) return false;
+    this.select({ id: last.id }, false);
     this.emit();
     return true;
   }
@@ -948,14 +1017,16 @@ export class Workspace {
 
   /** Swap the selected pane with the one on a side. The opposite swap undoes it exactly. */
   private swap(side: Side): void {
-    if (this.clearMultiSelection()) return;
-    const me = this.node(this.selection.id);
-    if (this.selection.range || me?.type !== "pane") return;
-    const target = this.neighbour(side, "panes");
-    if (!target) return;
-    this.change((forest) => swapNodes(forest, me.id, target.id), () => me.id);
-    this.boundary.set(`${me.id}:${opposite[side]}`, target);
-    this.boundary.set(`${target.id}:${side}`, { id: me.id });
+    this.withOperand(() => {
+      if (this.clearMultiSelection()) return;
+      const me = this.node(this.selection.id);
+      if (this.selection.range || me?.type !== "pane") return;
+      const target = this.neighbour(side, "panes");
+      if (!target) return;
+      this.change((forest) => swapNodes(forest, me.id, target.id), () => me.id);
+      this.boundary.set(`${me.id}:${opposite[side]}`, target);
+      this.boundary.set(`${target.id}:${side}`, { id: me.id });
+    }, undefined);
   }
 
   /**
@@ -982,13 +1053,15 @@ export class Workspace {
       const r = this.selectionRect(remembered, rects);
       if (adjacent(r) && overlap(r) > EPS) return remembered;
     }
-    // 2. Otherwise, the pane touching that side, preferring the one facing our center. Panes
-    // without a rect are hidden (inactive groups); a pane showing a group is a container.
+    // 2. Otherwise, the cell (any, or a pane if panes only) touching that side, preferring the
+    // one facing our center. Cells without a rect are hidden (inactive groups); a pane showing
+    // a group is a container.
     const center = horizontal ? S.y + S.h / 2 : S.x + S.w / 2;
     let best: { id: string; score: number } | null = null;
-    for (const p of panes(tree)) {
+    for (const { node: p } of walk(tree)) {
+      if (!isCell(p) || (p.type === "pane" ? !!p.tabs[p.active]?.group : only === "panes")) continue;
       const r = rects.get(p.id);
-      if (!r || p.tabs[p.active]?.group || !adjacent(r)) continue;
+      if (!r || !adjacent(r)) continue;
       const ov = overlap(r);
       if (ov <= EPS) continue;
       const [lo, hi] = horizontal ? [r.y, r.y + r.h] : [r.x, r.x + r.w];
@@ -1004,7 +1077,7 @@ export class Workspace {
     const s = this.selection;
     let x = this.node(s.id);
     if (!x) return;
-    if (s.range && x.type !== "pane" && kind(x).axis === axis) {
+    if (s.range && isSplit(x) && kind(x).axis === axis) {
       const [lo, hi] = s.range;
       if (start && lo > 0) return this.commitExpand({ id: x.id, range: [lo - 1, hi] });
       if (!start && hi < x.children.length - 1) return this.commitExpand({ id: x.id, range: [lo, hi + 1] });
@@ -1051,8 +1124,19 @@ export class Workspace {
     else this.maximize();
   }
 
+  /**
+   * Maximize the selection. Its node's type may maximize something else instead
+   * (`NodeBehavior.maximize`): the selection then moves there (null: nothing happens).
+   */
   maximize(): void {
-    if (!this.inMain(this.selection.id)) return;
+    const target = this.redirect("maximize");
+    if (!target) return;
+    const moved = !sameSel(target, this.selection);
+    if (moved) this.select(target, false); // the focus goes to what is maximized
+    if (!this.inMain(this.selection.id)) {
+      if (moved) this.emit();
+      return;
+    }
     // Maximizing the whole tree is no maximization at all.
     if (this.selection.id === this.root.id && !this.selection.range) this.clearMaximization();
     else if (!sameSel(this.maximized, this.selection)) {

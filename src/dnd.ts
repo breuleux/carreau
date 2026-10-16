@@ -21,6 +21,7 @@ import {
   findTab,
   inRect,
   intersect,
+  isSplit,
   kind,
   opposite,
   paneDisplay,
@@ -343,7 +344,7 @@ export class DragDrop {
   /** How much of a node a `side` drop on it takes: half, or 1/N at a split's start/end. */
   private sideShare(id: string, side: Side): number {
     const n = this.ws.node(id);
-    if (!n || n.type === "pane" || kind(n).axis !== sideAxis[side]) return 1 / 2;
+    if (!n || !isSplit(n) || kind(n).axis !== sideAxis[side]) return 1 / 2;
     const s = this.state!.subject;
     const staying = n.children.filter((c) => !(s.kind === "pane" && c.id === s.paneId)).length;
     return 1 / (staying + 1);

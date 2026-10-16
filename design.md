@@ -27,7 +27,7 @@ The prototype consists of:
   * maximization (main tree only);
   * navigation memory.
 * `view.ts`: the DOM, except drag and drop:
-  * rendering, with persistent tab contents moved by `moveBefore`;
+  * rendering, with persistent tab contents (and renderers' persistent elements) moved by `moveBefore`;
   * splitters and CSS-only maximization;
   * the selection outline;
   * the pane menu, in-place title editing;
@@ -36,13 +36,15 @@ The prototype consists of:
 * `colors.ts`: cell accents, drop line level colors.
 * `keyboard.ts`: the keyboard navigation mode controller, configured with an activation chord and bindings.
 * `style.css`: the library's styles.
+* Optional modules, plugged in through the core's extension points (see [Extending](#extending-other-node-types)); the core never mentions them:
+  * prompt columns: `prompt.ts` (no DOM), `prompt-view.ts` (rendering), `prompt.css` (see [Prompt columns](#prompt-columns)).
 
 The library is `src/` and has nothing demo-specific. The demo lives in `demo/` (`index.html`, at the root, loads `demo/main.ts`); test scripts are in `testscripts/` (not committed).
 
 * A demo page (`demo/`):
   * `main.ts`: the page, the keyboard configuration, the demo lifecycle (closing delays, cell spawning); `demo.css`: the page's styles and the demo's tab contents;
   * `examples.ts`: the example layouts; `cellclasses.ts`: what each kind of cell creates when a new cell is inserted from it;
-  * examples to pick from, including iframe embeds, a scroll column, a scroll row, and sticky scroll splits;
+  * examples to pick from, including iframe embeds, a scroll column, a scroll row, sticky scroll splits, and a prompt column;
   * the keyboard configuration, with a legend;
   * a live JSON view with a "Load JSON" button;
   * a status line showing the selection and the maximization.
@@ -64,7 +66,7 @@ type Pane = { type: "pane"; id: string; weight: number; tabs: Tab[]; active: num
 type Split = { type: "row" | "column" | "scroll-row" | "scroll-column" | "slot" | "forest"; id: string; weight: number; children: Node[];
   reverse?: boolean };  // scroll splits only: sticky, see "Sticky scroll splits"
 type Slot = Split & { type: "slot"; children: [Node] };   // holds one layout root: a group tab's layout
-type Node = Pane | Split;
+type Node = Pane | Split;   // open: modules add leaf node types and split types (see "Extending")
 type FloatingWindow = { root: Node; rect: { x; y; w; h } };   // rect: pixels, relative to the workspace
 type WorkspaceData = { root: Node; floating: FloatingWindow[] }; // last window is frontmost
 ```
@@ -86,7 +88,7 @@ Normalization runs after every structural change, on construction, and on load. 
 
 Scroll splits add four rules:
 
-* **A scroll split always lives in a group tab.** Normalization wraps any scroll split that isn't the root of a group in a holder pane, with a single group tab titled "Scroll column" or "Scroll row". The holder takes the scroll split's weight. This also applies at a tree's root, via `normalizeTree`, used for the main tree and floating windows' trees, including on load.
+* **A scroll split always lives in a group tab.** Normalization wraps any scroll split that isn't the root of a group in a holder pane, with a single group tab titled by its kind (`groupTitle`: "Scroll column" or "Scroll row"). The holder takes the scroll split's weight. This also applies at a tree's root, via `normalizeTree`, used for the main tree and floating windows' trees, including on load.
   * The whole scroll split can thus be moved around by its tab or header, renamed, and have other tabs dragged into its tab bar.
   * A group whose root is a scroll split can't be collapsed, since normalization would wrap it right back.
 
@@ -94,13 +96,15 @@ Scroll splits add four rules:
 * A plain split of the same axis directly inside a scroll split is flattened into it, because its children are naturally sized either way.
 * A scroll split inside a plain split is **not** flattened; it is what provides the scrolling. (It ends up wrapped in a group tab, per the first rule.)
 
+And **pinned** children (`kind(n).pinned`) go, unless their parent's kind keeps them (`normalizeChildren`, which then decides the children list).
+
 ### Logical geometry
 
 `computeRects(root, frame)` gives every node's rectangle from the weights alone, in the unit square or any given frame. Navigation uses these logical rectangles, never DOM rectangles, so it is unaffected by maximization, tab bars and gaps.
 
 ### Node kinds and contexts
 
-Code never asks "is X nested in a Y?". Instead, each node type has a **kind** (`KINDS[type]`, `kind(n)`), and each node learns where it is from a **context** its parent gives it.
+Code never asks "is X nested in a Y?". Instead, each node type has a **kind** (`kind(n)`; registered with `registerKind`), and each node learns where it is from a **context** its parent gives it.
 
 ```ts
 interface NodeKind {
@@ -109,6 +113,13 @@ interface NodeKind {
   scroll: boolean;
   sides: Side[];                      // where things can be inserted (a `side` drop); see below
   navStep: boolean;                   // false for slots and forests
+  leaf?: boolean;                     // no children of its own: panes, other leaves (`isSplit(n)`: not a leaf)
+  cell?: boolean;                     // holds the focus by itself, like a pane (`isCell(n)`)
+  pinned?: boolean;                   // never moved or grouped; dropped by normalization unless its parent keeps it
+  lastFixed?: boolean;                // its last child stays last, outside the scrolling (see "Extending")
+  alwaysSticky?: boolean;             // a scroll split that always sticks to its end (`isSticky(n)`)
+  groupTitle?: string;                // the title of the group tab it lives in (scroll splits)
+  normalizeChildren?(n, kids): Node[];  // default: drop pinned children
   childContext(n, ctx): Ctx;
   replaceChild(n, i, child); removeChild(n, i);   // a pane: set / remove tab i's group
   close(n, life): Promise<void>;      // close everything in it (see "Closing")
@@ -134,6 +145,19 @@ interface Ctx {
 * **A pane decides its own display** from its context: `paneDisplay(pane, ctx)` (see [Cells](#cells)). The renderer and drag-and-drop both call it, rather than probing the DOM for classes.
 
 **`LayoutIndex`** (`ws.index()`, rebuilt on demand) indexes all trees in one pass. Each entry has the node, its parent, its index in the parent, its tree's root, and its context. It answers `parent(id)`, `root(id)`, `holder(id)` (the pane holding a node's slot, when the node is a group's root), `navParent(id)` and `navChild(n, pick)` (skipping what isn't a navigation step).
+
+### Extending: other node types
+
+The set of node types is open, so that a feature like prompt columns lives in a module of its own, which the core never mentions. A module can add:
+
+* **Types**: leaf node types and split types, by TypeScript declaration merging on `NodeTypes` and `SplitTypes` (types.ts). Then `n.type === "my-leaf"` narrows as usual.
+* **Kinds** (`registerKind(type, kind)`): what the node is (see above). `leafKind` is a base for leaves that hold nothing; `splitKind(axis, scroll)`, for splits. Validation, normalization, walks, rects, navigation and drops then work through the kind. An unregistered type is an error (`Unknown node type`), including when loading JSON: a host that loads prompt columns must import their module.
+* **Renderers** (`registerRenderer(type, renderer)`, view.ts), for leaves other than panes: `fill(el, node, view, ctx)` fills the element the view made (with the node's `data-id`, flex, natural-size classes, and `carreau-cell` for cells); `attached(el, node, view)` runs once the new tree is attached, to place **persistent elements** (`view.persist(key, parent, create)`, `view.persisted(key)`: created once, moved with `moveBefore`, removed after a render that doesn't place them); `commitFocus(node, view)` takes the keyboard focus when navigation mode is left on the node. Splits are rendered by the view itself.
+  * A split whose kind has `lastFixed` renders as a **frame** (`.carreau-framed`, `data-id`) that doesn't scroll, holding an inner scroller (`.carreau-frame-inner`, the actual `.carreau-scroll`, keyed by `data-scroll` = the split's id for scroll memory) with all children but the last, and the last child below it, outside. The DOM then differs from the tree, but navigation, rects and drops go by the tree.
+  * Renderers' focus handlers must ignore focus events while `view.rendering` (see the pitfalls).
+* **Behaviours** (`registerBehavior(type, behavior)`, workspace.ts): how the workspace treats a selected node of that type, where it differs from the default. Each hook returns a selection (null: nothing):
+  * `operand(ws, node)`: what cell operations act on instead (see `ws.operand()` in [Prompt columns](#prompt-columns));
+  * `maximize(ws, node)`: what maximizing it maximizes instead; the selection moves there (`ws.maximize()`, hence `toggleMaximize` and the `maximize` command).
 
 
 ## Rendering
@@ -572,7 +596,7 @@ A tab can hold **a whole layout** instead of content. The pane holding it then s
   * Enter, or leaving the field, confirms; Escape keeps the current title.
   * The field stops pointer events (pointerdown, click, double-click, auxclick) from reaching the tab, so it's neither a drag nor an activation.
   * Confirming renames through the workspace, which re-renders the tab. A rename is a layout change, hence an undo step of its own, separate from the grouping.
-  * The keyboard controller ignores keys typed in text fields, so typing the name isn't navigation, even in sticky mode.
+  * The keyboard controller ignores keys typed in text fields, so typing the name isn't navigation, even in sticky mode. Except the activation chord, in the workspace's own fields (a prompt, a title being edited): that's the way out of them. Text fields outside the workspace keep all their keys.
 * **Collapsing** (`collapse(paneId?)`; demo: **Shift+G**, and **"Collapse group"** in the ⋯ menu) is possible when a pane's **only** tab is a group. It replaces the pane by the group's layout, with the pane's weight, then normalizes.
   * Without an argument, it acts on the selected pane if it can collapse; otherwise on the innermost holder around the selection that can.
 * Group and collapse are layout changes, hence undoable.
@@ -636,6 +660,31 @@ type Placeable = Tab | Node | Cell | { id };  // new, or already in the layout (
 **`ws.moveTab(spec)`**: move the focused tab (the selected pane's active tab) as `spec` says; it goes through the placer like anything else. A lone tab beside its own pane is a no-op (null). Demo keys: A, then a direction: into the tabs of the cell there (with Shift: beside the selected pane).
 
 * The demo has **cell classes** (`demo/cellclasses.ts`), each matching some tabs and spawning a sensible new one: a shell cell spawns another command (a random one, in its accent), a prompt a follow-up prompt, a video another video, a stateful page a new counter, anything else (groups included) an "Untitled" text tab.
+
+## Prompt columns
+
+A **prompt-column** is a scroll-column that always sticks to its bottom, with an **input field at the bottom**, like a terminal or a chat: cells pile up above the prompt.
+
+It is an **optional module**, entirely outside the core, which only knows it through its extension points (see [Extending](#extending-other-node-types)): `prompt.ts` (types, kinds, operand, submitting; no DOM, so it loads in the headless tests), `prompt-view.ts` (the renderer) and `prompt.css`. A host imports `prompt-view` and `prompt.css` to show prompt columns; constructing or loading one needs `prompt.ts` (which `prompt-view` imports).
+
+* **The prompt is a node**: `{type: "prompt"}`, always the column's **last child**. Being a node, it gets selection, navigation (↓ from the last cell, ↑ back) and logical rects like any cell. Its kind: `leafKind` plus `cell` and `pinned`. So it has no children, no insertable sides, no tabs, no drag handle; it can't be swapped with, closed, floated or grouped (a range expanded over it can't be grouped).
+  * As a cell, it counts for the last-cell memory and `clearMultiSelection`, and it's a neighbour candidate for focus moves (not for swaps: those are between panes).
+  * The prompt-column's kind: `splitKind("column", true)` plus `lastFixed` (a drop at its end, its bottom side or `between` at its last index, goes **just before the prompt**), `alwaysSticky` (no "Stick to…" menu item), `groupTitle: "Prompt"` (like any scroll split, it lives in a group tab), and `normalizeChildren`, which keeps **exactly one prompt, last** (the first one's id), even with no cells: a prompt-column never disappears for being empty. Prompts anywhere else are dropped (they're pinned).
+  * Constructors: `promptColumn(children, weight?)`, `promptNode()`.
+* **Rendering**: the column is a split with a fixed last child, so the view renders it as a frame: the cells scroll in an inner element, and the prompt sits below it, outside. So the prompt stays visible while the cells scroll, and it doesn't take part in the overscroll bounce (a `position: sticky` prompt inside the scroller would).
+  * The prompt's renderer fills its element (`.carreau-prompt`), and places its `<input>` as a **persistent element** (`view.persist`), so what's typed, and the focus, survive re-renders. (Moving it re-focuses it: see the pitfalls.)
+* **Typing**: pressing in the prompt or focusing its field selects it. (A press that bubbles to the group holder's pane doesn't select the holder: a pane only selects itself on a press whose innermost cell, `.carreau-cell`, is it.) **Enter submits**: `submitPrompt(ws, promptId, text)` asks the host what it becomes and inserts it as a new cell just above the prompt (a drop, undoable; `commitDrop(…, focus = false)` keeps the selection on the prompt, in a single render). The field clears and keeps the focus.
+  * The host configures prompts per workspace: `configurePrompts(ws, { submit(text): Tab | null, placeholder })`. Default: a text tab.
+* **Leaving navigation mode on the prompt focuses its field** (its renderer's `commitFocus`). Alt+Q from the field enters navigation mode and takes the focus from it.
+* **Secondary focus**: when the prompt is focused, its secondary focus is **the cell just above it** (`secondaryOf(ws, promptId)`; for a split there, its most recently focused cell). In navigation mode it shows with a **dimmer dotted outline** (`.secondary`).
+  * **Cell operations act on it**: the module registers it as the prompt's **operand** (`registerBehavior("prompt", { operand, maximize })`). Generically, `ws.operand()` is the selection, unless the selected node's type redirects it; the view marks the operand `.secondary` when it isn't the selection.
+  * Close tab / pane (W, Shift+W), float (F), rename (%): the keyboard controller acts on `ws.operand()`.
+  * Swap (S), move tab (A), insert (I): the workspace runs them through `ws.withOperand(fn)`: the selection is set to the operand, the operation runs, and **the selection goes back**, all as one undo step (restoring the selection). So the secondary is always the cell just above: swapping it up twice swaps the last two cells back.
+  * **Group** (G) groups the operand (`ws.group`'s default), then selects the new group so that it can be named in place.
+  * **Maximize** (M) maximizes it, and **the focus goes there** (the prompt's `maximize` behaviour): a maximized prompt alone would show nothing. M again, from it, restores.
+  * With no cells, there is no secondary focus (a null operand): those operations do nothing.
+  * Closing the secondary doesn't move the focus (it isn't in the closed cell): it stays on the prompt, and the next cell up becomes the secondary.
+* Demo: the "Prompt column" example. "$ cmd" becomes a shell cell (canned output for the commands it knows, an error otherwise), anything else a prompt cell with a fake answer (`promptCell` in `demo/cellclasses.ts`, given to `configurePrompts` in `demo/main.ts`).
 
 ## Closing
 
@@ -721,7 +770,7 @@ Navigation mode moves the *selection*; the keyboard focus stays in the host page
 * Not for a range or split selection (`clearMultiSelection` runs first, so usually it's a pane).
 * **Getting back out of an iframe**: `bridgeFrameKeys(iframe)` (keyboard.ts) forwards a same-origin iframe's `keydown`/`keyup` events to the host window as synthetic events, in the capture phase of the iframe's document. If the host cancels one (the controller handled it: Alt+Q, then navigation keys), the original is cancelled too, so it doesn't type into the iframe. The bridge is re-installed on every `load` (each new document; marked on the document, since an iframe's initial window object can be reused).
   * The keyboard controller ignores a synthetic event's target (the window) for its "typing in a text field" check, so Alt+Q works even from a text field inside the iframe: that's the way out.
-  * **Entering navigation mode takes the focus back** from an iframe (`blur()` it, focus the window), so the following keys reach the host directly.
+  * **Entering navigation mode takes the focus back** from anything inside the workspace: an iframe (`blur()` it, focus the window), a prompt's field, a title being edited (which confirms it). The following keys then reach the host directly.
   * Cross-origin iframes (YouTube) can't be bridged: once focused, Alt+Q can't get out of them; click outside.
 * Demo: the cell classes (`demo/cellclasses.ts`) implement it. A stateful page (same origin, bridged) focuses its text field: leave navigation mode on it and type, Alt+Q to get out. A video focuses the player. Text cells do nothing.
 
@@ -788,6 +837,7 @@ In a `scroll-column`, children take their **natural height** (their content deci
 * Compute "1/N" while excluding what is leaving the split.
 * Weight swaps on pane swap keep the geometry fixed, which is what makes swap/unswap exact.
 * Filter every candidate choice through the drop function, including the shape no-op test, so the UI never offers pointless drops.
+* A focused text field moved with `moveBefore` must be re-focused (Chrome stops feeding it text). Don't let focus handlers re-render during a render.
 * Persist tab contents and move them with `moveBefore`, attaching new elements before removing old ones, and looking bodies up in the new elements only. Reorder windows with `moveBefore` too.
 * Disable iframe pointer events and capture the pointer during every gesture.
 * After Esc, block drag restarts for a moment, since the button is still down.

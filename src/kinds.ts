@@ -70,6 +70,23 @@ export interface NodeKind {
   sides: Side[];
   /** This node is a step when navigating (parent/child). See `isNavStep` for the rule. */
   navStep: boolean;
+  /** No children of its own (a pane's are its group tabs' slots): not a split. */
+  leaf?: boolean;
+  /** It can hold the focus by itself, like a pane: a "cell" for navigation and selection. */
+  cell?: boolean;
+  /** It stays where it is: never moved, grouped, or kept outside a parent that wants it. */
+  pinned?: boolean;
+  /** Its last child stays last, and fixed (not scrolling): nothing is inserted after it. */
+  lastFixed?: boolean;
+  /** A scroll split that always sticks to its end (whatever its `reverse`). */
+  alwaysSticky?: boolean;
+  /** Title of the group tab holding it, if it must live in one (scroll splits). */
+  groupTitle?: string;
+  /**
+   * Normalize its children (already normalized themselves), returning the new list. Default:
+   * pinned children go (they only stay where their parent's kind keeps them).
+   */
+  normalizeChildren?(n: SplitNode, kids: LayoutNode[]): LayoutNode[];
   childContext(n: LayoutNode, ctx: Ctx): Ctx;
   replaceChild(n: LayoutNode, i: number, child: LayoutNode): void;
   removeChild(n: LayoutNode, i: number): void;
@@ -99,11 +116,12 @@ const splitBase = {
   },
 };
 
-function split(axis: Orientation, scroll: boolean): NodeKind {
+export function splitKind(axis: Orientation, scroll: boolean): NodeKind {
   return {
     ...splitBase,
     axis,
     scroll,
+    groupTitle: scroll ? (axis === "row" ? "Scroll row" : "Scroll column") : undefined,
     sides: scroll ? SIDES.filter((s) => (axis === "row") === (s === "left" || s === "right")) : SIDES,
     navStep: true,
     childContext(_n, ctx) {
@@ -138,6 +156,8 @@ const pane: NodeKind = {
   scroll: false,
   sides: SIDES,
   navStep: true,
+  leaf: true,
+  cell: true,
   // A group's layout fills the holder's body, and inherits its natural-size context (inside
   // a scroll split the holder sizes to its content, so the group's parts must too).
   childContext: (_n, ctx) => ({ ...ctx, sizedAlong: null, cellOf: null }),
@@ -151,22 +171,64 @@ const pane: NodeKind = {
   forceClose: (n, life) => gather((n as PaneNode).tabs.map((t) => closeTabWith(t, life, true))),
 };
 
-export const KINDS: Record<LayoutNode["type"], NodeKind> = {
+/** A leaf that holds nothing and closes instantly: a base for leaf kinds besides panes. */
+export const leafKind: NodeKind = {
+  children: () => [],
+  axis: null,
+  scroll: false,
+  sides: [],
+  navStep: true,
+  leaf: true,
+  childContext: (_n, ctx) => ctx,
+  replaceChild() {},
+  removeChild() {},
+  close: async () => {},
+  forceClose: async () => {},
+};
+
+const KINDS: Record<string, NodeKind> = {
   pane,
-  row: split("row", false),
-  column: split("column", false),
-  "scroll-row": split("row", true),
-  "scroll-column": split("column", true),
+  row: splitKind("row", false),
+  column: splitKind("column", false),
+  "scroll-row": splitKind("row", true),
+  "scroll-column": splitKind("column", true),
   slot,
   forest: { ...slot }, // holds root slots; never navigated, never inserted into
 };
 
+/** Add a node type (see `NodeTypes` and `SplitTypes` in types.ts). */
+export function registerKind(type: LayoutNode["type"], k: NodeKind): void {
+  KINDS[type] = k;
+}
+
+/** The kind of a node type, if it is registered. */
+export function kindOf(type: string): NodeKind | undefined {
+  return KINDS[type];
+}
+
 export function kind(n: LayoutNode): NodeKind {
-  return KINDS[n.type];
+  const k = KINDS[n.type];
+  if (!k) throw new Error(`Unknown node type ${n.type}`);
+  return k;
 }
 
 export function isScroll(n: LayoutNode): n is SplitNode {
   return kind(n).scroll;
+}
+
+/** A node with children of its own (rows, columns, scroll splits, slots): not a leaf. */
+export function isSplit(n: LayoutNode): n is SplitNode {
+  return !kind(n).leaf;
+}
+
+/** A node that can hold the focus by itself (a pane, and leaf kinds that say so). */
+export function isCell(n: LayoutNode): boolean {
+  return !!kind(n).cell;
+}
+
+/** A scroll split that sticks to its end: a sticky (`reverse`) one, or one that always does. */
+export function isSticky(n: LayoutNode): boolean {
+  return isSplit(n) && (!!n.reverse || !!kind(n).alwaysSticky);
 }
 
 // ---------------------------------------------------------------------------
