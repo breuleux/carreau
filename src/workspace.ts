@@ -1,35 +1,39 @@
-// Workspace state: layout + selection + maximization + navigation memory.
+// Workspace state: layout trees + selection + maximization + navigation memory + undo.
 // No keyboard shortcuts live here: commands are exposed by name and the host binds them.
 
 import {
-  activeGroup,
-  applyDropForest,
-  genId,
-  holderOf,
   DragSubject,
   DropTarget,
+  Entry,
   FloatingWindow,
   ForestResult,
+  LayoutIndex,
+  LayoutNode,
+  PaneNode,
+  Rect,
+  Side,
+  SplitNode,
   WorkspaceData,
-  axisOf,
+  applyDropForest,
+  canCollapse,
+  collapseGroup,
   computeRects,
   find,
   findTab,
-  LayoutNode,
-  Located,
-  normalize,
+  genId,
+  groupPane,
+  inForest,
+  kind,
   normalizeTree,
-  isScroll,
   opposite,
-  PaneNode,
-  pathTo,
   panes,
-  Rect,
-  Side,
+  pathTo,
+  removeNode,
+  replaceNode,
   sideAxis,
   sideIsStart,
-  SplitNode,
   swapNodes,
+  union,
 } from "./model";
 
 /** A single node, or a contiguous range of children of a split. */
@@ -43,9 +47,9 @@ export type Command =
   | "prevTab"
   | "parent"
   | "root"
+  | "child"
   | "undo"
   | "redo"
-  | "child"
   | "focusLeft"
   | "focusRight"
   | "focusUp"
@@ -62,33 +66,8 @@ export type Command =
   | "maximize"
   | "restore";
 
-export const COMMANDS: Command[] = [
-  "nextTab",
-  "prevTab",
-  "parent",
-  "root",
-  "undo",
-  "redo",
-  "child",
-  "focusLeft",
-  "focusRight",
-  "focusUp",
-  "focusDown",
-  "expandLeft",
-  "expandRight",
-  "expandUp",
-  "expandDown",
-  "unexpand",
-  "swapLeft",
-  "swapRight",
-  "swapUp",
-  "swapDown",
-  "maximize",
-  "restore",
-];
-
 const EPS = 1e-6;
-/** How many user actions can be undone. */
+/** How many layout changes can be undone. */
 const UNDO_LIMIT = 200;
 
 interface Snapshot {
@@ -108,7 +87,7 @@ function sameSel(a: Selection | null, b: Selection | null): boolean {
 
 export class Workspace {
   root: LayoutNode;
-  /** Panes pulled out of the hierarchy, shown as floating windows (last is frontmost). */
+  /** Layout trees pulled out of the hierarchy, shown as floating windows (last: frontmost). */
   floating: FloatingWindow[] = [];
   selection: Selection;
   maximized: Selection | null = null;
@@ -117,7 +96,7 @@ export class Workspace {
   private lastChild = new Map<string, string>();
   /** `${nodeId}:${side}` -> selection we came from through that side */
   private boundary = new Map<string, Selection>();
-  /** The latest single pane selected: plain moves start from it (multi-selections don't stick). */
+  /** The latest single pane selected (multi-selections don't stick). */
   private lastPane: string | null = null;
   /** selections preceding each expand, so that they can be undone */
   private expandStack: Selection[] = [];
@@ -125,7 +104,7 @@ export class Workspace {
 
   constructor(root: LayoutNode) {
     this.root = normalizeTree(root) ?? root;
-    this.selection = { id: panes(root)[0].id };
+    this.selection = { id: panes(this.root)[0].id };
     this.selectImpl(this.selection, false);
   }
 
@@ -137,6 +116,16 @@ export class Workspace {
     for (const fn of this.listeners) fn();
   }
 
+  /** All trees: the main one first, then the floating windows' (minus `exclude`). */
+  trees(exclude?: FloatingWindow): LayoutNode[] {
+    return [this.root, ...this.floating.filter((w) => w !== exclude).map((w) => w.root)];
+  }
+
+  /** Where everything is, right now. (Cheap: build one whenever needed.) */
+  index(): LayoutIndex {
+    return new LayoutIndex(this.trees());
+  }
+
   /** Look a node up in any tree (main or floating window). */
   node(id: string): LayoutNode | null {
     for (const t of this.trees()) {
@@ -144,6 +133,11 @@ export class Workspace {
       if (n) return n;
     }
     return null;
+  }
+
+  /** The tree (main or floating) containing a node. */
+  treeOf(id: string): LayoutNode | null {
+    return this.trees().find((t) => find(t, id)) ?? null;
   }
 
   /** The tree holding the selection: navigation commands work within it. */
@@ -156,26 +150,7 @@ export class Workspace {
   }
 
   // -------------------------------------------------------------------------
-  // Layout replacement (after drops, resizes, deserialization)
-
-  setRoot(root: LayoutNode, select?: string): void {
-    this.root = normalizeTree(root) ?? this.root;
-    const valid = (s: Selection | null) => {
-      if (!s) return null;
-      const n = this.node(s.id);
-      if (!n) return null;
-      if (s.range && (n.type === "pane" || s.range[1] >= n.children.length)) return { id: s.id };
-      return s;
-    };
-    if (select) this.selection = { id: select };
-    this.selection = valid(this.selection) ?? { id: panes(root)[0].id };
-    // Maximization only applies to the main tree.
-    const validMain = (s: Selection | null) => (s && this.inMain(s.id) ? valid(s) : null);
-    this.maximized = validMain(this.maximized);
-    this.maxHistory = this.maxHistory.map(validMain);
-    this.select(this.selection, false);
-    this.emit();
-  }
+  // Layout changes
 
   /** Serializable state: the tree and the floating windows. */
   data(): WorkspaceData {
@@ -185,16 +160,51 @@ export class Workspace {
   load(data: WorkspaceData): void {
     this.undoStack = [];
     this.redoStack = [];
-    this.floating = data.floating
-      .map((w) => ({ ...w, root: normalizeTree(w.root) }))
-      .filter((w): w is FloatingWindow => !!w.root);
-    this.setRoot(data.root);
+    this.floating = data.floating.map((w) => ({ ...w, root: w.root }));
+    this.setTrees([data.root, ...data.floating.map((w) => w.root)]);
+  }
+
+  /**
+   * Install new trees (normalized; null: emptied), in the order of `trees()`. Emptied windows
+   * close; the main tree can't be emptied. Then make the selection valid again.
+   */
+  private setTrees(trees: (LayoutNode | null)[], windows = this.floating, select?: string): void {
+    this.root = (trees[0] && normalizeTree(trees[0])) ?? this.root;
+    this.floating = windows.flatMap((w, i) => {
+      const t = trees[i + 1] && normalizeTree(trees[i + 1]!);
+      return t ? [{ root: t, rect: w.rect }] : [];
+    });
+    const valid = (s: Selection | null) => {
+      const n = s && this.node(s.id);
+      if (!n) return null;
+      return s.range && (n.type === "pane" || s.range[1] >= n.children.length) ? { id: s.id } : s;
+    };
+    if (select) this.selection = { id: select };
+    this.selection = valid(this.selection) ?? { id: panes(this.root)[0].id };
+    // Maximization only applies to the main tree.
+    const validMain = (s: Selection | null) => (s && this.inMain(s.id) ? valid(s) : null);
+    this.maximized = validMain(this.maximized);
+    this.maxHistory = this.maxHistory.map(validMain);
+    this.selectImpl(this.selection, false);
+    this.emit();
+  }
+
+  /**
+   * A structural change across all trees (each in a root slot, so every node has a parent).
+   * Refused (returns false) if it would empty the main tree.
+   */
+  private change(fn: (forest: SplitNode) => boolean | void, select?: () => string | undefined): boolean {
+    return this.record(() => {
+      const { trees, value } = inForest(structuredClone(this.trees()), fn);
+      if (value === false || !trees[0]) return false;
+      this.setTrees(trees, this.floating, select?.());
+      return true;
+    });
   }
 
   // -------------------------------------------------------------------------
-  // Undo / redo of actions that change the layout (moves, swaps, resizes, floating, docking,
-  // closing tabs). Simple navigation (selection, active tab, maximization) is not recorded,
-  // although each step restores the selection that went with it.
+  // Undo / redo of layout changes (moves, swaps, resizes, floating, docking, grouping,
+  // closing tabs). Navigation is not recorded, but each step restores the selection.
 
   private undoStack: Snapshot[] = [];
   private redoStack: Snapshot[] = [];
@@ -204,10 +214,7 @@ export class Workspace {
 
   /** What counts as "the layout": trees, tabs and sizes; not the active tabs nor rects. */
   private layoutKey(): string {
-    return JSON.stringify(
-      { root: this.root, floating: this.floating.map((w) => w.root) },
-      (k, v) => (k === "active" ? undefined : v),
-    );
+    return JSON.stringify(this.trees(), (k, v) => (k === "active" ? undefined : v));
   }
 
   private pushUndo(before: Snapshot, kind: string): void {
@@ -218,32 +225,21 @@ export class Workspace {
   }
 
   private snapshot(): Snapshot {
-    return structuredClone({
-      root: this.root,
-      floating: this.floating,
-      selection: this.selection,
-      maximized: this.maximized,
-      maxHistory: this.maxHistory,
-      expandStack: this.expandStack,
-      lastPane: this.lastPane,
-    });
+    const { root, floating, selection, maximized, maxHistory, expandStack, lastPane } = this;
+    return structuredClone({ root, floating, selection, maximized, maxHistory, expandStack, lastPane });
   }
 
   private restoreSnapshot(snap: Snapshot): void {
     const s = structuredClone(snap);
-    this.root = s.root;
-    this.floating = s.floating;
-    this.maximized = s.maximized;
-    this.maxHistory = s.maxHistory;
-    this.lastPane = s.lastPane;
+    Object.assign(this, { root: s.root, floating: s.floating, maximized: s.maximized, maxHistory: s.maxHistory, lastPane: s.lastPane });
     this.selectImpl(s.selection, false);
     this.expandStack = s.expandStack; // after selectImpl, which clears it
     this.emit();
   }
 
   /**
-   * Run a user action, recording the state before it for undo. Nested actions only record
-   * once (the outermost), and an action that changes nothing records nothing.
+   * Run a user action, recording the state before it if it changes the layout. Nested
+   * actions record once (the outermost).
    */
   private record<T>(fn: () => T): T {
     if (this.recording > 0) return fn();
@@ -254,15 +250,11 @@ export class Workspace {
       return fn();
     } finally {
       this.recording--;
-      // Only layout changes are undoable steps.
       if (this.layoutKey() !== key) this.pushUndo(before, "action");
     }
   }
 
-  /**
-   * Resizing a splitter: call `beginResize` when the drag starts and `endResize` when it
-   * ends. Consecutive resizes of the same splitter (same `key`) coalesce into one step.
-   */
+  /** Splitter resizes: consecutive resizes of the same splitter (`key`) are one step. */
   beginResize(key: string): { key: string; before: Snapshot; layout: string } {
     return { key, before: this.snapshot(), layout: this.layoutKey() };
   }
@@ -270,11 +262,8 @@ export class Workspace {
   endResize(token: { key: string; before: Snapshot; layout: string }): void {
     if (this.layoutKey() === token.layout) return;
     const kind = `resize:${token.key}`;
-    if (this.lastKind === kind && this.undoStack.length) {
-      this.redoStack = []; // coalesced with the previous resize of this splitter
-      return;
-    }
-    this.pushUndo(token.before, kind);
+    if (this.lastKind === kind && this.undoStack.length) this.redoStack = [];
+    else this.pushUndo(token.before, kind);
   }
 
   undo(): void {
@@ -302,21 +291,23 @@ export class Workspace {
   }
 
   // -------------------------------------------------------------------------
-  // Floating windows
+  // Structural operations
 
-  /** Pull a pane out of the hierarchy into a floating window. The last pane can't float. */
+  /** Pull a pane of the main tree out into a floating window (not the last pane). */
   float(paneId: string, rect: Rect): boolean {
-    return this.record(() => this.floatImpl(paneId, rect));
-  }
-
-  private floatImpl(paneId: string, rect: Rect): boolean {
-    const loc = find(this.root, paneId);
-    if (!loc || loc.node.type !== "pane" || !loc.parent) return false;
-    const pane = loc.node;
-    loc.parent.children.splice(loc.index, 1);
-    this.floating.push({ root: pane, rect });
-    this.setRoot(this.root);
-    return true;
+    if (!this.inMain(paneId) || this.node(paneId)?.type !== "pane") return false;
+    let pane: LayoutNode | null = null;
+    return this.record(() => {
+      const ok = this.change((forest) => {
+        pane = find(forest, paneId)!.node;
+        removeNode(forest, paneId);
+      });
+      if (ok && pane) {
+        this.floating.push({ root: pane, rect });
+        this.setTrees(this.trees());
+      }
+      return ok;
+    });
   }
 
   /** Whether a tab can be closed: anything but the very last tab of the main tree. */
@@ -325,160 +316,78 @@ export class Workspace {
     return !(main.length === 1 && main[0].tabs.length === 1 && main[0].tabs[0].id === tabId);
   }
 
-  /**
-   * Close a tab, wherever it is. A pane left without tabs disappears; a floating window left
-   * empty closes. The main tree can't be emptied (see canCloseTab).
-   */
+  /** Close a tab, wherever it is. Emptied panes disappear, emptied windows close. */
   closeTab(tabId: string): boolean {
-    return this.record(() => this.closeTabImpl(tabId));
-  }
-
-  private closeTabImpl(tabId: string): boolean {
     if (!this.canCloseTab(tabId)) return false;
-    for (const t of this.trees()) {
-      const ft = findTab(t, tabId);
-      if (!ft) continue;
-      const { pane, index } = ft;
-      pane.tabs.splice(index, 1);
-      if (index < pane.active || pane.active >= pane.tabs.length) pane.active = Math.max(0, pane.active - 1);
-      // Normalize the windows (dropping emptied ones); setRoot normalizes the main tree.
-      this.floating = this.floating
-        .map((w) => ({ ...w, root: normalizeTree(w.root) }))
-        .filter((w): w is FloatingWindow => !!w.root);
-      this.setRoot(this.root);
-      return true;
-    }
-    return false;
+    return this.change((forest) => {
+      const ft = findTab(forest, tabId);
+      if (!ft) return false;
+      ft.pane.tabs.splice(ft.index, 1);
+      if (ft.index < ft.pane.active || ft.pane.active >= ft.pane.tabs.length) ft.pane.active = Math.max(0, ft.pane.active - 1);
+    });
   }
 
-  // -------------------------------------------------------------------------
-  // Groups
+  /** Rename a tab (wherever it is): replaces its title and any HTML `short`. */
+  renameTab(tabId: string, title: string): void {
+    this.change((forest) => {
+      const ft = findTab(forest, tabId);
+      if (!ft) return false;
+      ft.pane.tabs[ft.index].title = title;
+      delete ft.pane.tabs[ft.index].short;
+    });
+  }
 
   /**
-   * Group the selection into a new pane holding a single group tab named `name`. A single
-   * node goes in as is; a range is wrapped in a split of the same axis. The new pane takes
-   * the selection's place and size.
+   * Group the selection into a new pane holding a single group tab named `name`, taking the
+   * selection's place and size. A range is wrapped in a split of the same axis.
    */
   group(name: string, selection?: Selection): boolean {
-    return this.record(() => {
-      const sel = selection && this.node(selection.id) ? selection : this.selection;
-      const tree = this.tree();
-      const n = this.node(sel.id);
-      if (!n || n.type === "group") return false;
-      let inner: LayoutNode;
-      let place: (p: PaneNode) => void;
-      if (sel.range && n.type !== "pane") {
-        const [lo, hi] = sel.range;
-        const kids = n.children.slice(lo, hi + 1);
-        const type = axisOf(n.type) === "row" ? "row" : "column";
-        inner = { type, id: genId(type === "row" ? "r" : "c"), weight: 1, children: kids };
-        const weight = kids.reduce((s, k) => s + k.weight, 0);
-        place = (p) => {
-          p.weight = weight;
-          n.children.splice(lo, kids.length, p);
-        };
-      } else {
-        inner = n;
-        const loc = find(tree, n.id)!;
-        place = (p) => {
-          p.weight = n.weight;
-          if (loc.parent) loc.parent.children[loc.index] = p;
-          else this.replaceTreeRoot(tree, p);
-        };
-      }
-      const holder: PaneNode = {
-        type: "pane",
-        id: genId("p"),
-        weight: 1,
-        active: 0,
-        tabs: [{ id: genId("t"), title: name, group: { type: "group", id: genId("g"), weight: 1, children: [inner] } }],
-      };
-      inner.weight = 1;
-      place(holder);
-      this.normalizeAll();
-      this.selectImpl({ id: holder.id }, false);
-      this.emit();
-      return true;
-    });
-  }
-
-  /** Rename a tab (wherever it is). */
-  renameTab(tabId: string, title: string): void {
-    this.record(() => {
-      for (const t of this.trees()) {
-        const ft = findTab(t, tabId);
-        if (ft) {
-          // The new name replaces both the plain title and any HTML `short`.
-          ft.pane.tabs[ft.index].title = title;
-          delete ft.pane.tabs[ft.index].short;
-          this.emit();
-          return;
+    const sel = selection && this.node(selection.id) ? selection : this.selection;
+    let holderId: string | undefined;
+    return this.change(
+      (forest) => {
+        const n = find(forest, sel.id)?.node;
+        if (!n || n.type === "slot") return false;
+        let holder: PaneNode;
+        if (sel.range && n.type !== "pane") {
+          const [lo, hi] = sel.range;
+          const kids = n.children.slice(lo, hi + 1);
+          const type = kind(n).axis ?? "column";
+          const inner: SplitNode = { type, id: genId(type[0]), weight: 1, children: kids };
+          holder = groupPane(name, inner, kids.reduce((s, k) => s + k.weight, 0));
+          n.children.splice(lo, kids.length, holder);
+        } else {
+          holder = groupPane(name, n, n.weight);
+          replaceNode(forest, n.id, holder);
         }
-      }
-    });
+        holderId = holder.id;
+      },
+      () => holderId,
+    );
   }
 
-  /** A pane can collapse if its only tab is a group. */
+  /** A pane can collapse if its only tab is a group (not a scroll split's). */
   canCollapse(paneId: string): boolean {
     const p = this.node(paneId);
-    const root = p?.type === "pane" && p.tabs.length === 1 ? p.tabs[0].group?.children[0] : undefined;
-    // A scroll split always lives in a group tab: such a group can't be collapsed.
-    return !!root && !isScroll(root.type);
+    return p?.type === "pane" && canCollapse(p);
   }
 
   /**
-   * Collapse a group: replace the pane holding it (its only tab) by the group's layout.
-   * Without an argument: the selected pane if it can collapse, else the innermost group
-   * around the selection whose holder can.
+   * Collapse a group: replace its holder pane by the group's layout. Without an argument:
+   * the selected pane if it can collapse, else the innermost holder around the selection.
    */
   collapse(paneId?: string): boolean {
-    return this.record(() => {
-      const target = paneId ?? this.collapsibleAroundSelection();
-      if (!target || !this.canCollapse(target)) return false;
-      const tree = this.treeOf(target)!;
-      const loc = find(tree, target)!;
-      const p = loc.node as PaneNode;
-      const inner = p.tabs[0].group!.children[0];
-      inner.weight = p.weight;
-      if (loc.parent) loc.parent.children[loc.index] = inner;
-      else this.replaceTreeRoot(tree, inner);
-      this.normalizeAll();
-      this.selectImpl({ id: this.node(inner.id) ? inner.id : this.lastPane ?? this.root.id }, false);
-      this.emit();
-      return true;
-    });
-  }
-
-  private collapsibleAroundSelection(): string | null {
-    const path = pathTo(this.tree(), this.selection.id) ?? [];
-    for (let i = path.length - 1; i >= 0; i--) {
-      const n = path[i];
-      if (n.type === "pane" && this.canCollapse(n.id)) return n.id;
-    }
-    return null;
-  }
-
-  /** Replace the root of a tree (the main one or a floating window's). */
-  private replaceTreeRoot(tree: LayoutNode, node: LayoutNode): void {
-    if (tree === this.root) this.root = node;
-    else for (const w of this.floating) if (w.root === tree) w.root = node;
-  }
-
-  private normalizeAll(): void {
-    this.root = normalizeTree(this.root) ?? this.root;
-    this.floating = this.floating
-      .map((w) => ({ ...w, root: normalize(w.root) }))
-      .filter((w): w is FloatingWindow => !!w.root);
-  }
-
-  /** All trees: the main one first, then the floating windows' (minus `exclude`). */
-  trees(exclude?: FloatingWindow): LayoutNode[] {
-    return [this.root, ...this.floating.filter((w) => w !== exclude).map((w) => w.root)];
-  }
-
-  /** The tree (main or floating) containing a node. */
-  treeOf(id: string): LayoutNode | null {
-    return this.trees().find((t) => find(t, id)) ?? null;
+    const target =
+      paneId ?? [...(pathTo(this.tree(), this.selection.id) ?? [])].reverse().find((n) => this.canCollapse(n.id))?.id;
+    if (!target || !this.canCollapse(target)) return false;
+    let innerId: string | undefined;
+    return this.change(
+      (forest) => {
+        innerId = collapseGroup(forest, target)?.id;
+        if (!innerId) return false;
+      },
+      () => innerId,
+    );
   }
 
   /** Compute a drop across all trees. `exclude`: a window being docked (it is the subject). */
@@ -491,52 +400,44 @@ export class Workspace {
    * `floatRect`: where to show the new window, for `float` drops.
    */
   commitDrop(result: ForestResult, consumed?: FloatingWindow, floatRect?: Rect): void {
-    this.record(() => this.commitDropImpl(result, consumed, floatRect));
-  }
-
-  private commitDropImpl(result: ForestResult, consumed?: FloatingWindow, floatRect?: Rect): void {
-    const others = this.floating.filter((w) => w !== consumed);
-    const next: FloatingWindow[] = [];
-    others.forEach((w, i) => {
-      const t = result.trees[i + 1];
-      if (t) next.push({ root: t, rect: w.rect }); // emptied windows close
+    this.record(() => {
+      const windows = this.floating.filter((w) => w !== consumed);
+      const trees = [...result.trees];
+      if (result.floated && floatRect) {
+        windows.push({ root: result.floated, rect: floatRect });
+        trees.push(result.floated);
+      }
+      const main = result.trees[0]!;
+      this.setTrees(trees, windows, find(main, result.paneId) ? result.paneId : undefined);
     });
-    if (result.floated && floatRect) next.push({ root: result.floated, rect: floatRect });
-    this.floating = next;
-    const main = result.trees[0]!;
-    this.setRoot(main, find(main, result.paneId) ? result.paneId : undefined);
   }
 
   // -------------------------------------------------------------------------
   // Selection
 
-  /** Select a node. As a user action (`emit`), this is recorded for undo. */
+  /** Select a node (a user action when `emit`). */
   select(sel: Selection, emit = true): void {
-    if (emit) return this.record(() => this.selectImpl(sel, true));
-    this.selectImpl(sel, false);
+    this.selectImpl(sel, emit);
   }
 
-  /** Activate a pane's tab and select the pane (a user action, recorded for undo). */
+  /** Activate a pane's tab and select the pane. */
   activateTab(paneId: string, index: number): void {
-    this.record(() => {
-      const n = this.node(paneId);
-      if (n?.type === "pane" && index >= 0 && index < n.tabs.length) n.active = index;
-      this.selectImpl({ id: paneId }, true);
-    });
+    const n = this.node(paneId);
+    if (n?.type === "pane" && index >= 0 && index < n.tabs.length) n.active = index;
+    this.selectImpl({ id: paneId }, true);
   }
 
   private selectImpl(sel: Selection, emit: boolean): void {
     let n = this.node(sel.id);
     if (!n) return;
-    // Group nodes are wrappers, never selected: select their root instead.
-    if (n.type === "group") {
+    // Slots are wrappers, never selected: select what they hold.
+    if (n.type === "slot") {
       n = n.children[0];
       if (!n) return;
       sel = { id: n.id };
     }
-    if (sel.range && n.type !== "pane") {
-      if (sel.range[0] === 0 && sel.range[1] === n.children.length - 1) sel = { id: sel.id };
-    }
+    if (sel.range && n.type !== "pane" && sel.range[0] === 0 && sel.range[1] === n.children.length - 1)
+      sel = { id: sel.id };
     this.selection = sel;
     this.expandStack = [];
     if (!sel.range && n.type === "pane") this.lastPane = sel.id;
@@ -547,7 +448,7 @@ export class Workspace {
     if (emit) this.emit();
   }
 
-  /** Ids of the nodes covered by a selection (one node, or the nodes in the range). */
+  /** The nodes covered by a selection (one node, or the nodes in the range). */
   selectedNodes(sel: Selection = this.selection): LayoutNode[] {
     const n = this.node(sel.id);
     if (!n) return [];
@@ -555,23 +456,8 @@ export class Workspace {
     return n.children.slice(sel.range[0], sel.range[1] + 1);
   }
 
-  selectionRect(sel: Selection, rects: Map<string, Rect>): Rect {
-    const rs = this.selectedNodes(sel).map((n) => rects.get(n.id)!);
-    const x0 = Math.min(...rs.map((r) => r.x));
-    const y0 = Math.min(...rs.map((r) => r.y));
-    const x1 = Math.max(...rs.map((r) => r.x + r.w));
-    const y1 = Math.max(...rs.map((r) => r.y + r.h));
-    return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
-  }
-
-  /** The pane that is "current": the selection if it is a pane, else the last focused descendant. */
-  currentPane(): PaneNode {
-    let n = this.selectedNodes()[0];
-    while (n.type !== "pane") {
-      const last = this.lastChild.get(n.id);
-      n = n.children.find((c) => c.id === last) ?? n.children[0];
-    }
-    return n;
+  private selectionRect(sel: Selection, rects: Map<string, Rect>): Rect {
+    return union(this.selectedNodes(sel).map((n) => rects.get(n.id)!))!;
   }
 
   // -------------------------------------------------------------------------
@@ -580,134 +466,78 @@ export class Workspace {
   run(cmd: Command): void {
     if (cmd === "undo") return this.undo();
     if (cmd === "redo") return this.redo();
-    this.record(() => this.runImpl(cmd));
-  }
-
-  private runImpl(cmd: Command): void {
-    switch (cmd) {
-      case "nextTab":
-        return this.cycleTab(1);
-      case "prevTab":
-        return this.cycleTab(-1);
-      case "parent":
-        return this.goParent();
-      case "root":
-        return this.goRoot();
-      case "child":
-        return this.goChild();
-      case "focusLeft":
-        return this.focus("left");
-      case "focusRight":
-        return this.focus("right");
-      case "focusUp":
-        return this.focus("top");
-      case "focusDown":
-        return this.focus("bottom");
-      case "expandLeft":
-        return this.expand("left");
-      case "expandRight":
-        return this.expand("right");
-      case "expandUp":
-        return this.expand("top");
-      case "expandDown":
-        return this.expand("bottom");
-      case "unexpand":
-        return this.unexpand();
-      case "swapLeft":
-        return this.swap("left");
-      case "swapRight":
-        return this.swap("right");
-      case "swapUp":
-        return this.swap("top");
-      case "swapDown":
-        return this.swap("bottom");
-      case "maximize":
-        return this.maximize();
-      case "restore":
-        return this.restore();
+    {
+      const sides: Record<string, Side> = { Left: "left", Right: "right", Up: "top", Down: "bottom" };
+      const m = /^(focus|expand|swap)(Left|Right|Up|Down)$/.exec(cmd);
+      if (m) return this[m[1] as "focus" | "expand" | "swap"](sides[m[2]]);
+      switch (cmd) {
+        case "nextTab":
+          return this.cycleTab(1);
+        case "prevTab":
+          return this.cycleTab(-1);
+        case "parent":
+          return this.goParent();
+        case "root":
+          return this.goRoot();
+        case "child":
+          return this.goChild();
+        case "unexpand":
+          return this.unexpand();
+        case "maximize":
+          return this.maximize();
+        case "restore":
+          return this.restore();
+      }
     }
   }
 
-  cycleTab(delta: number): void {
+  private cycleTab(delta: number): void {
     const n = this.node(this.selection.id);
-    if (!n || n.type !== "pane" || n.tabs.length < 2) return;
+    if (n?.type !== "pane" || n.tabs.length < 2) return;
     n.active = (n.active + delta + n.tabs.length) % n.tabs.length;
     this.emit();
   }
 
-  goParent(): void {
+  /** Up one navigation step (slots and groups' root splits are skipped, see LayoutIndex). */
+  private goParent(): void {
     const s = this.selection;
-    if (s.range) {
-      // From a range: its split, unless that split is a group's root (then its holder).
-      this.select({ id: this.groupHolderOf(s.id)?.id ?? s.id }, false);
-    } else {
-      const up = this.upOf(s.id);
-      if (!up) return;
-      this.select({ id: up.id }, false);
-    }
+    const idx = this.index();
+    // From a range: its split (or the split's holder, if the split is a group's root).
+    const up = s.range ? (idx.holder(s.id) ?? idx.node(s.id)) : idx.navParent(s.id);
+    if (!up) return;
+    this.select({ id: up.id }, false);
     this.widenMaximized();
     this.emit();
   }
 
   /** Select the root of the tree holding the selection (main, or a floating window's). */
-  goRoot(): void {
+  private goRoot(): void {
     const root = this.tree();
     if (this.selection.id === root.id && !this.selection.range) return;
     this.select({ id: root.id }, false);
-    this.widenMaximized(); // no-op for the main root: the top level clears the maximization
+    this.widenMaximized(); // (the main root clears the maximization: top level)
     this.emit();
   }
 
-  goChild(): void {
+  /** Down one navigation step, to the last-focused child (within the range, if any). */
+  private goChild(): void {
     const s = this.selection;
     const n = this.node(s.id);
     if (!n) return;
-    let child: LayoutNode;
-    if (n.type === "pane") {
-      // Into a pane showing a group. The group's root, when a split, fills the pane's body
-      // exactly: a pointless step, skipped (go to its last-focused child).
-      const g = activeGroup(n);
-      const root = g?.children[0];
-      if (!root) return;
-      child = root.type === "pane" ? root : this.lastChildOf(root);
-    } else {
-      const [lo, hi] = s.range ?? [0, n.children.length - 1];
-      const allowed = n.children.slice(lo, hi + 1);
-      const last = this.lastChild.get(n.id);
-      child = allowed.find((c) => c.id === last) ?? allowed[0];
-    }
+    const pick = (split: SplitNode, range = [0, split.children.length - 1]) => {
+      const allowed = split.children.slice(range[0], range[1] + 1);
+      return allowed.find((c) => c.id === this.lastChild.get(split.id)) ?? allowed[0];
+    };
+    const child =
+      n.type !== "pane" && s.range ? pick(n, s.range) : this.index().navChild(n, (split) => pick(split));
+    if (!child) return;
     this.select({ id: child.id }, false);
     this.emit();
   }
 
-  private lastChildOf(split: SplitNode): LayoutNode {
-    const last = this.lastChild.get(split.id);
-    return split.children.find((c) => c.id === last) ?? split.children[0];
-  }
-
-  /** If `id` is a group's root, the pane holding the group. */
-  private groupHolderOf(id: string): PaneNode | null {
-    const tree = this.tree();
-    const loc = find(tree, id);
-    return loc?.parent?.type === "group" ? (holderOf(tree, loc.parent.id)?.pane ?? null) : null;
-  }
-
   /**
-   * The node above `id` for navigation. Above a group's root is the pane holding the group;
-   * a group's root that is a split is skipped (it is the same area as its holder's body).
-   */
-  private upOf(id: string): LayoutNode | null {
-    const tree = this.tree();
-    const loc = find(tree, id);
-    if (!loc?.parent) return null;
-    if (loc.parent.type === "group") return holderOf(tree, loc.parent.id)?.pane ?? null;
-    return this.groupHolderOf(loc.parent.id) ?? loc.parent;
-  }
-
-  /**
-   * If the selection is a row, column or range, go back to the latest single pane.
-   * Returns whether it did (the caller then does nothing else: clearing the multi-selection
-   * is the whole effect, so that the user sees what's going on).
+   * If the selection is a row, column or range, go back to the latest single pane. Returns
+   * whether it did (that is then the whole effect, so that the user sees what's going on).
    */
   clearMultiSelection(): boolean {
     const n = this.node(this.selection.id);
@@ -718,7 +548,7 @@ export class Workspace {
     return true;
   }
 
-  focus(side: Side): void {
+  private focus(side: Side): void {
     if (this.clearMultiSelection()) return;
     const sel = this.selection;
     const target = this.neighbour(side);
@@ -729,105 +559,74 @@ export class Workspace {
     this.emit();
   }
 
-  /**
-   * Swap the selected pane with the pane touching the given side. The selection moves
-   * with the pane, and the boundary memory makes the opposite swap undo this one.
-   */
-  swap(side: Side): void {
+  /** Swap the selected pane with the one on a side. The opposite swap undoes it exactly. */
+  private swap(side: Side): void {
     if (this.clearMultiSelection()) return;
-    const sel = this.selection;
-    const me = this.node(sel.id);
-    if (sel.range || !me || me.type !== "pane") return;
+    const me = this.node(this.selection.id);
+    if (this.selection.range || me?.type !== "pane") return;
     const target = this.neighbour(side, true);
     if (!target) return;
-    swapNodes(this.tree(), me.id, target.id);
+    this.change((forest) => swapNodes(forest, me.id, target.id), () => me.id);
     this.boundary.set(`${me.id}:${opposite[side]}`, target);
     this.boundary.set(`${target.id}:${side}`, { id: me.id });
-    this.select({ id: me.id }, false);
-    this.emit();
   }
 
-  /** The pane (or remembered selection) touching the given side of the selection. */
+  /** The pane (or remembered selection) touching a side of the selection. */
   private neighbour(side: Side, panesOnly = false): Selection | null {
     const rects = computeRects(this.tree());
     const sel = this.selection;
     const S = this.selectionRect(sel, rects);
-    const key = (id: string, s: Side) => `${id}:${s}`;
-
-    const adjacent = (r: Rect) => {
-      switch (side) {
-        case "left":
-          return Math.abs(r.x + r.w - S.x) < EPS;
-        case "right":
-          return Math.abs(S.x + S.w - r.x) < EPS;
-        case "top":
-          return Math.abs(r.y + r.h - S.y) < EPS;
-        case "bottom":
-          return Math.abs(S.y + S.h - r.y) < EPS;
-      }
-    };
     const horizontal = sideAxis[side] === "row";
+    const adjacent = (r: Rect) => {
+      const [a, b] = sideIsStart[side] ? [horizontal ? r.x + r.w : r.y + r.h, horizontal ? S.x : S.y] : [horizontal ? S.x + S.w : S.y + S.h, horizontal ? r.x : r.y];
+      return Math.abs(a - b) < EPS;
+    };
     const overlap = (r: Rect) =>
-      horizontal
-        ? Math.min(r.y + r.h, S.y + S.h) - Math.max(r.y, S.y)
-        : Math.min(r.x + r.w, S.x + S.w) - Math.max(r.x, S.x);
+      horizontal ? Math.min(r.y + r.h, S.y + S.h) - Math.max(r.y, S.y) : Math.min(r.x + r.w, S.x + S.w) - Math.max(r.x, S.x);
 
-    let target: Selection | null = null;
-
-    // 1. Go back where we came from through this boundary, if still valid.
-    const remembered = this.boundary.get(key(sel.id, side));
-    const rememberedNode = remembered && this.node(remembered.id);
-    if (remembered && rememberedNode && (!panesOnly || (rememberedNode.type === "pane" && !remembered.range))) {
+    // 1. Back where we came from through this boundary, if still valid.
+    const remembered = this.boundary.get(`${sel.id}:${side}`);
+    const rn = remembered && this.node(remembered.id);
+    if (remembered && rn && (!panesOnly || (rn.type === "pane" && !remembered.range))) {
       const r = this.selectionRect(remembered, rects);
-      if (adjacent(r) && overlap(r) > EPS) target = remembered;
+      if (adjacent(r) && overlap(r) > EPS) return remembered;
     }
-
-    // 2. Otherwise, the pane touching that side, preferring the one facing our center.
-    if (!target) {
-      const center = horizontal ? S.y + S.h / 2 : S.x + S.w / 2;
-      let best: { id: string; score: number } | null = null;
-      for (const p of panes(this.tree())) {
-        const r = rects.get(p.id);
-        // Hidden panes (in inactive group tabs) have no rect; a pane showing a group acts as
-        // a container: its group's panes are the targets.
-        if (!r || activeGroup(p)) continue;
-        if (!adjacent(r)) continue;
-        const ov = overlap(r);
-        if (ov <= EPS) continue;
-        const lo = horizontal ? r.y : r.x;
-        const hi = horizontal ? r.y + r.h : r.x + r.w;
-        const score = ov + (lo <= center && center < hi ? 10 : 0);
-        if (!best || score > best.score) best = { id: p.id, score };
-      }
-      if (best) target = { id: best.id };
+    // 2. Otherwise, the pane touching that side, preferring the one facing our center. Panes
+    // without a rect are hidden (inactive groups); a pane showing a group is a container.
+    const center = horizontal ? S.y + S.h / 2 : S.x + S.w / 2;
+    let best: { id: string; score: number } | null = null;
+    for (const p of panes(this.tree())) {
+      const r = rects.get(p.id);
+      if (!r || p.tabs[p.active]?.group || !adjacent(r)) continue;
+      const ov = overlap(r);
+      if (ov <= EPS) continue;
+      const [lo, hi] = horizontal ? [r.y, r.y + r.h] : [r.x, r.x + r.w];
+      const score = ov + (lo <= center && center < hi ? 10 : 0);
+      if (!best || score > best.score) best = { id: p.id, score };
     }
-    return target;
+    return best && { id: best.id };
   }
 
-  expand(side: Side): void {
+  private expand(side: Side): void {
     const axis = sideAxis[side];
     const start = sideIsStart[side];
     const s = this.selection;
-    let x: LayoutNode | null = this.node(s.id);
+    let x = this.node(s.id);
     if (!x) return;
-
-    if (s.range && x.type !== "pane" && axisOf(x.type) === axis) {
+    if (s.range && x.type !== "pane" && kind(x).axis === axis) {
       const [lo, hi] = s.range;
       if (start && lo > 0) return this.commitExpand({ id: x.id, range: [lo - 1, hi] });
-      if (!start && hi < x.children.length - 1)
-        return this.commitExpand({ id: x.id, range: [lo, hi + 1] });
+      if (!start && hi < x.children.length - 1) return this.commitExpand({ id: x.id, range: [lo, hi + 1] });
     }
-
+    const idx = this.index();
     while (x) {
-      const loc: Located = find(this.tree(), x.id)!;
-      const parent: SplitNode | null = loc.parent;
+      const e: Entry = idx.get(x.id)!;
+      const parent: LayoutNode | null = e.parent;
       if (!parent) return;
-      if (axisOf(parent.type) === axis) {
-        const j = start ? loc.index - 1 : loc.index + 1;
-        if (j >= 0 && j < parent.children.length) {
-          const range: [number, number] = start ? [j, loc.index] : [loc.index, j];
-          return this.commitExpand({ id: parent.id, range });
-        }
+      if (kind(parent).axis === axis) {
+        const j = start ? e.index - 1 : e.index + 1;
+        if (j >= 0 && j < (parent as SplitNode).children.length)
+          return this.commitExpand({ id: parent.id, range: start ? [j, e.index] : [e.index, j] });
       }
       x = parent;
     }
@@ -842,8 +641,8 @@ export class Workspace {
     this.emit();
   }
 
-  /** Undo the last expansion. Only meaningful right after one or more expand commands. */
-  unexpand(): void {
+  /** Undo the last expansion. */
+  private unexpand(): void {
     const prev = this.expandStack.pop();
     if (!prev || !this.node(prev.id)) return;
     const stack = this.expandStack;
@@ -852,33 +651,24 @@ export class Workspace {
     this.emit();
   }
 
-  /**
-   * The maximization command: toggles if the selection is the maximized group; otherwise
-   * maximizes the selection (which may be wider or narrower than the current maximization).
-   */
-  toggleMaximize(): void {
-    this.record(() => this.toggleMaximizeImpl());
-  }
+  // -------------------------------------------------------------------------
+  // Maximization (main tree only)
 
-  private toggleMaximizeImpl(): void {
+  /** Toggle if the selection is the maximized group; else maximize the selection. */
+  toggleMaximize(): void {
     if (this.maximized && sameSel(this.maximized, this.selection)) this.restore();
     else this.maximize();
   }
 
   maximize(): void {
-    this.record(() => {
-      if (!this.inMain(this.selection.id)) return; // not in floating windows
-      // Maximizing the whole tree is no maximization at all.
-      if (this.selection.id === this.root.id && !this.selection.range) {
-        this.clearMaximization();
-        this.emit();
-        return;
-      }
-      if (sameSel(this.maximized, this.selection)) return;
+    if (!this.inMain(this.selection.id)) return;
+    // Maximizing the whole tree is no maximization at all.
+    if (this.selection.id === this.root.id && !this.selection.range) this.clearMaximization();
+    else if (!sameSel(this.maximized, this.selection)) {
       this.maxHistory.push(this.maximized);
       this.maximized = { ...this.selection };
-      this.emit();
-    });
+    }
+    this.emit();
   }
 
   private clearMaximization(): void {
@@ -887,41 +677,25 @@ export class Workspace {
   }
 
   restore(): void {
-    this.record(() => {
-      if (!this.maximized) return;
-      this.maximized = this.maxHistory.pop() ?? null;
-      this.emit();
-    });
+    if (!this.maximized) return;
+    this.maximized = this.maxHistory.pop() ?? null;
+    this.emit();
   }
 
   /**
-   * While maximized, keep the maximized region in sync with the selection.
-   * `grow`: the selection grew (parent/expand) so the maximized region follows it.
-   * Otherwise, follow only when the selection left the maximized region.
-   */
-  /**
    * Parent/expand may *widen* the maximization: when the new selection contains the whole
-   * maximized area, it becomes the maximization. They never narrow it (only the maximize
-   * command zooms in further), so child → child → parent keeps the original group.
+   * maximized area. They never narrow it (only the maximize command zooms in further).
    */
   private widenMaximized(): void {
     const max = this.maximized;
     if (!max || !this.inMain(this.selection.id) || sameSel(max, this.selection)) return;
     const sel = this.selectedNodes();
-    const contains = this.selectedNodes(max).every((m) => sel.some((n) => pathTo(n, m.id)));
-    if (contains) this.maximized = { ...this.selection };
+    if (this.selectedNodes(max).every((m) => sel.some((n) => pathTo(n, m.id)))) this.maximized = { ...this.selection };
   }
 
-  /**
-   * When focus moves to a pane outside the maximized area, the maximization follows it
-   * (otherwise the selection would be hidden).
-   */
+  /** When focus moves outside the maximized area, the maximization follows it. */
   private followMaximized(): void {
     if (!this.maximized || !this.inMain(this.selection.id)) return;
-    const inside = this.selectedNodes(this.maximized).some((m) =>
-      pathTo(m, this.selection.id),
-    );
-    if (!inside) this.maximized = { ...this.selection };
+    if (!this.selectedNodes(this.maximized).some((m) => pathTo(m, this.selection.id))) this.maximized = { ...this.selection };
   }
 }
-

@@ -13,19 +13,26 @@ Tab contents (including iframes) survive every relayout.
 
 The prototype consists of:
 
-* `model.ts`: the pure, serializable layout trees, plus normalization, insertion, swapping and drop logic across several trees. No DOM.
+* Pure model (no DOM):
+  * `types.ts`: the serializable data types.
+  * `geometry.ts`: rects and sides (`edge`, `span`, `band`, `intersect`, `union`, `sideAxis`, …).
+  * `kinds.ts`: the **node kinds registry**. Each node type knows its children, axis, whether it scrolls, whether things can be inserted beside it, whether it is a navigation step, and the context it gives its children. Panes decide their own display from that context (see [Node kinds and contexts](#node-kinds-and-contexts)).
+  * `tree.ts`: generic walks (`walk`, `find`, `pathTo`, `panes`, `findTab`), all through `kind(n).children`; `computeRects`; and `LayoutIndex`, a one-pass index of parents, roots, holders and contexts.
+  * `model.ts`: re-exports the above, plus constructors, (de)serialization, normalization, insertion, swapping, and drop logic across several trees.
 * `workspace.ts`: the state on top of the trees and the command set. No DOM, no key bindings. It holds:
   * the main tree;
   * the floating windows;
   * the selection, which may be in any tree;
   * maximization (main tree only);
   * navigation memory.
-* `view.ts`: everything in the DOM:
+* `view.ts`: the DOM, except drag and drop:
   * rendering, with persistent tab contents moved by `moveBefore`;
   * splitters and CSS-only maximization;
   * the selection outline;
-  * floating windows: moving, resizing, hold-to-dock;
-  * drag and drop with its overlay.
+  * the pane menu, in-place title editing;
+  * floating windows: moving, resizing, hold-to-dock.
+* `dnd.ts`: drag and drop: the `DragDrop` controller, hit testing, choices, and the SVG overlay. It only needs a small `DndHost` interface from the view (elements and rects by id, the layers). The view exposes the current drag as `view.drag`.
+* `colors.ts`: cell accents, drop line level colors.
 * `keyboard.ts`: the keyboard navigation mode controller, configured with an activation chord and bindings.
 * A demo page:
   * examples to pick from, including iframe embeds, a scroll column and a scroll row;
@@ -44,11 +51,11 @@ type Tab = {                       // a "cell", shown as a tab
   icon?: string; short?: string; long?: string;   // HTML parts (content is rendered by the host)
   accent?: string;                 // CSS color; default: derived from the id
   status?: "done" | "error" | "unresponsive" | string;
-  content?: string; data?: Record<string, unknown>; group?: GroupNode;
+  content?: string; data?: Record<string, unknown>; group?: Slot;
 };
-type GroupNode = { type: "group"; id: string; weight: number; children: [Node] };  // a group tab's layout
 type Pane = { type: "pane"; id: string; weight: number; tabs: Tab[]; active: number };
-type Split = { type: "row" | "column" | "scroll-row" | "scroll-column"; id: string; weight: number; children: Node[] };
+type Split = { type: "row" | "column" | "scroll-row" | "scroll-column" | "slot" | "forest"; id: string; weight: number; children: Node[] };
+type Slot = Split & { type: "slot"; children: [Node] };   // holds one layout root: a group tab's layout
 type Node = Pane | Split;
 type FloatingWindow = { root: Node; rect: { x; y; w; h } };   // rect: pixels, relative to the workspace
 type WorkspaceData = { root: Node; floating: FloatingWindow[] }; // last window is frontmost
@@ -56,8 +63,9 @@ type WorkspaceData = { root: Node; floating: FloatingWindow[] }; // last window 
 
 * `weight` is a node's relative size within its parent. A child's fraction is `weight / sum(sibling weights)`. Render each child with `flex: <weight> 1 0`.
 * `data` on a tab is arbitrary serializable host data. The demo uses it for what to embed.
-* `axisOf(type)` maps `row` and `scroll-row` to the row axis, and `column` and `scroll-column` to the column axis. **Every** orientation check must use `axisOf` rather than comparing `type` to `"row"` or `"column"`. That includes insertion, `computeRects`, expand, the drop chain, splitter direction and the preview orientation.
-* Serialization writes `{root, floating}`, or a bare tree when nothing floats. Deserialization accepts both, plus the older `{pane, rect}` window format. It validates the trees, defaults missing weights to 1, and clamps `active`.
+* `slot` and `forest` never appear at a tree's top: a slot is only ever a group tab's `group`, and a forest only exists transiently during drops and structural changes (see [Across trees](#drop-targets-model)).
+* `kind(n).axis` maps `row` and `scroll-row` to the row axis, and `column` and `scroll-column` to the column axis (null for panes, slots and forests). **Every** orientation check must use it rather than comparing `type` to `"row"` or `"column"`. That includes insertion, `computeRects`, expand, the drop chain, splitter direction and the preview orientation.
+* Serialization writes `{root, floating}`, or a bare tree when nothing floats. Deserialization accepts both, plus the older `{pane, rect}` window format. It validates the trees (a slot must have exactly one child; the older type name `"group"` reads as `"slot"`), defaults missing weights to 1, and clamps `active`.
 
 ### Normalization
 
@@ -81,6 +89,36 @@ Scroll splits add four rules:
 ### Logical geometry
 
 `computeRects(root, frame)` gives every node's rectangle from the weights alone, in the unit square or any given frame. Navigation uses these logical rectangles, never DOM rectangles, so it is unaffected by maximization, tab bars and gaps.
+
+### Node kinds and contexts
+
+Code never asks "is X nested in a Y?". Instead, each node type has a **kind** (`KINDS[type]`, `kind(n)`), and each node learns where it is from a **context** its parent gives it.
+
+```ts
+interface NodeKind {
+  children(n): (Node | undefined)[];  // a pane's children are its tabs' slots, indexed like the tabs
+  axis: Orientation | null;
+  scroll: boolean;
+  acceptsBeside: boolean;             // false for scroll splits, slots, forests
+  navStep: boolean;                   // false for slots and forests
+  childContext(n, ctx): Ctx;
+  replaceChild(n, i, child); removeChild(n, i);   // a pane: set / remove tab i's group
+}
+interface Ctx {
+  natural: { row: boolean; column: boolean };  // sized by content along these axes
+  sizedAlong: Orientation | null;   // sized by content along its parent's axis: flex: none, gaps, no splitters
+  cellOf: Orientation | null;       // a direct child of a scroll split along that axis
+  floating: boolean;                // in a floating window
+}
+```
+
+* The root context (`rootCtx(floating)`) has nothing natural.
+* A split's `childContext`: along its axis, children are sized by content if the split scrolls, or if the split's own size along that axis is natural. `cellOf` is set for children of scroll splits.
+* A slot and a pane pass their context on, minus `sizedAlong` and `cellOf`: a group's layout fills its holder, but inherits its natural-size context.
+* Generic code goes through kinds: tree walks, `insertBeside` (sibling if `kind(parent).axis` matches, otherwise wrap through `kind(parent).replaceChild`), removal, the drop chain, rendering.
+* **A pane decides its own display** from its context: `paneDisplay(pane, ctx)` (see [Cells](#cells)). The renderer and drag-and-drop both call it, rather than probing the DOM for classes.
+
+**`LayoutIndex`** (`ws.index()`, rebuilt on demand) indexes all trees in one pass. Each entry has the node, its parent, its index in the parent, its tree's root, and its context. It answers `parent(id)`, `root(id)`, `holder(id)` (the pane holding a node's slot, when the node is a group's root), `navParent(id)` and `navChild(n, pick)` (skipping what isn't a navigation step).
 
 
 ## Rendering
@@ -300,13 +338,12 @@ type DragSubject =
 
 * `trees` comes back in input order, with **null for a tree the drop emptied**; that window closes.
 * `floated` is a pane to show as a new window.
-* `applyDrop(root, …)` is the single-tree wrapper.
 
-**Across trees.** Put all the trees as the children of a temporary root with a reserved id. Then `find`, the tombstone, insertion and swap all work across trees unchanged. With that root:
+**Across trees: `inForest(trees, fn)`.** Wrap each tree in a root **slot**, put the slots in a transient `forest` node, run `fn(forest)`, then normalize each slot's child with `normalizeTree`. A tree whose slot was emptied comes back as null. Then `find`, the tombstone, insertion and swap all work across trees unchanged, with no special cases:
 
-* Never normalize it as a split; normalize each tree separately.
-* Never insert *as a sibling* at its level. `insertBeside` on a tree root must wrap the root instead, or the drop would create a new tree.
-* Removing a tree root (moving a window's only pane out, or tombstone removal) must leave an **EMPTY marker** in place, not splice. Splicing would shift tree indices.
+* Every tree root is a slot's only child, exactly like a group's root. Since a slot doesn't accept siblings (`acceptsBeside` false, `axis` null), `insertBeside` on a tree root wraps it, and the drop can't create a new tree.
+* Removing a tree root empties its slot; tree indices never shift.
+* The workspace's structural commands (grouping, collapsing, swapping, renaming, closing, floating) run through `inForest` too, through a single private `change(fn)`, which also records the undo step. If the main tree would be emptied, the change is refused.
 
 **Steps:**
 
@@ -341,10 +378,11 @@ type DragSubject =
 
 * Dropping a pane beside, or into the tabs of, itself.
 * Any drop that would **empty the main tree**.
-* `between` right next to the subject's own pane, at its index or index + 1, for a pane, or for a tab whose pane would become empty.
-* Dropping a tab back into its own slot in the same pane (index equal to its own, or one more).
+* A `side` target whose node doesn't accept things beside it (`kind(n).acceptsBeside`).
+* A drop that would put something inside itself (see [Group tabs](#group-tabs)).
 * **The general rule**: if the shapes of all trees are unchanged, the drop is pointless. `shape` ignores ids and weights: it covers types, nesting and the tab ids in each pane.
   * This catches a lone tab, or a pane, dropped on a border it already occupies, even when only sizes would change.
+  * It also catches `between` right next to the subject's own pane, and a tab dropped back into its own place in its pane. No dedicated checks are needed for these.
   * A tab that has siblings can still split off beside its own pane.
   * `float` results are exempt, because they always change something.
 
@@ -453,10 +491,10 @@ Tabs are **cells**. A cell has HTML parts (**content**, rendered by the host; **
   * `"unresponsive"`: blinking between normal and done;
   * anything else: normal.
 * **Accent**: the cell's `accent`, or a color derived from its id. It colors the selected tab's line, the `long` strip, and a cell's focus border.
-* **Display options per pane, automatic, by location:**
-  * **Panes in a scroll split** (any natural-size context) have `showSingleTab = false` and `showLong = true`.
-  * **Everywhere else**, `showSingleTab = true` and `showLong = false`.
-  * `showSingleTab = false`: with a single tab, the tab bar is hidden. Exception: **a pane whose only tab is a group always shows its tab bar**, since a group is a container whose name matters (and it must be editable in place right after grouping).
+* **Display options per pane, automatic, decided by the pane from its context** (`paneDisplay(pane, ctx)` in `kinds.ts`):
+  * **Panes in a natural-size context** (inside a scroll split, at any depth) are cells: `showTabBar` only if they have several tabs, and `showLong = true`.
+  * **Everywhere else**, the tab bar always shows and `showLong = false`.
+  * With the tab bar hidden, a single tab shows no header. Exception: **a pane whose only tab is a group always shows its tab bar**, since a group is a container whose name matters (and it must be editable in place right after grouping).
   * `showLong = true`: the active cell's `long` is shown in a strip at the top of the cell. Its background is tinted from the accent by default; the host's HTML can style it otherwise.
 * **Handles.** With no tab bar, the top strip is the pane's handle: drag it to move the pane. A cell with no tab bar and no `long` gets an empty, slim strip just to have one. Focus is shown by the cell's border, in its accent.
 * **Adding a tab to a pane with no tab bar.** There are no tab bar dots to drop on, so the center of such a pane offers a **tab icon** next to the swap icon, as a `tab` target appending to it. Its preview outlines the pane.
@@ -466,15 +504,15 @@ Tabs are **cells**. A cell has HTML parts (**content**, rendered by the host; **
 
 A tab can hold **a whole layout** instead of content. The pane holding it then switches between that layout (when the group tab is active) and its other tabs. Both kinds of tab live in the same tab bar, so tabs can be dragged in and out as usual.
 
-* **Representation.** `tab.group` is a wrapper node of type `"group"` with exactly one child, the layout's root.
-  * Tree walks (`walk`, `find`, `pathTo`, `panes`, `findTab`) descend from a pane into its tabs' group nodes. A group node has no split parent; its child's parent is the group node.
+* **Representation.** `tab.group` is a **slot**: a node of type `"slot"` with exactly one child, the layout's root. (The same kind of node wraps each tree during drops; see `inForest`.)
+  * A pane's kind lists its tabs' slots as its children, so tree walks (`walk`, `find`, `pathTo`, `panes`, `findTab`) descend into groups. A slot's parent is its holder pane; the root's parent is the slot.
   * Drops, swaps, floating, undo and normalization therefore work inside groups unchanged.
-  * `axisOf("group")` is null, so nothing is ever inserted as a sibling of a group's root. `insertBeside` wraps it instead, and a group's root never forms a "between" with anything.
-  * Removing a group's root (dragging its last pane out, a tombstone) empties the group node.
-  * Normalization normalizes each group's layout separately. **A group left empty disappears together with its tab**, and the group node itself never collapses.
+  * A slot has no axis and doesn't accept siblings, so nothing is ever inserted as a sibling of a group's root. `insertBeside` wraps it instead, and a group's root never forms a "between" with anything.
+  * Removing a group's root (dragging its last pane out, a tombstone) empties the slot.
+  * Normalization normalizes each group's layout separately. **A group left empty disappears together with its tab**, and the slot itself never collapses.
   * `shape` includes groups' layouts.
   * Deserialization validates them.
-* **Never beside a scroll split itself.** A `side` target on a scroll split is invalid, on any side. The scroll split is its group's root, so this would wrap it in a split inside the group, and normalization would then pack it into yet another group tab. Insert beside the group's holder, or into the scroll split, instead. Lines then simply omit that level; where the holder shares the boundary, the holder's level is picked instead.
+* **Never beside a scroll split itself.** A `side` target on a scroll split is invalid, on any side (`acceptsBeside` is false for scroll kinds). The scroll split is its group's root, so this would wrap it in a split inside the group, and normalization would then pack it into yet another group tab. Insert beside the group's holder, or into the scroll split, instead. Lines then simply omit that level; where the holder shares the boundary, the holder's level is picked instead.
 * **Cycles.** A drop must never put something inside itself. If the dragged tab carries a group, or the dragged pane has group tabs, and the target lies inside one of those groups, the drop is invalid.
 * **Grouping** (`group(name)`; demo: **G** in navigation mode):
   * The selection becomes a new **holder pane** with a single group tab named `name`.
@@ -507,9 +545,10 @@ A tab can hold **a whole layout** instead of content. The pane holding it then s
     * **parent** from one of the split's children, from a range in it, or from the split itself goes straight to the holder.
     * When the group's root is a single pane, it is the holder's child as usual.
     * The holder itself is always a step: its tab bar switches between the group and any other tabs.
-  * A group node is never selected; selecting one selects its root.
+  * All of this is `LayoutIndex.navParent` / `navChild`: a node is a step if its kind says so (not a slot) and it isn't a split whose parent is a slot.
+  * A slot is never selected; selecting one selects its root.
   * Maximization works through groups, since `pathTo` descends into them. When the maximization passes **through** a holder (the maximized node is inside its group), the holder's tab bar and outline are hidden, so only the maximized part shows. Maximizing the holder itself keeps its tabs.
-* **Drop lines**: when a chain walking up reaches a group's root, it continues from the **holder pane**, because they share their edges. Lines from inside a group can thus also insert beside the holder and further out.
+* **Drop lines**: when a chain walking up reaches a group's root, it continues from the **holder pane** (`LayoutIndex.holder`), because they share their edges. Lines from inside a group can thus also insert beside the holder and further out.
 
 ## Floating windows
 
@@ -566,7 +605,7 @@ Tab contents must survive any relayout: moves, drops between trees, floating, do
 In a `scroll-column`, children take their **natural height** (their content decides it) and the column scrolls vertically. A `scroll-row` is the same horizontally. Weights are ignored along the scroll axis.
 
 * **Never created by moves.** Drops can insert *into* a scroll split, as a sibling along its axis or between two cells. Any wrapper created by a drop is a plain row or column.
-* **Natural sizing.** Propagate a per-axis "natural" flag down the tree. Inside a scroll split along axis A, and inside any plain A-split whose own A-size is natural, children get `flex: none` along A.
+* **Natural sizing.** Propagate a per-axis "natural" flag down the tree, through the contexts (`Ctx.natural`, `Ctx.sizedAlong`; see [Node kinds and contexts](#node-kinds-and-contexts)). Inside a scroll split along axis A, and inside any plain A-split whose own A-size is natural, children get `flex: none` along A, and the class `carreau-natural-<A>`.
   * Pitfall: with weight flex (`flex: w 1 0`) and `min-height: 0`, children of a column that has an indefinite height collapse to 0. This happens, for example, to a column inside a row inside a scroll-column.
   * The cross axis still stretches. A row inside a scroll-column is as tall as its tallest cell.
   * Panes get a small minimum size: 60px tall in a scroll-column, 120px wide in a scroll-row.
@@ -605,9 +644,10 @@ In a `scroll-column`, children take their **natural height** (their content deci
 ## Easy pitfalls (summary)
 
 * Keep ids valid during a drop by detaching with a tombstone, inserting, and only then removing the tombstone and normalizing.
-* For drops across trees, use one temporary root. Never normalize it, never insert siblings at its level, and leave EMPTY markers instead of splicing.
+* For drops across trees, wrap each tree in a slot inside a transient forest (`inForest`). Tree roots then behave like group roots: no siblings, removal empties the slot.
 * Normalize after every mutation, including on load. Otherwise rows of rows survive, and so do single-child splits. But never collapse a single-child scroll split.
-* Use `axisOf` for every orientation check; scroll splits have their own types.
+* Use `kind(n).axis` for every orientation check; scroll splits have their own types.
+* Don't test nesting ("a pane inside a scroll split"): pass contexts down (`childContext`) and let each node decide (`paneDisplay`); ask kinds for structural rules (`acceptsBeside`, `navStep`).
 * Navigate with logical rects from weights, not DOM rects.
 * An overlay with `pointer-events: none` needs manual hit-testing, and `elementsFromPoint` to find the pane underneath.
 * Keep the hovered pane while over gaps inside the workspace. Make straddling hit areas cover the whole gap.
