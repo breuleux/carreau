@@ -18,6 +18,7 @@ import {
   WorkspaceData,
   activeGroup,
   applyDropForest,
+  applyDropRaw,
   closeTabWith,
   complexAt,
   complexType,
@@ -94,6 +95,32 @@ interface Snapshot {
   maxHistory: (Selection | null)[];
   expandStack: Selection[];
   lastPane: string | null;
+}
+
+/** A host change (see `Workspace.hostChange`): like a structural change, on a forest. */
+export type HostFn = (forest: SplitNode) => boolean | void;
+interface ResizeToken {
+  key: string;
+  before: Snapshot;
+}
+/** What a tab shows: the host's, kept as it is when undoing (see `restoreSnapshot`). */
+const TAB_META = ["title", "icon", "short", "long", "accent", "status", "content", "data"] as const;
+
+function snapshotTrees(s: Snapshot): LayoutNode[] {
+  return [s.root, ...s.floating.map((w) => w.root)];
+}
+
+function allTabs(root: LayoutNode): Tab[] {
+  return [...walk(root)].flatMap(({ node }) => (node.type === "pane" ? node.tabs : []));
+}
+
+/** Apply a host change to a snapshot, in place. False if it can't (then leave it be). */
+function rebase(s: Snapshot, fn: HostFn): boolean {
+  const { trees, value } = inForest(structuredClone(snapshotTrees(s)), fn);
+  if (value === false || !trees[0]) return false;
+  s.root = trees[0];
+  s.floating = s.floating.flatMap((w, i) => (trees[i + 1] ? [{ root: trees[i + 1]!, rect: w.rect }] : []));
+  return true;
 }
 
 /** A relative move, as the navigation shortcuts make it. */
@@ -265,19 +292,24 @@ export class Workspace {
       const t = trees[i + 1] && normalizeTree(trees[i + 1]!);
       return t ? [{ root: t, rect: w.rect }] : [];
     });
+    if (select) this.selection = { id: select };
+    this.validate(this.selection);
+    this.emit();
+  }
+
+  /** Select `sel`, or something valid if it isn't (anymore); drop maximizations that aren't. */
+  private validate(sel: Selection): void {
     const valid = (s: Selection | null) => {
       const n = s && this.node(s.id);
       if (!n) return null;
       return s.range && (!isSplit(n) || s.range[1] >= n.children.length) ? { id: s.id } : s;
     };
-    if (select) this.selection = { id: select };
-    this.selection = valid(this.selection) ?? { id: panes(this.root)[0].id };
+    this.selection = valid(sel) ?? { id: panes(this.root)[0].id };
     // Maximization only applies to the main tree.
     const validMain = (s: Selection | null) => (s && this.inMain(s.id) ? valid(s) : null);
     this.maximized = validMain(this.maximized);
     this.maxHistory = this.maxHistory.map(validMain);
     this.selectImpl(this.selection, false);
-    this.emit();
   }
 
   /**
@@ -302,10 +334,43 @@ export class Workspace {
   private recording = 0;
   /** Kind of the latest recorded step: consecutive resizes of one splitter coalesce. */
   private lastKind: string | null = null;
+  /** Host changes made during the user action being recorded: replayed on its snapshot. */
+  private hostDuring: HostFn[] = [];
+  /** Splitter resizes in progress: their snapshots are rebased like the stacks'. */
+  private resizing = new Set<ResizeToken>();
+  /**
+   * Whether closing is an undo step. If not (false), a closed tab is gone for good: its
+   * removal is a host change (see `hostChange`), which undo can't bring back.
+   */
+  undoableClose = true;
 
   /** What counts as "the layout": trees, tabs and sizes; not the active tabs nor rects. */
-  private layoutKey(): string {
-    return JSON.stringify(this.trees(), (k, v) => (k === "active" ? undefined : v));
+  private layoutKey(trees: LayoutNode[] = this.trees()): string {
+    return JSON.stringify(trees, (k, v) => (k === "active" ? undefined : v));
+  }
+
+  /**
+   * A change that the host makes, not the user (e.g. a cell some process created, or one whose
+   * process ended): it is not an undo step, and **undo never reverts it**. `fn` runs on the
+   * current trees like `change`'s, then again on every undo and redo snapshot, so that they
+   * include it too (it must only depend on the forest it's given). A snapshot it can't apply to
+   * (`fn` returns false, or empties the main tree) is dropped, along with all the older ones.
+   * `replay` (default: `fn`) is what runs on the snapshots, if it should differ (e.g. without
+   * moving the focus). Returns whether it changed the current trees.
+   */
+  hostChange(fn: HostFn, select?: () => string | undefined, replay: HostFn = fn): boolean {
+    const { trees, value } = inForest(structuredClone(this.trees()), fn);
+    if (value === false || !trees[0]) return false;
+    this.setTrees(trees, this.floating, select?.());
+    if (this.recording > 0) this.hostDuring.push(replay);
+    for (const stack of [this.undoStack, this.redoStack])
+      for (let i = stack.length - 1; i >= 0; i--)
+        if (!rebase(stack[i], replay)) {
+          stack.splice(0, i + 1);
+          break;
+        }
+    for (const t of this.resizing) if (!rebase(t.before, replay)) this.resizing.delete(t);
+    return true;
   }
 
   private pushUndo(before: Snapshot, kind: string): void {
@@ -322,36 +387,50 @@ export class Workspace {
 
   private restoreSnapshot(snap: Snapshot): void {
     const s = structuredClone(snap);
+    // What tabs show (status, titles…) is the host's: it stays as it is now.
+    const now = new Map<string, Tab>();
+    for (const t of this.trees()) for (const tab of allTabs(t)) now.set(tab.id, tab);
+    for (const t of snapshotTrees(s))
+      for (const tab of allTabs(t)) {
+        const cur = now.get(tab.id);
+        if (cur) for (const f of TAB_META) cur[f] === undefined ? delete tab[f] : ((tab as any)[f] = cur[f]);
+      }
     Object.assign(this, { root: s.root, floating: s.floating, maximized: s.maximized, maxHistory: s.maxHistory, lastPane: s.lastPane });
-    this.selectImpl(s.selection, false);
+    this.validate(s.selection); // (host changes may have removed what it had selected)
     this.expandStack = s.expandStack; // after selectImpl, which clears it
     this.emit();
   }
 
   /**
    * Run a user action, recording the state before it if it changes the layout. Nested
-   * actions record once (the outermost).
+   * actions record once (the outermost). Host changes meanwhile apply to that state too.
    */
   private record<T>(fn: () => T): T {
     if (this.recording > 0) return fn();
     const before = this.snapshot();
-    const key = this.layoutKey();
+    this.hostDuring = [];
     this.recording++;
     try {
       return fn();
     } finally {
       this.recording--;
-      if (this.layoutKey() !== key) this.pushUndo(before, "action");
+      const ok = this.hostDuring.every((f) => rebase(before, f));
+      this.hostDuring = [];
+      if (ok && this.layoutKey() !== this.layoutKey(snapshotTrees(before))) this.pushUndo(before, "action");
     }
   }
 
   /** Splitter resizes: consecutive resizes of the same splitter (`key`) are one step. */
-  beginResize(key: string): { key: string; before: Snapshot; layout: string } {
-    return { key, before: this.snapshot(), layout: this.layoutKey() };
+  beginResize(key: string): ResizeToken {
+    const token = { key, before: this.snapshot() };
+    this.resizing.add(token);
+    return token;
   }
 
-  endResize(token: { key: string; before: Snapshot; layout: string }): void {
-    if (this.layoutKey() === token.layout) return;
+  endResize(token: ResizeToken): void {
+    // (Gone: a host change made its snapshot unusable.)
+    if (!this.resizing.delete(token)) return;
+    if (this.layoutKey() === this.layoutKey(snapshotTrees(token.before))) return;
     const kind = `resize:${token.key}`;
     if (this.lastKind === kind && this.undoStack.length) this.redoStack = [];
     else this.pushUndo(token.before, kind);
@@ -479,8 +558,42 @@ export class Workspace {
     return !!this.placeDrop(spec, what);
   }
 
+  /**
+   * Like `place`, but as a host change (see `hostChange`): not an undo step, and never undone.
+   * The focus stays. Returns the pane holding it, or null.
+   */
+  hostPlace(spec: PlaceSpec, what: Placeable): string | null {
+    const target = this.placeTarget(spec);
+    const subject = target && this.subjectOf(what);
+    return subject ? this.hostDrop(subject, target!) : null;
+  }
+
+  /**
+   * A drop, as a host change (see `hostChange`): not an undo step, and never undone. The focus
+   * stays. Returns the pane holding what was dropped, or null if the drop is invalid.
+   */
+  hostDrop(subject: DragSubject, target: DropTarget): string | null {
+    if (!this.tryDrop(subject, target)) return null;
+    let paneId: string | null = null;
+    const ok = this.hostChange((forest) => {
+      // (A new node goes into every snapshot: a copy of it each time.)
+      const s = subject.kind === "external" ? { ...subject, node: structuredClone(subject.node) } : subject;
+      const r = applyDropRaw(forest, s, target);
+      if (!r) return false;
+      paneId ??= r.paneId;
+    });
+    return ok ? paneId : null;
+  }
+
   /** The drop `place` makes (computed, not committed). */
   private placeDrop(spec: PlaceSpec, what: Placeable): ForestResult | null {
+    const target = this.placeTarget(spec);
+    const subject = target && this.subjectOf(what);
+    return (subject && this.tryDrop(subject, target!)) || null;
+  }
+
+  /** Where `place` drops (see `place`). */
+  private placeTarget(spec: PlaceSpec): DropTarget | null {
     const from = this.selection.id;
     const r = spec.base === undefined ? { id: from, last: from } : this.walk(from, spec.base);
     let target: DropTarget | null = null;
@@ -498,8 +611,7 @@ export class Workspace {
         target = { kind: "side", targetId: (a ?? idx.node(r.last)!).id, side };
       }
     }
-    const subject = target && this.subjectOf(what);
-    return (subject && this.tryDrop(subject, target!)) || null;
+    return target;
   }
 
   // -------------------------------------------------------------------------
@@ -710,8 +822,10 @@ export class Workspace {
   private leaveComplex(tabId: string): void {
     const ft = this.findTab(tabId);
     if (!ft || complexAt(ft.pane, ft.index).tabs.length < 2) return;
-    this.change((forest) => {
-      const f = findTab(forest, tabId)!;
+    this.closeChange((forest) => {
+      const f = findTab(forest, tabId);
+      // (Not merged there, in history: nothing to do.)
+      if (!f || complexAt(f.pane, f.index).tabs.length < 2) return;
       const c = complexAt(f.pane, f.index);
       const tab = f.pane.tabs[f.index];
       const active = f.pane.tabs[f.pane.active];
@@ -763,7 +877,7 @@ export class Workspace {
     const path = (tree && pathTo(tree, was.id)) ?? [];
     const removed =
       closed.length > 0 &&
-      this.change((forest) => {
+      this.closeChange((forest) => {
         for (const id of closed) {
           const ft = findTab(forest, id);
           if (!ft) continue;
@@ -837,22 +951,29 @@ export class Workspace {
    */
   private remove(op: CloseOp): boolean {
     const next = this.hasFocus(op) ? this.focusAfterClose(op) : null;
-    return this.change(
+    const del = (forest: SplitNode) => {
+      if (op.kind === "pane") return removeNode(forest, op.id);
+      const ft = findTab(forest, op.id);
+      if (!ft) return false;
+      ft.pane.tabs.splice(ft.index, 1);
+      if (ft.index < ft.pane.active || ft.pane.active >= ft.pane.tabs.length) ft.pane.active = Math.max(0, ft.pane.active - 1);
+    };
+    return this.closeChange(
       (forest) => {
-        if (op.kind === "pane") {
-          if (!removeNode(forest, op.id)) return false;
-        } else {
-          const ft = findTab(forest, op.id);
-          if (!ft) return false;
-          ft.pane.tabs.splice(ft.index, 1);
-          if (ft.index < ft.pane.active || ft.pane.active >= ft.pane.tabs.length) ft.pane.active = Math.max(0, ft.pane.active - 1);
-        }
+        if (del(forest) === false) return false;
         const a = next?.activate;
         const p = a && find(forest, a.paneId)?.node;
         if (p?.type === "pane") p.active = Math.max(0, p.tabs.findIndex((t) => t.id === a!.tabId));
       },
       () => next?.select,
+      // (Elsewhere in history, it may not be there anymore: nothing to remove, no harm.)
+      (forest) => void del(forest),
     );
+  }
+
+  /** A change that a close makes: an undo step, or a host change (see `undoableClose`). */
+  private closeChange(fn: HostFn, select?: () => string | undefined, replay: HostFn = fn): boolean {
+    return this.undoableClose ? this.change(fn, select) : this.hostChange(fn, select, replay);
   }
 
   private findTab(tabId: string) {

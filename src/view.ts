@@ -144,6 +144,8 @@ export class View implements DndHost {
   /** Renderers' `attached` calls, for after the new tree is attached. */
   private pendingAttach: (() => void)[] = [];
   private renderingNow = false;
+  /** A render was asked for during one: do it again after. */
+  private renderAgain = false;
   /** The latest press on a cell's bar, to tell a double click (see `resizeCell`). */
   private lastBarPress: { id: string; t: number } | null = null;
   /** Last known scroll position of each scroll split / tab scroller, by node id. */
@@ -323,13 +325,23 @@ export class View implements DndHost {
   // Rendering
 
   render(): void {
-    this.renderingNow = true;
-    this.pendingAttach = [];
-    try {
-      this.renderNow();
-    } finally {
-      this.renderingNow = false;
+    // Asked for during a render (e.g. by a focus handler, as moving a focused element
+    // re-focuses it): once it's done, not within it (its sweep would drop what the inner one
+    // placed).
+    if (this.renderingNow) {
+      this.renderAgain = true;
+      return;
     }
+    do {
+      this.renderAgain = false;
+      this.renderingNow = true;
+      this.pendingAttach = [];
+      try {
+        this.renderNow();
+      } finally {
+        this.renderingNow = false;
+      }
+    } while (this.renderAgain);
   }
 
   private renderNow(): void {
@@ -1250,7 +1262,14 @@ function move(parent: HTMLElement, node: HTMLElement): void {
   const editable = inside && !field && (a as HTMLElement).isContentEditable ? (a as HTMLElement) : null;
   const caret = field && ([field.selectionStart, field.selectionEnd] as const);
   const sel = document.getSelection();
-  const ranges = editable && sel ? Array.from({ length: sel.rangeCount }, (_, i) => sel.getRangeAt(i)) : [];
+  // (As boundary points, not the live ranges: moving collapses those.)
+  const ranges =
+    editable && sel
+      ? Array.from({ length: sel.rangeCount }, (_, i) => {
+          const r = sel.getRangeAt(i);
+          return [r.startContainer, r.startOffset, r.endContainer, r.endOffset] as const;
+        })
+      : [];
   moveRaw(parent, node);
   if (field && caret) {
     field.blur();
@@ -1264,7 +1283,12 @@ function move(parent: HTMLElement, node: HTMLElement): void {
     editable.blur();
     editable.focus({ preventScroll: true });
     sel?.removeAllRanges();
-    for (const r of ranges) sel?.addRange(r);
+    for (const [sc, so, ec, eo] of ranges) {
+      const r = document.createRange();
+      r.setStart(sc, so);
+      r.setEnd(ec, eo);
+      sel?.addRange(r);
+    }
   }
 }
 

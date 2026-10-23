@@ -146,6 +146,98 @@ for (const [a, b] of [["swapUp", "swapDown"], ["swapLeft", "swapRight"], ["swapR
   ws.run("undo");
   check("undo close tab", nTabs() === n0);
 }
+// host changes: not undo steps, and undo never reverts them
+{
+  const ws = new Workspace(row([pane(["A"]), pane(["B"]), pane(["C"])]));
+  const titles = () => panes(ws.root).map((p) => p.tabs.map((t) => t.title).join("+")).join(",");
+  const tabOf = (title) => panes(ws.root).flatMap((p) => p.tabs).find((t) => t.title === title);
+  const addTo = (title, newTitle) => (forest) => {
+    const p = panes(forest).find((p) => p.tabs.some((t) => t.title === title));
+    if (!p) return false;
+    p.tabs.push({ id: `host-${newTitle}`, title: newTitle });
+  };
+  ws.run("swapRight"); // A B C -> B A C
+  check("swapped", titles() === "B,A,C");
+  ws.hostChange(addTo("C", "out"));
+  check("host change applied", titles() === "B,A,C+out");
+  ws.run("undo");
+  check(`undo reverts the swap, keeps the host's tab: ${titles()}`, titles() === "A,B,C+out");
+  ws.run("redo");
+  check(`redo keeps it too: ${titles()}`, titles() === "B,A,C+out");
+  ws.run("undo");
+  ws.hostChange(addTo("C", "more"));
+  ws.run("undo");
+  check("a host change alone is not an undo step", titles() === "A,B,C+out+more");
+  // status updates: not reverted by undo, even when made directly (not as host changes)
+  ws.run("swapRight");
+  tabOf("out").status = "done";
+  ws.run("undo");
+  check("undo keeps the current status", tabOf("out").status === "done" && titles() === "A,B,C+out+more");
+  // a host change that can't apply to an old snapshot: it and older ones are dropped
+  ws.run("swapRight"); // B A C
+  ws.run("swapRight"); // B C A
+  const gone = panes(ws.root).find((p) => p.tabs[0].title === "B").tabs[0].id;
+  ws.hostChange((forest) => {
+    const p = panes(forest).find((p) => p.tabs.some((t) => t.id === gone));
+    if (!p) return false;
+    p.tabs.splice(0, 1);
+  });
+  check(`host removed B: ${titles()}`, titles() === "C+out+more,A");
+  ws.run("undo");
+  check(`undo still works after it: ${titles()}`, titles() === "A,C+out+more");
+  // a host change during a user action (e.g. a hook): the step still undoes the action alone
+  ws.record(() => { ws.run("swapLeft"); ws.hostChange(addTo("A", "mid")); });
+  ws.run("undo");
+  check(`host change during an action survives its undo: ${titles()}`, titles().includes("mid"));
+}
+// a host change that needs what a user action made: older snapshots can't take it, so they go
+{
+  const ws = new Workspace(row([pane(["C"]), pane(["D"])]));
+  const titles = () => panes(ws.root).map((p) => p.tabs.map((t) => t.title).join("+")).join(",");
+  ws.run("swapRight"); // D C
+  const [d, c] = panes(ws.root);
+  ws.commitDrop(applyDropForest(ws.trees(), { kind: "tab", tabId: d.tabs[0].id }, { kind: "tab", paneId: c.id, index: 1 }));
+  check(`D moved into C's pane: ${titles()}`, titles() === "C+D");
+  ws.hostChange((forest) => {
+    const p = panes(forest).find((p) => p.tabs.length === 2);
+    if (!p) return false;
+    p.tabs.push({ id: "host-x", title: "x" });
+  });
+  check(`host change applied: ${titles()}`, titles() === "C+D+x");
+  ws.run("undo");
+  check(`no step left to undo (the older ones couldn't take it): ${titles()}`, titles() === "C+D+x");
+}
+// hostPlace: placing as the host (not undone; the focus stays)
+{
+  const ws = new Workspace(row([pane(["A"]), pane(["B"])]));
+  const titles = () => panes(ws.root).map((p) => p.tabs.map((t) => t.title).join("+")).join(",");
+  const a = panes(ws.root)[0].id;
+  ws.run("swapRight"); // B A
+  const sel = ws.selection.id;
+  const p1 = ws.hostPlace({ split: "tab", base: [{ id: a }, "left"], force: true }, { id: "h1", title: "x" });
+  check(`into the left neighbour's tabs: ${titles()}`, titles() === "B+x,A" && p1 === panes(ws.root)[0].id);
+  ws.hostPlace({ split: "tab", base: [{ id: panes(ws.root)[0].id }, "left"], force: true }, { id: "h2", title: "y" });
+  check(`no neighbour there: a new pane on that side: ${titles()}`, titles() === "y,B+x,A");
+  check("the focus stays", ws.selection.id === sel);
+  ws.run("undo");
+  check(`undo reverts the swap only: ${titles()}`, titles() === "y,A,B+x");
+}
+// non-undoable closes
+{
+  const ws = new Workspace(row([pane(["A", "A2"]), pane(["B"]), pane(["C"])]));
+  ws.undoableClose = false;
+  const titles = () => panes(ws.root).map((p) => p.tabs.map((t) => t.title).join("+")).join(",");
+  ws.run("swapRight"); // A+A2 B C -> B A+A2 C
+  await ws.closeTab(panes(ws.root)[1].tabs[1].id);
+  check(`closed A2: ${titles()}`, titles() === "B,A,C");
+  ws.run("undo");
+  check(`undo reverts the swap, not the close: ${titles()}`, titles() === "A,B,C");
+  await ws.closePane(panes(ws.root)[2].id);
+  ws.run("redo");
+  check(`redo after closing a pane: ${titles()}`, titles() === "B,A");
+  ws.run("undo");
+  check("nothing brings it back", !titles().includes("C"));
+}
 // groups
 {
   const show = (n) => (n.type === "pane" ? n.tabs.map((t) => (t.group ? `${t.title}{${show(t.group.children[0])}}` : t.title)).join("+") : `${n.type}(${n.children.map(show).join(", ")})`);

@@ -396,7 +396,8 @@ function detachTabs(d: { pane: PaneNode; index: number; tabs: Tab[] }): number {
 }
 
 /** Works on the forest in place. Returns where the dragged thing went, or null. */
-function applyDropRaw(root: SplitNode, subject: DragSubject, target: DropTarget): { paneId: string; floated?: PaneNode } | null {
+/** Apply a drop in place, to a forest (as `inForest` gives). Null if invalid. */
+export function applyDropRaw(root: SplitNode, subject: DragSubject, target: DropTarget): { paneId: string; floated?: PaneNode } | null {
   if (wouldNestInItself(root, subject, target)) return null;
   if (target.kind === "side") {
     const t = find(root, target.targetId)?.node;
