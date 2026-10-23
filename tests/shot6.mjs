@@ -3,7 +3,7 @@ const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1300, height: 800 }, deviceScaleFactor: 2 });
 page.on("pageerror", (e) => console.log("PAGEERROR", e.message));
 const paneBox = (t) => page.locator(".carreau-pane", { has: page.locator(".carreau-tab", { hasText: new RegExp(`^${t}$`) }) }).boundingBox();
-const active = () => page.evaluate(() => { const d = window.view.drag; return `hover=${d.hoverPane} active=${d.active ? d.active.target.kind + ":" + d.active.ownerId : "none"} across=${d.near?.across.length ?? "-"}`; });
+const active = () => page.evaluate(() => { const d = window.view.drag; return `hover=${d.hoverPane} active=${d.active ? d.active.target.kind + ":" + d.active.ownerId : "none"}`; });
 async function run(example, tab, target, dx, shot, clip, extra = []) {
   await page.goto("http://localhost:5317/?example=" + encodeURIComponent(example));
   const t = await page.locator(".carreau-tab", { hasText: new RegExp(`^${tab}$`) }).boundingBox();

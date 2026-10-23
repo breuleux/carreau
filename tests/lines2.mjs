@@ -2,7 +2,7 @@ import { chromium } from "playwright";
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1300, height: 800 }, deviceScaleFactor: 2 });
 const paneBox = (t) => page.locator(".carreau-pane", { has: page.locator(".carreau-tab", { hasText: new RegExp(`^${t}$`) }) }).boundingBox();
-const st = () => page.evaluate(() => { const d = window.view.drag; return d.near ? `${d.near.side}: ${d.near.levels.map((c) => c.target.kind + ":" + window.ws.node(c.target.targetId ?? c.target.splitId)?.type).join(", ")} | across ${d.near.across.length}` : "no line"; });
+const st = () => page.evaluate(() => { const d = window.view.drag; return d.near ? `${d.near.side}: ${d.near.levels.map((c) => c.target.kind + ":" + window.ws.node(c.target.targetId ?? c.target.splitId)?.type).join(", ")}` : "no line"; });
 async function probe(ex, tab, target, dx, shot, clip) {
   await page.goto("http://localhost:5317/?example=" + encodeURIComponent(ex));
   const t = await page.locator(".carreau-tab", { hasText: new RegExp(`^${tab}$`) }).boundingBox();

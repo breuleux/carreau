@@ -396,6 +396,7 @@ The hovered pane is the first `.carreau-pane` under the cursor, in the main tree
 * Pitfall: when the cursor is over a splitter gap, or anywhere inside the workspace that is not a pane, **keep the previously hovered pane**. Otherwise indicators flicker off while crossing borders.
   * This includes the **gaps between a group's parts**. There, the hit test finds the holder's body, and that must count as a gap, not as hovering the whole holder.
 * Lines, tab dots and zones are rebuilt when the hovered pane changes, and when anything scrolls (see [Scroll splits](#scroll-splits)).
+* **A scroll split's empty space** (its scroller, where there's no cell: all of an empty prompt column, the space above a sticky column's cells, the gaps between cells) **takes drops itself**: there, no pane is hovered (not even the previous one), and the drop inserts into the split where the cursor is along its axis: before the first cell whose middle is past the cursor (an empty one: as its first cell). Preview: the empty area (`Choice.rect`); at an end, the end cell's edge third; between two cells, the straddle. A line whose hit area reaches into the space (the hovered pane's) still takes precedence. (`spaceChoice`, cached by split and index.)
 
 ### Drop targets (model)
 
@@ -490,7 +491,7 @@ For each side S of P, working within **P's own tree** (main or window):
 
 A border line is shown **only while the cursor is over it**: the cursor must be within the line's band across the edge. Nothing is drawn while merely approaching a border. If two bands contain the cursor (at a corner), pick the side whose border is nearest.
 
-**Geometry**: the line is 8px thick.
+**Geometry**: the line is 5px thick; its hit area reaches 8px inward (easier to aim at than it looks).
 
 * At the edge of the workspace or of a window, it lies inside P along the edge.
 * On a straddling side, P's half runs from the middle of the splitter gap inwards into P.
@@ -501,7 +502,7 @@ A border line is shown **only while the cursor is over it**: the cursor must be 
 * Cut the line at every choice's span endpoints. Each stretch is covered by some set of choices, ordered outermost first.
 * A stretch with one choice is drawn solid.
 * A stretch with several choices is drawn as 18px dashes cycling through them: `levels[k mod n]` for `k = floor(v / 18)`.
-  * Anchor dashes to **absolute** coordinates, so they don't shift as the line changes and so the two halves of a border line up.
+  * Anchor dashes to **absolute** coordinates, so they don't shift as the line changes.
   * Leave a **1px visual gap** at the end of each dash. Hit-testing ignores the gap.
 * **Selecting**: the active choice is the dash under the cursor's position along the edge.
 * Because P's span lies inside the span of every node on the line, P's stretch shows all of its group choices dashed. Stretches beyond P only show the outer ones.
@@ -510,17 +511,10 @@ A border line is shown **only while the cursor is over it**: the cursor must be 
 **Coloring**:
 
 * Colors go by **level index** within the line, outermost first. Level 0 is **light grey** (chroma 0). Deeper levels get **low-saturation** hues (chroma 0.06), only so that the dashes of several possible insertions stand apart. A line with a single choice is therefore plain grey.
-* Each choice's rect is filled with a `userSpaceOnUse` linear gradient across the band: bright at the border (L 0.86, or 0.97 when active), darker away from it (L 0.58, or 0.72 when active).
-* Alpha is 0.75, or 1 when active.
-* Give each gradient a unique id.
-
-**The other side** (easier homing): on a straddling side, also draw the border as seen from each pane Q across it, on Q's half of the gap.
-
-* The candidates are the panes inside the sibling on the far side whose facing edge touches that sibling's edge.
-* For each Q, build Q's line for the opposite side, without recursing into its own other side, and clip it to Q's visible extent along the edge. The same "leave out Q's own boundary" rule applies.
-* Hovering follows the pane under the cursor, so crossing the border swaps which half is "ours". Only the hovered pane's half triggers.
-* Choices with the **same drop target** on both halves (in practice the shared `between`) touch in the middle. Every other choice backs off 1px from the middle, leaving a visible gap.
-* Shared choices **highlight on both halves at once** when active. Compare choices by their target, not by object identity.
+* Each choice's rect is filled with **one flat color** (no gradient): L 0.68, or 0.9 when active (dark mode; light mode mirrors it).
+* Alpha is 0.8, or 1 when active.
+* **The cursor's side** of a border is drawn: on a straddling side, P's half, with all its choices. (The panes across it get theirs when hovered: crossing the border swaps which half shows.)
+* But the **insertion between the two siblings is the same from either side**: it's also drawn on the far half of the gap, along the far sibling (`SideLine.mirror`), so that both halves show it, touching in the middle, and light up together. Only that one: the far side's other choices (its own groups) show when it's hovered.
 
 ### Tab dots
 
@@ -576,11 +570,13 @@ Tabs are **cells**. A cell has HTML parts (**content**, rendered by the host; **
   * **Everywhere else**, the tab bar always shows and `showLong = false`.
   * With the tab bar hidden, a single tab shows no header. Exception: **a pane whose only tab is a group always shows its tab bar**, since a group is a container whose name matters (and it must be editable in place right after grouping).
   * `showLong = true`: the active cell's `long` is shown in a strip at the top of the cell. Its background is tinted from the accent by default; the host's HTML can style it otherwise.
-* **Handles.** With no tab bar, the top strip is the pane's handle: drag it to move the pane. A cell with no tab bar and no `long` gets an empty, slim strip just to have one. Focus is shown by the cell's border, in its accent.
+* **Handles.** With no tab bar, the top strip is the pane's handle: drag it to move the pane. A cell with no tab bar and no `long` gets an empty, slim strip just to have one. (No accent border: in a scroll split, the cell's bar shows the focus.)
 * **Cells of scroll splits** (a scroll split's direct children: `ctx.cellOf`) are panes, or splits of panes. Their panes (the cell itself, or the panes in the split, through splits but not through group holders, which are cells of their own) look like buche's echo-box (`.carreau-scrollcell`):
   * An **accent bar** on the left (in the active tab's accent), with a **status circle** on top: hollow, filled when `done`, red on `error`, blinking when `unresponsive`. The card (background, border) is drawn right of it (a `::before`), so the bar sits on the scroll split's panel. The bar widens on the selected cell.
   * In a **scroll-column, the bar resizes the cell** (for a split cell, every bar in it resizes the same cell, so they stay in sync): dragging outward (up from its top half, down from its bottom half) grows it, inward shrinks it, and **the dragged edge stays put** on screen (the scroller's position absorbs the drift: measured, not assumed, so it also works in sticky splits). The height is **layout** (the cell's `size`, a pane's or a split's): undoable (like a splitter: `beginResize`/`endResize`), serialized, ignored outside a scroll-column. A sized cell scrolls its content. Double-click the bar: back to the natural height. (In a scroll-row, the bar doesn't resize: a cell's height is the row's.)
   * A **close button** (×) at the top right closes the cell (`closePane`), unless it's the last pane, or is closing (its spinner shows instead).
+  * The `long` strip reaches left **behind the bar's circle** (a hollow circle is filled with the strip's tint), and the bar is drawn over it.
+  * **No accent border** on the selected cell (the widened bar shows it). In navigation mode, the selection outline (and a secondary focus's dotted one) is an overlay drawn **over** everything in the cell, its strip included (`::after`), rather than the pane's `outline`, which the strip would cover.
 * **Adding a tab to a pane with no tab bar.** There are no tab bar dots to drop on, so the center of such a pane offers a **tab icon** next to the swap icon, as a `tab` target appending to it. Its preview outlines the pane.
 * **Nested panes and presses.** Panes nest, inside group tabs. A pane's "select on press" handler must only act when it is the **innermost** pane under the pointer; the press bubbles through the holders too, and the outermost would win otherwise.
 
@@ -862,8 +858,8 @@ In a `scroll-column`, children take their **natural height** (their content deci
 |---|---|
 | Drag start threshold | 5px |
 | Splitter / gap | 4px; 30px minimum per neighbour |
-| Border line thickness | 8px |
-| Dash length / gap between dashes / gap between halves | 18px / 1px / 1px |
+| Border line thickness / hit depth | 5px / 8px |
+| Dash length / gap between dashes | 18px / 1px |
 | Swap and cloud icon radius | 22px |
 | Tab dot radius | 3.5px, 5.5px when active |
 | Handle area minimum in the header | 24px |

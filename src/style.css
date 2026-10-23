@@ -222,8 +222,6 @@
   background: color-mix(in oklch, var(--cell-accent) 24%, var(--carreau-pane-bg));
   border-bottom: 1px solid color-mix(in oklch, var(--cell-accent) 40%, var(--carreau-pane-bg));
 }
-/* a cell with no tab bar: its border shows focus, in its accent */
-.carreau-pane.no-tabbar.selected { border-color: color-mix(in oklch, var(--focus-accent, #8a8d96) 70%, transparent); }
 
 /* editing a tab's title in place */
 .carreau-tab-edit {
@@ -270,11 +268,19 @@
   content: ""; position: absolute; inset: 0 0 0 16px; z-index: -1; pointer-events: none;
   background: var(--carreau-pane-bg); border: 1px solid light-dark(#d3d6de, #2c2e38); border-radius: 4px;
 }
-.carreau-pane.no-tabbar.carreau-scrollcell.selected::before { border-color: color-mix(in oklch, var(--focus-accent, #8a8d96) 70%, transparent); }
-.carreau-scrollcell .carreau-long { border-radius: 3px 3px 0 0; padding-right: 28px; }
+/* the long strip reaches behind the bar's circle (the body's padding is 10px, the bar 16px) */
+.carreau-scrollcell .carreau-long { margin-left: -26px; padding-left: 26px; border-radius: 3px 3px 0 0; padding-right: 28px; }
+/* navigation mode: the selection outline (and the dotted secondary one) over everything in
+   the cell, its long strip included */
+.carreau.nav-mode .carreau-pane.carreau-scrollcell.selected, .carreau.nav-mode .carreau-pane.carreau-scrollcell.secondary { outline: none; }
+.carreau.nav-mode .carreau-scrollcell.selected::after, .carreau.nav-mode .carreau-scrollcell.secondary::after {
+  content: ""; position: absolute; inset: 0; z-index: 3; pointer-events: none; border-radius: 4px;
+  border: 1px solid light-dark(#3a3c43, #d6d8de);
+}
+.carreau.nav-mode .carreau-scrollcell.secondary:not(.selected)::after { border: 1px dotted light-dark(#8a8d98, #80838d); }
 /* a cell with a height of its own: its panes scroll their content */
 .carreau-pane.carreau-cell-sized > .carreau-body, .carreau-cell-sized .carreau-pane > .carreau-body { overflow: auto; }
-.carreau-gutter { position: absolute; left: 0; top: 0; bottom: 0; width: 16px; touch-action: none; }
+.carreau-gutter { position: absolute; left: 0; top: 0; bottom: 0; width: 16px; z-index: 2; touch-action: none; }
 .carreau-gutter.resizes { cursor: ns-resize; }
 .carreau-gutter::before {
   content: ""; position: absolute; left: 50%; transform: translateX(-50%); top: 12px; bottom: 6px; width: 2px; border-radius: 1px;
@@ -282,7 +288,9 @@
 }
 .carreau-gutter-status {
   position: absolute; left: 50%; top: 7px; transform: translateX(-50%); width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box;
-  border: 2px solid var(--focus-accent, #8a8d96); background: var(--carreau-scroll-bg, #eef0f4);
+  border: 2px solid var(--focus-accent, #8a8d96);
+  /* hollow: the long strip's tint (it sits on the strip) */
+  background: color-mix(in oklch, var(--focus-accent, #8a8d96) 24%, var(--carreau-pane-bg));
 }
 .carreau-scrollcell[data-status="done"] .carreau-gutter-status { background: var(--focus-accent, #8a8d96); }
 .carreau-scrollcell[data-status="error"] .carreau-gutter-status { border-color: #e5484d; background: #e5484d; }

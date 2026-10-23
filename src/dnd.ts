@@ -26,7 +26,6 @@ import {
   intersect,
   isSplit,
   kind,
-  opposite,
   paneDisplay,
   panes,
   shape,
@@ -63,6 +62,8 @@ export interface Choice {
   straddle?: [string, string];
   /** For insertions at the start/end of a scroll split: the end child, and which side. */
   edge?: { nodeId: string; side: Side };
+  /** An explicit preview (e.g. an empty scroll split's area). */
+  rect?: Rect;
 }
 
 /** The drop line along one side of the hovered pane. */
@@ -77,8 +78,12 @@ export interface SideLine {
   hit: [number, number];
   /** The line borders the gap between two siblings. */
   straddles: boolean;
-  /** The same border as seen from the panes on the other side, each clipped to its stretch. */
-  across: { line: SideLine; clip: [number, number] }[];
+  /**
+   * There: the insertion between them, which is the same seen from either side. It's also
+   * drawn on the far half of the gap, along the far sibling (`span`), so that both halves
+   * show it, and light up together.
+   */
+  mirror?: { choice: Choice; span: [number, number] };
   /** the hovered pane's edge coordinate on that side */
   edge: number;
 }
@@ -121,15 +126,18 @@ export interface DragState {
   inCenter: boolean;
   near: SideLine | null;
   active: Choice | null;
+  /** Over a scroll split's empty space: inserting there (cached: computing a drop is costly). */
+  space: { key: string; choice: Choice | null } | null;
   lastEvent?: PointerEvent;
 }
 
 const SVGNS = "http://www.w3.org/2000/svg";
 /** Line thickness; dash length and gap; gap between a border's two halves. */
-const LINE = 8;
+const LINE = 5;
+/** How far inward a line can be hit (more than it's thick: easier to aim at). */
+const LINE_HIT = 8;
 const DASH = 18;
 const DASH_GAP = 1;
-const HALF_GAP = 1;
 /** How far outward a scroll split's start/end separator can be hit. */
 const EDGE_REACH = 5;
 /** At a complex's edge: how far inside it its join dot is, from the gap's plain dot. */
@@ -203,7 +211,7 @@ export class DragDrop {
     document.body.append(ghost);
     sourceEl.classList.add("carreau-drag-source");
     this.host.el.classList.add("is-dragging");
-    this.state = { subject, ghost, sourceEl, win, hoverPane: null, lines: [], tabBar: null, zones: null, inCenter: false, near: null, active: null };
+    this.state = { subject, ghost, sourceEl, win, hoverPane: null, lines: [], tabBar: null, zones: null, inCenter: false, near: null, active: null, space: null };
   }
 
   end(commit: boolean): void {
@@ -234,9 +242,16 @@ export class DragDrop {
     const px = ev.clientX - base.left;
     const py = ev.clientY - base.top;
 
-    // Which pane is under the cursor? Over gaps, keep the current one.
+    // Which pane is under the cursor? Over gaps, keep the current one. Over a scroll split's
+    // empty space (its scroller, where there's no cell), none: the space itself takes drops.
     let hover: string | null = null;
+    let space: HTMLElement | null = null;
     for (const el of document.elementsFromPoint(ev.clientX, ev.clientY)) {
+      const inner = (el as HTMLElement).closest?.(".carreau-scroll, .carreau-pane") as HTMLElement | null;
+      if (inner?.classList.contains("carreau-scroll") && host.el.contains(inner)) {
+        space = inner;
+        break;
+      }
       const p = (el as HTMLElement).closest?.(".carreau-pane") as HTMLElement | null;
       if (p && (host.rootEl.contains(p) || host.floatLayer.contains(p))) {
         // The gaps between a group's parts show its holder's body: a gap, not the holder.
@@ -247,7 +262,7 @@ export class DragDrop {
       }
     }
     const R = host.pxRect(this.ws.root.id);
-    if (!hover && d.hoverPane && R && inRect(R, px, py)) hover = d.hoverPane;
+    if (!hover && !space && d.hoverPane && R && inRect(R, px, py)) hover = d.hoverPane;
     // Still within the current line's hit area (it can reach past the pane): keep the pane.
     if (d.hoverPane && hover !== d.hoverPane && d.near && inLine(d.near, px, py)) hover = d.hoverPane;
     if (hover !== d.hoverPane) {
@@ -261,6 +276,7 @@ export class DragDrop {
     d.near = null;
     d.active = null;
     d.inCenter = false;
+    if (!hover && space) d.active = this.spaceChoice(space, px, py);
     const P = hover ? host.pxRect(hover) : null;
     if (P) {
       // Priority: the border line under the cursor (nearest border at corners), then the
@@ -347,6 +363,43 @@ export class DragDrop {
     return { rect, dots, links };
   }
 
+  /**
+   * Over a scroll split's empty space: insert into it where the cursor is along its axis (an
+   * empty one: as its first cell; else, before the first cell whose middle is past the cursor).
+   */
+  private spaceChoice(scroller: HTMLElement, px: number, py: number): Choice | null {
+    const d = this.state!;
+    const { host } = this;
+    const id = scroller.dataset.scroll ?? scroller.dataset.id!;
+    const n = this.ws.node(id);
+    if (!n || !isSplit(n)) return null;
+    const k = kind(n);
+    const kids = k.lastFixed ? n.children.slice(0, -1) : n.children;
+    const row = k.axis === "row";
+    const index = kids.filter((c) => {
+      const r = host.pxRect(c.id);
+      return r && (row ? px > r.x + r.w / 2 : py > r.y + r.h / 2);
+    }).length;
+    const key = `${id}:${index}`;
+    if (d.space?.key === key) return d.space.choice;
+    const target: DropTarget = { kind: "between", splitId: id, index };
+    const result = this.tryDrop(target);
+    let choice: Choice | null = null;
+    if (result) {
+      const b = host.el.getBoundingClientRect();
+      const sr = scroller.getBoundingClientRect();
+      const [start, end]: Side[] = row ? ["left", "right"] : ["top", "bottom"];
+      // The preview: the empty area; or, at an end, the end cell's edge; between two, the straddle.
+      choice =
+        kids.length === 0 ? { target, result, span: [0, 0], rect: { x: sr.left - b.left, y: sr.top - b.top, w: sr.width, h: sr.height } }
+        : index === 0 ? { target, result, span: [0, 0], edge: { nodeId: kids[0].id, side: start } }
+        : index === kids.length ? { target, result, span: [0, 0], edge: { nodeId: kids[index - 1].id, side: end } }
+        : { target, result, span: [0, 0], straddle: [kids[index - 1].id, kids[index].id] };
+    }
+    d.space = { key, choice };
+    return choice;
+  }
+
   /** The dragged tabs, and their pane: a tab, or a complex's tabs. */
   private draggedTabs(): { pane: PaneNode; tabs: Tab[] } | null {
     const s = this.state!.subject;
@@ -429,7 +482,7 @@ export class DragDrop {
    * insertion between the two. Levels come outermost first. Insertions that are the same
    * (same resulting shape) appear once, innermost; those P's own edge thirds offer don't.
    */
-  private lines(idx: LayoutIndex, paneId: string, onlySide?: Side, withAcross = true): SideLine[] {
+  private lines(idx: LayoutIndex, paneId: string, onlySide?: Side): SideLine[] {
     const { host } = this;
     const P = host.pxRect(paneId);
     const Pvis = host.visRect(paneId);
@@ -475,13 +528,17 @@ export class DragDrop {
       const third = this.zoneSide(pe0, side);
       if (third) seen.add(key(third.result));
       const levels: Choice[] = [];
+      let mirror: SideLine["mirror"];
       if (between) {
         const target: DropTarget = { kind: "between", splitId: between.split.id, index: between.index };
         const result = this.tryDrop(target);
         const sp = vspan((start ? between.after : between.before).id);
         if (result && sp) {
           seen.add(key(result));
-          levels.push({ target, result, span: sp, straddle: [between.before.id, between.after.id] });
+          const choice: Choice = { target, result, span: sp, straddle: [between.before.id, between.after.id] };
+          levels.push(choice);
+          const far = vspan((start ? between.before : between.after).id);
+          if (far) mirror = { choice, span: far };
         }
       }
       const sides: Choice[] = [];
@@ -505,34 +562,16 @@ export class DragDrop {
       // reaches a little outward (the end can be flush with the viewport's).
       const inward = (c: number) => (start ? c - pe : pe - c);
       let line: [number, number] = [0, LINE];
-      let hit = line;
+      let hit: [number, number] = [0, LINE_HIT];
       if (between) {
         const [first, last]: Side[] = sideAxis[side] === "row" ? ["left", "right"] : ["top", "bottom"];
         const aEnd = edge(host.pxRect(between.before.id)!, last);
         const bStart = edge(host.pxRect(between.after.id)!, first);
         const mid = inward((aEnd + bStart) / 2);
         line = [mid, mid + LINE];
-        hit = [inward(start ? aEnd : bStart), line[1]];
-      } else if (levels.some((c) => c.edge)) hit = [-EDGE_REACH, LINE];
-
-      // The same border seen from the panes across it.
-      const acrossLines: SideLine["across"] = [];
-      if (between && withAcross) {
-        const other = start ? between.before : between.after;
-        const otherEdge = edge(host.pxRect(other.id)!, opposite[side]);
-        const extent: [number, number] = [Math.min(...levels.map((c) => c.span[0])), Math.max(...levels.map((c) => c.span[1]))];
-        for (const q of panes(other)) {
-          const Q = host.pxRect(q.id);
-          const Qvis = host.visRect(q.id);
-          if (!Q || !Qvis || Math.abs(edge(Q, opposite[side]) - otherEdge) > 1.5) continue;
-          const qs = span(Qvis, side);
-          const clip: [number, number] = [Math.max(qs[0], extent[0]), Math.min(qs[1], extent[1])];
-          if (clip[1] <= clip[0]) continue;
-          const [l] = this.lines(idx, q.id, opposite[side], false);
-          if (l) acrossLines.push({ line: l, clip });
-        }
-      }
-      out.push({ side, levels, band: line, hit, straddles: !!between, across: acrossLines, edge: pe });
+        hit = [inward(start ? aEnd : bStart), mid + LINE_HIT];
+      } else if (levels.some((c) => c.edge)) hit = [-EDGE_REACH, LINE_HIT];
+      out.push({ side, levels, band: line, hit, straddles: !!between, mirror, edge: pe });
     }
     return out;
   }
@@ -545,7 +584,7 @@ export class DragDrop {
     const { host } = this;
     const svg = host.overlay;
     svg.replaceChildren();
-    if (!d.hoverPane) return;
+    if (!d.hoverPane && !d.active) return;
     const mk = (tag: string, attrs: Record<string, string | number>, parent: Element = svg) => {
       const e = document.createElementNS(SVGNS, tag);
       for (const [k, v] of Object.entries(attrs))
@@ -555,7 +594,6 @@ export class DragDrop {
       parent.append(e);
       return e;
     };
-    const defs = mk("defs", {});
     // The chain links icon, `size` pixels wide, centered.
     const chain = (g: Element, cx: number, cy: number, size: number) => {
       const icon = mk("g", { transform: `translate(${cx - size / 2} ${cy - size / 2}) scale(${size / 16})` }, g);
@@ -572,7 +610,8 @@ export class DragDrop {
         const v = host.visRect(id);
         return r && v ? intersect(r, v) : null;
       };
-      if (c.edge) outline(visible(targetIdOf(t), slice(host.pxRect(c.edge.nodeId)!, c.edge.side, 1 / 3)));
+      if (c.rect) outline(c.rect);
+      else if (c.edge) outline(visible(targetIdOf(t), slice(host.pxRect(c.edge.nodeId)!, c.edge.side, 1 / 3)));
       else if (t.kind === "side") outline(visible(t.targetId, slice(host.pxRect(t.targetId)!, t.side, this.sideShare(t.targetId, t.side))));
       else if (t.kind === "float") outline(host.floatRect(t.paneId));
       else if (t.kind === "swap") {
@@ -637,49 +676,33 @@ export class DragDrop {
       chain(g, link.x, link.y, active ? 13 : 11);
     }
 
-    // The line along the nearest border, plus the same border seen from the other side.
-    // Choices on both sides (the same insertion between two siblings) touch in the middle
-    // and light up together; others keep a gap between the halves.
+    // The line along the nearest border, on the cursor's side (one flat color per level); and
+    // on the far half of the gap, the insertion between the siblings, which is the same from
+    // either side: the halves touch in the middle.
     if (!d.near) return;
+    const line = d.near;
     const key = (c: Choice) => JSON.stringify(c.target);
-    const nearKeys = new Set(d.near.levels.map(key));
-    const acrossKeys = new Set(d.near.across.flatMap(({ line }) => line.levels.map(key)));
-    const shared = (c: Choice) => nearKeys.has(key(c)) && acrossKeys.has(key(c));
     const activeKey = d.active && key(d.active);
     const isActive = (c: Choice) => key(c) === activeKey;
-    let gradients = 0;
-    const drawLine = (line: SideLine, clip?: [number, number]) => {
-      const [b0, b1] = line.band;
-      const fill = new Map(
-        line.levels.map((c, k) => {
-          // Gradient across the line: bright at the border, darker away from it.
-          const active = isActive(c);
-          const [from, to] = sideIsStart[line.side] ? [line.edge + b0, line.edge + b1] : [line.edge - b0, line.edge - b1];
-          const [x1, y1, x2, y2] = sideAxis[line.side] === "row" ? [from, 0, to, 0] : [0, from, 0, to];
-          const id = `carreau-grad-${gradients++}`;
-          const g = mk("linearGradient", { id, gradientUnits: "userSpaceOnUse", x1, y1, x2, y2 }, defs);
-          mk("stop", { offset: 0, "stop-color": levelColor(k, active ? 1 : 0.75, active ? 0.97 : 0.86) }, g);
-          mk("stop", { offset: 1, "stop-color": levelColor(k, active ? 1 : 0.75, active ? 0.72 : 0.58) }, g);
-          return [c, `url(#${id})`];
-        }),
-      );
-      const rect = (v0: number, v1: number, c: Choice) => {
-        if (clip) [v0, v1] = [Math.max(v0, clip[0]), Math.min(v1, clip[1])];
-        if (v1 <= v0) return;
-        const from = line.straddles && !shared(c) ? b0 + HALF_GAP : b0;
-        const r = bandAt(line, from, b1, [v0, v1]);
-        mk("rect", { x: r.x, y: r.y, width: r.w, height: r.h, fill: fill.get(c)!, class: "carreau-indicator" + (isActive(c) ? " active" : "") });
-      };
-      for (const seg of segments(line)) {
-        if (seg.levels.length === 1) rect(seg.from, seg.to, seg.levels[0]);
-        // Alternate dashes, anchored to absolute positions (with a 1px visual gap).
-        else
-          for (let k = Math.floor(seg.from / DASH); k * DASH < seg.to; k++)
-            rect(Math.max(seg.from, k * DASH), Math.min(seg.to, (k + 1) * DASH - DASH_GAP), seg.levels[mod(k, seg.levels.length)]);
-      }
+    const fill = new Map(line.levels.map((c, k) => [c, levelColor(k, isActive(c) ? 1 : 0.8, isActive(c) ? 0.9 : 0.68)]));
+    const [b0, b1] = line.band;
+    const rect = (v0: number, v1: number, c: Choice) => {
+      if (v1 <= v0) return;
+      const r = bandAt(line, b0, b1, [v0, v1]);
+      mk("rect", { x: r.x, y: r.y, width: r.w, height: r.h, fill: fill.get(c)!, class: "carreau-indicator" + (isActive(c) ? " active" : "") });
     };
-    drawLine(d.near);
-    for (const { line, clip } of d.near.across) drawLine(line, clip);
+    if (line.mirror) {
+      const { choice, span: [v0, v1] } = line.mirror;
+      const r = bandAt(line, b0 - (b1 - b0), b0, [v0, v1]);
+      mk("rect", { x: r.x, y: r.y, width: r.w, height: r.h, fill: fill.get(choice)!, class: "carreau-indicator" + (isActive(choice) ? " active" : "") });
+    }
+    for (const seg of segments(line)) {
+      if (seg.levels.length === 1) rect(seg.from, seg.to, seg.levels[0]);
+      // Alternate dashes, anchored to absolute positions (with a 1px visual gap).
+      else
+        for (let k = Math.floor(seg.from / DASH); k * DASH < seg.to; k++)
+          rect(Math.max(seg.from, k * DASH), Math.min(seg.to, (k + 1) * DASH - DASH_GAP), seg.levels[mod(k, seg.levels.length)]);
+    }
   }
 }
 
