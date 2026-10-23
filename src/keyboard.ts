@@ -34,8 +34,10 @@ export type NavAction =
   /** the focus, taller or shorter (its share of a column, or a scroll-column cell's height) */
   | "growHeight"
   | "shrinkHeight"
-  /** a new cell (created by the focused one) into the focused cell's own tabs */
+  /** a new cell (created by the focused one) into the focused cell (as it absorbs it) */
   | "insertInto"
+  /** a new cell (created by the focused one) in a new floating window */
+  | "insertFloat"
   /** a new cell (created by the focused one) beside the focused cell, on that side */
   | `insert${Dir}`
   /** a new cell into the tabs of the cell on that side (or where it would be) */
@@ -467,6 +469,14 @@ export class KeyboardNav {
       case "clear":
         void ws.clear();
         return;
+      case "insertFloat": {
+        // Where the focused cell is (80% of it, centered), or near the workspace's corner.
+        const op = ws.operand();
+        const n = op && !op.range ? ws.node(op.id) : null;
+        const pane = n && (n.type === "pane" ? n.id : ws.descend(n));
+        ws.spawnFloat((pane ? this.view.floatRect(pane) : null) ?? { x: 40, y: 40, w: 420, h: 280 });
+        return;
+      }
       case "insertInto":
         // Into the focused cell's tabs (a split: its most recently focused pane's).
         ws.spawn({ split: "tab" });

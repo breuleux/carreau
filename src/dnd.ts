@@ -120,6 +120,8 @@ export interface DragState {
   /** set when docking a floating window */
   win?: FloatingWindow;
   hoverPane: string | null;
+  /** The hovered pane is hovered through its scroll split's empty space (see `move`). */
+  viaSpace?: boolean;
   lines: SideLine[];
   tabBar: { rect: Rect; dots: TabDot[]; links: TabLink[] } | null;
   zones: Zones | null;
@@ -267,7 +269,8 @@ export class DragDrop {
     const py = ev.clientY - base.top;
 
     // Which pane is under the cursor? Over gaps, keep the current one. Over a scroll split's
-    // empty space (its scroller, where there's no cell), none: the space itself takes drops.
+    // empty space (its scroller, where there's no cell): the scroll split's holder (the pane
+    // showing it), for its border lines; the space itself takes the other drops.
     let hover: string | null = null;
     let space: HTMLElement | null = null;
     for (const el of document.elementsFromPoint(ev.clientX, ev.clientY)) {
@@ -285,14 +288,17 @@ export class DragDrop {
         break;
       }
     }
+    if (space && !hover) hover = this.ws.index().holder(space.dataset.scroll ?? space.dataset.id!)?.id ?? null;
     const R = host.pxRect(this.ws.root.id);
     if (!hover && !space && d.hoverPane && R && inRect(R, px, py)) hover = d.hoverPane;
     // Still within the current line's hit area (it can reach past the pane): keep the pane.
     if (d.hoverPane && hover !== d.hoverPane && d.near && inLine(d.near, px, py)) hover = d.hoverPane;
-    if (hover !== d.hoverPane) {
+    if (hover !== d.hoverPane || !!space !== !!d.viaSpace) {
       d.hoverPane = hover;
+      d.viaSpace = !!space;
       const idx = this.ws.index();
-      d.lines = hover ? this.lines(idx, hover) : [];
+      // (Through empty space, its edge thirds aren't offered: its lines offer its own sides.)
+      d.lines = hover ? this.lines(idx, hover, undefined, !!space) : [];
       d.tabBar = hover ? this.tabBar(hover) : null;
       d.zones = hover ? this.zones(idx, hover) : null;
     }
@@ -314,6 +320,8 @@ export class DragDrop {
         const link = d.tabBar.links.find((l) => px >= l.hit[0] && px <= l.hit[1]);
         const nearest = d.tabBar.dots.reduce<TabDot | null>((a, b) => (!a || Math.abs(b.x - px) < Math.abs(a.x - px) ? b : a), null);
         d.active = link?.choice ?? nearest?.choice ?? null; // nothing if the nearest gap is a no-op
+      } else if (space) {
+        d.active = this.spaceChoice(space, px, py); // (rather than the holder's own zones)
       } else if (d.zones && inRect(d.zones.rect, px, py)) {
         const Z = d.zones;
         const fx = (px - Z.rect.x) / Z.rect.w;
@@ -507,7 +515,7 @@ export class DragDrop {
    * insertion between the two. Levels come outermost first. Insertions that are the same
    * (same resulting shape) appear once, innermost; those P's own edge thirds offer don't.
    */
-  private lines(idx: LayoutIndex, paneId: string, onlySide?: Side): SideLine[] {
+  private lines(idx: LayoutIndex, paneId: string, onlySide?: Side, ownSides = false): SideLine[] {
     const { host } = this;
     const P = host.pxRect(paneId);
     const Pvis = host.visRect(paneId);
@@ -525,7 +533,9 @@ export class DragDrop {
       };
 
       // Walk up: the nodes on the line (innermost first), and the gap to a sibling, if any.
-      const onLine: LayoutNode[] = [];
+      // (`ownSides`: P's own sides too, as line levels, when its edge thirds aren't offered: over
+      // its scroll split's empty space. At the workspace's edges, that's the only way to split.)
+      const onLine: LayoutNode[] = ownSides ? [idx.node(paneId)!] : [];
       let between: { split: SplitNode; index: number; before: LayoutNode; after: LayoutNode } | null = null;
       for (let x: LayoutNode = idx.node(paneId)!; ; ) {
         const e = idx.get(x.id)!;
@@ -550,7 +560,7 @@ export class DragDrop {
       // (Same layout *and sizes*: halving P and taking 1/N of its parent are different drops.)
       const key = (r: ForestResult) => r.trees.map((t) => (t ? shape(t, true) : "-")).join(";");
       const seen = new Set<string>();
-      const third = this.zoneSide(pe0, side);
+      const third = ownSides ? null : this.zoneSide(pe0, side);
       if (third) seen.add(key(third.result));
       const levels: Choice[] = [];
       let mirror: SideLine["mirror"];

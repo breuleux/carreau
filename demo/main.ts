@@ -102,6 +102,7 @@ const navConfig: NavConfig = {
     // in that direction; with Shift, beside the focused cell, on that side.
     KeyI: {
       Enter: "insertInto",
+      KeyF: "insertFloat",
       ArrowLeft: "insertIntoLeft",
       ArrowRight: "insertIntoRight",
       ArrowUp: "insertIntoUp",

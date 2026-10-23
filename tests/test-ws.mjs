@@ -907,6 +907,51 @@ for (const [a, b] of [["swapUp", "swapDown"], ["swapLeft", "swapRight"], ["swapR
   pw.moveMarked();
   check(`to a prompt: cells above it: ${colNode().children.map((c) => (c.type === "prompt" ? "⏎" : c.tabs[0].title)).join(",")}`, colNode().children.map((c) => (c.type === "prompt" ? "⏎" : c.tabs[0].title)).join(",") === "c1,X,Y,⏎");
 }
+// Absorbing: what's put *into* a stream's cell goes into the stream, just after it
+{
+  const t = (x) => ({ id: "t" + x, title: x });
+  const mk = () => new Workspace(row([pane([t("L"), t("L2")]), scrollColumn([pane([t("c1")]), pane([t("c2")]), pane([t("c3")])])]));
+  let ws = mk();
+  const findCol = (n) => (n.type === "scroll-column" ? n : (n.children ?? n.tabs?.flatMap((x) => (x.group ? [x.group] : [])) ?? []).map(findCol).find(Boolean));
+  const colOf = (w) => findCol(w.root);
+  const cells = (w) => colOf(w).children.map((c) => c.tabs.map((x) => x.title).join("+")).join(",");
+  const byTitle = (w, x) => panes(w.root).find((p) => p.tabs.some((y) => y.title === x));
+  ws.lifecycle = { ...ws.lifecycle, spawn: (from) => ({ id: "t" + from.title + "'", title: from.title + "'" }) };
+  ws.select({ id: byTitle(ws, "c2").id });
+  ws.spawn({ split: "tab" });
+  check(`insert into c2 (a cell): a new cell just after it: ${cells(ws)}`, cells(ws) === "c1,c2,c2',c3" && ws.node(ws.selection.id).tabs[0].title === "c2'");
+  ws = mk();
+  ws.select({ id: byTitle(ws, "L").id });
+  ws.moveTab({ split: "tab", base: { id: byTitle(ws, "c1").id } });
+  check(`a tab moved into c1: a cell after it: ${cells(ws)}`, cells(ws) === "c1,L,c2,c3");
+  ws = mk();
+  ws.select({ id: byTitle(ws, "L").id });
+  ws.toggleMark();
+  ws.activateTab(byTitle(ws, "L2").id, 1);
+  ws.toggleMark();
+  ws.select({ id: byTitle(ws, "c1").id });
+  ws.moveMarked();
+  check(`marks moved to c1: after it, in order: ${cells(ws)}`, cells(ws) === "c1,L,L2,c2,c3");
+  // Into the pane showing the stream (its holder): after its most recently focused cell.
+  ws = mk();
+  ws.select({ id: byTitle(ws, "c3").id });
+  ws.select({ id: byTitle(ws, "L").id });
+  ws.moveTab({ split: "tab", base: { id: panes(ws.root).find((p) => p.tabs[0].group).id } });
+  check(`a tab moved into the stream's holder: after its last focused cell (c3): ${cells(ws)}`, cells(ws) === "c1,c2,c3,L");
+  // Into a plain pane: its tabs, as before.
+  ws = mk();
+  ws.select({ id: byTitle(ws, "c1").id });
+  ws.moveTab({ split: "tab", base: { id: byTitle(ws, "L").id } });
+  check("into a plain pane: its tabs", byTitle(ws, "L").tabs.map((x) => x.title).join("+") === "L+L2+c1");
+  // A new cell as a floating window.
+  ws = mk();
+  ws.lifecycle = { ...ws.lifecycle, spawn: (from) => ({ id: "tnew", title: from.title + "'" }) };
+  ws.select({ id: byTitle(ws, "c2").id });
+  ws.spawnFloat({ x: 10, y: 10, w: 300, h: 200 });
+  check(`a new cell, floating: ${ws.floating.length} window(s), focused`, ws.floating.length === 1 && ws.floating[0].root.tabs[0].title === "c2'" && ws.selection.id === ws.floating[0].root.id);
+  ws.undo();
+  check("undoable", ws.floating.length === 0);
+}
 // Next/previous tab from a lone tab in a group: up to the first pane with several tabs
 {
   const { groupPane } = await server.ssrLoadModule("/src/model.ts");

@@ -24,6 +24,8 @@ import {
   complexType,
   instantLifecycle,
   Lifecycle,
+  AbsorbEnv,
+  Absorbed,
   canCollapse,
   collapseGroup,
   computeRects,
@@ -129,7 +131,10 @@ export type Direction = "left" | "right" | "up" | "down" | "parent" | "child";
 export type Path = Direction | { id: string } | { name: string } | Path[];
 /** How to place something (see `Workspace.place`). */
 export interface PlaceSpec {
-  /** Beside the base, on that side; or into its tabs. */
+  /**
+   * Beside the base, on that side; or into it ("tab"), as it absorbs things (`absorbTarget`:
+   * a pane's tabs; a stream's cell: the stream, just after it…).
+   */
   split: Side | "tab";
   /** The base: an explicit cell, or a path from the focused cell. Default: the focused cell. */
   base?: Path;
@@ -598,10 +603,10 @@ export class Workspace {
     const r = spec.base === undefined ? { id: from, last: from } : this.walk(from, spec.base);
     let target: DropTarget | null = null;
     if (r.id) {
-      if (spec.split === "tab") {
-        const p = this.node(this.descend(this.node(r.id)!));
-        if (p?.type === "pane") target = { kind: "tab", paneId: p.id, index: p.tabs.length };
-      } else target = { kind: "side", targetId: r.id, side: spec.split };
+      // Into the base: as it absorbs things (a pane: its tabs; a stream's cell: the stream,
+      // just after it…: see `absorbTarget`).
+      if (spec.split === "tab") target = this.absorbTarget(r.id);
+      else target = { kind: "side", targetId: r.id, side: spec.split };
     } else if (spec.force) {
       const side = (r.failed && DIRECTION_SIDES[r.failed]) ?? (spec.split !== "tab" ? spec.split : null);
       if (side) {
@@ -653,32 +658,25 @@ export class Workspace {
   }
 
   /**
-   * Move what's marked to the focus, in the order marked: into the focused pane's tabs (a
-   * split: its most recently focused pane's); on a leaf that isn't a pane (a prompt), each as a
-   * cell just before it. Like drops (a pane's name goes along: see `applyDropRaw`), all in one
+   * Move what's marked to the focus, in the order marked: into it, as it absorbs things
+   * (`absorbTarget`: a pane's tabs; a stream's cell: the stream, just after it; a prompt: its
+   * column, just before it). Like drops (a pane's name goes along: see `applyDropRaw`), all in one
    * undo step; the focus stays. Then the marks are forgotten. Returns how many moved.
    */
   moveMarked(): number {
     const marks = this.validMarks();
     let moved = 0;
     this.record(() => {
+      // Each into the focus, as it absorbs it (`absorbTarget`). Inserted into a stream, the
+      // next one goes after it: they keep their order.
+      let anchor = this.selection.id;
       for (const id of marks) {
-        const focus = this.node(this.selection.id);
-        if (!focus) break;
-        let target: DropTarget | null = null;
-        if (isSplit(focus) || focus.type === "pane") {
-          // A pane: its own tabs (even if it shows a group); a split: its most recent pane's.
-          const dest = focus.type === "pane" ? focus : this.node(this.descend(focus));
-          if (dest?.type === "pane") target = { kind: "tab", paneId: dest.id, index: dest.tabs.length };
-        } else {
-          const leaf = focus as LayoutNode; // (other leaf types, if any)
-          const parent = this.index().parent(leaf.id);
-          if (parent && isSplit(parent)) target = { kind: "between", splitId: parent.id, index: parent.children.indexOf(leaf) };
-        }
+        const target = this.absorbTarget(anchor);
         const subject = target && this.subjectOf({ id });
         const result = subject && this.tryDrop(subject, target!);
         if (!result) continue;
         this.commitDrop(result, undefined, undefined, false);
+        if (target!.kind === "between") anchor = result.paneId;
         moved++;
       }
     });
@@ -756,13 +754,58 @@ export class Workspace {
    */
   spawn(spec: PlaceSpec): Cell | null {
     return this.withOperand(() => {
-      const sel = this.node(this.selection.id);
-      const pane = sel && this.node(sel.type === "pane" ? sel.id : this.descend(sel));
-      const from = pane?.type === "pane" ? pane.tabs[pane.active] : undefined;
-      if (!from) return null;
-      const tab = this.lifecycle.spawn ? this.lifecycle.spawn(from) : { id: genId("t"), title: "New tab" };
+      const tab = this.spawnTab();
       return tab ? this.placer(spec).apply(tab) : null;
     }, null);
+  }
+
+  /**
+   * Like `spawn`, but the new cell goes into a new floating window (`rect`: where, in pixels).
+   * Undoable; it gets the focus (but from a prompt, the focus stays there, as for any cell
+   * operation). Returns the pane holding it, or null.
+   */
+  spawnFloat(rect: Rect): Cell | null {
+    return this.withOperand(() => {
+      const tab = this.spawnTab();
+      if (!tab) return null;
+      const pane: PaneNode = { type: "pane", id: genId("p"), weight: 1, tabs: [tab], active: 0 };
+      this.record(() => this.setTrees([...this.trees(), pane], [...this.floating, { root: pane, rect }], pane.id));
+      return this.cell(pane.id);
+    }, null);
+  }
+
+  /** The new cell the focused one creates (`lifecycle.spawn`; a split: its most recent pane's). */
+  private spawnTab(): Tab | null {
+    const sel = this.node(this.selection.id);
+    const pane = sel && this.node(sel.type === "pane" ? sel.id : this.descend(sel));
+    const from = pane?.type === "pane" ? pane.tabs[pane.active] : undefined;
+    if (!from) return null;
+    return this.lifecycle.spawn ? this.lifecycle.spawn(from) : { id: genId("t"), title: "New tab" };
+  }
+
+  /**
+   * Where something put *into* a node goes (a new cell, a moved tab or pane): as its kind
+   * absorbs it (`NodeKind.absorb`), following deferrals. By default: a pane's tabs; a stream's
+   * cell defers to its stream, which inserts things just after it; a pane showing a group, to
+   * the group's layout; a plain split, to its most recently focused child; a prompt, to its
+   * column (just before it). Null: nowhere.
+   */
+  absorbTarget(id: string): DropTarget | null {
+    const idx = this.index();
+    const env: AbsorbEnv = {
+      parent: (n) => idx.parent(n.id),
+      ctx: (n) => idx.get(n.id)?.ctx,
+      recent: (s) => this.mostRecent(s.id, s.children),
+    };
+    let n = idx.node(id);
+    let near: LayoutNode | null = null;
+    for (let i = 0; n && i < 64; i++) {
+      const r: Absorbed | null = kind(n).absorb?.(n, near, env) ?? null;
+      if (!r || !("defer" in r)) return r;
+      near = r.near ?? null;
+      n = r.defer;
+    }
+    return null;
   }
 
   /**

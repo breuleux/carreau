@@ -2,6 +2,7 @@
 // code asks a node's kind instead of testing types and nesting all over the place.
 
 import { SIDES } from "./geometry";
+import type { DropTarget } from "./model";
 import { LayoutNode, Orientation, PaneNode, Side, SplitNode, Tab } from "./types";
 
 /**
@@ -101,6 +102,13 @@ export interface NodeKind {
    * pinned children go (they only stay where their parent's kind keeps them).
    */
   normalizeChildren?(n: SplitNode, kids: LayoutNode[]): LayoutNode[];
+  /**
+   * Something put *into* this node (a new cell, a moved tab or pane): where it goes. A drop
+   * target; or another node that takes it instead (`defer`), with the node it should go near
+   * (e.g. a stream's cell defers to its stream, which inserts things next to it). `near`: the
+   * node that deferred to this one, if any. Null: nowhere. See `Workspace.absorbTarget`.
+   */
+  absorb?(n: LayoutNode, near: LayoutNode | null, env: AbsorbEnv): Absorbed | null;
   childContext(n: LayoutNode, ctx: Ctx): Ctx;
   replaceChild(n: LayoutNode, i: number, child: LayoutNode): void;
   removeChild(n: LayoutNode, i: number): void;
@@ -114,6 +122,17 @@ export interface NodeKind {
 export function closeTabWith(t: Tab, life: Lifecycle, force = false): Promise<void> {
   if (t.group) return force ? kind(t.group).forceClose(t.group, life) : kind(t.group).close(t.group, life);
   return force ? life.forceCloseTab(t) : life.closeTab(t);
+}
+
+/** What a node does with something put into it: a drop target, or another node takes it. */
+export type Absorbed = DropTarget | { defer: LayoutNode; near?: LayoutNode };
+
+/** What absorbing needs to know about where a node is (see `NodeKind.absorb`). */
+export interface AbsorbEnv {
+  parent(n: LayoutNode): LayoutNode | null;
+  ctx(n: LayoutNode): Ctx | undefined;
+  /** A split's most recently focused child, if any. */
+  recent(n: SplitNode): LayoutNode | undefined;
 }
 
 const gather = (ps: Promise<void>[]) => Promise.all(ps).then(() => {});
@@ -136,6 +155,15 @@ export function splitKind(axis: Orientation, scroll: boolean): NodeKind {
     axis,
     scroll,
     groupTitle: scroll ? (axis === "row" ? "Scroll row" : "Scroll column") : undefined,
+    // A stream (scroll split) inserts things as cells, just after the cell they came to (else
+    // after its most recently focused one); a plain split, into its most recently focused child.
+    absorb(n, near, env) {
+      const s = n as SplitNode;
+      const after = near ?? env.recent(s);
+      if (scroll) return { kind: "between", splitId: s.id, index: after ? s.children.indexOf(after) + 1 : s.children.length };
+      const c = after ?? s.children[0];
+      return c ? { defer: c } : null;
+    },
     sides: scroll ? SIDES.filter((s) => (axis === "row") === (s === "left" || s === "right")) : SIDES,
     navStep: true,
     childContext(_n, ctx) {
@@ -162,6 +190,7 @@ const slot: NodeKind = {
   navStep: false,
   childContext: (_n, ctx) => ({ ...ctx, sizedAlong: null, cellOf: null, inCell: null }),
   // Removing the root leaves the slot empty (normalization then drops what held it).
+  absorb: (n) => ((n as SplitNode).children[0] ? { defer: (n as SplitNode).children[0] } : null),
 };
 
 const pane: NodeKind = {
@@ -184,6 +213,16 @@ const pane: NodeKind = {
   },
   close: (n, life) => gather((n as PaneNode).tabs.map((t) => closeTabWith(t, life))),
   forceClose: (n, life) => gather((n as PaneNode).tabs.map((t) => closeTabWith(t, life, true))),
+  // Into its tabs. But a cell of a stream defers to the stream (next to it), and a pane showing
+  // a group, to the group's layout.
+  absorb(n, _near, env) {
+    const p = n as PaneNode;
+    const parent = env.parent(p);
+    if (env.ctx(p)?.cellOf && parent) return { defer: parent, near: p };
+    const root = activeGroup(p)?.children[0];
+    if (root) return { defer: root };
+    return { kind: "tab", paneId: p.id, index: p.tabs.length };
+  },
 };
 
 /** A leaf that holds nothing and closes instantly: a base for leaf kinds besides panes. */
@@ -199,6 +238,11 @@ export const leafKind: NodeKind = {
   removeChild() {},
   close: async () => {},
   forceClose: async () => {},
+  // Its parent takes things, next to it (a prompt: just before it, as its column keeps it last).
+  absorb(n, _near, env) {
+    const parent = env.parent(n);
+    return parent ? { defer: parent, near: n } : null;
+  },
 };
 
 const KINDS: Record<string, NodeKind> = {
