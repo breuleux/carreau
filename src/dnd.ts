@@ -182,6 +182,8 @@ export class DragDrop {
   private index: LayoutIndex | null = null;
   /** No drag may start before this time. */
   private cooldownUntil = 0;
+  /** Stop tracking the current press (see `arm`), if any. */
+  private disarm: (() => void) | null = null;
 
   constructor(private host: DndHost) {}
 
@@ -211,25 +213,44 @@ export class DragDrop {
   arm(e: PointerEvent, subject: DragSubject, label: string, sourceEl: HTMLElement, capturerEl?: HTMLElement): void {
     if (e.button !== 0) return;
     e.stopPropagation();
+    this.disarm?.(); // (a press whose release was never seen)
     const x0 = e.clientX;
     const y0 = e.clientY;
     // Capture the pointer so that moving over an iframe doesn't swallow the events.
     (capturerEl ?? (e.currentTarget as HTMLElement | null))?.setPointerCapture(e.pointerId);
     const move = (ev: PointerEvent) => {
+      // The button is up, yet no release came: it went elsewhere (e.g. into an iframe that
+      // took the focus meanwhile, or outside the window after the capture was lost). Without
+      // this, the drag would follow the cursor with no button held.
+      if (!(ev.buttons & 1)) return cancel();
       if (!this.state && Math.hypot(ev.clientX - x0, ev.clientY - y0) > 5 && performance.now() >= this.cooldownUntil)
         this.start(subject, label, sourceEl);
       if (this.state) this.move(ev);
     };
     const up = (ev: PointerEvent) => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
+      disarm();
       if (this.state) {
         this.move(ev);
         this.end(true);
       } else if (subject.kind === "pane") this.ws.select({ id: subject.paneId });
     };
+    // The browser took the pointer away, or the window lost the focus: no drop.
+    const cancel = () => {
+      disarm();
+      this.end(false);
+    };
+    const disarm = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", cancel);
+      window.removeEventListener("blur", cancel);
+      this.disarm = null;
+    };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", cancel);
+    window.addEventListener("blur", cancel);
+    this.disarm = disarm;
   }
 
   start(subject: DragSubject, label: string, sourceEl: HTMLElement, win?: FloatingWindow): void {

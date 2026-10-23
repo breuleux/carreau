@@ -159,7 +159,7 @@ The set of node types is open, so that a feature like prompt columns lives in a 
 
 * **Types**: leaf node types and split types, by TypeScript declaration merging on `NodeTypes` and `SplitTypes` (types.ts). Then `n.type === "my-leaf"` narrows as usual.
 * **Kinds** (`registerKind(type, kind)`): what the node is (see above). `leafKind` is a base for leaves that hold nothing; `splitKind(axis, scroll)`, for splits. Validation, normalization, walks, rects, navigation and drops then work through the kind. An unregistered type is an error (`Unknown node type`), including when loading JSON: a host that loads prompt columns must import their module.
-* **Renderers** (`registerRenderer(type, renderer)`, view.ts), for leaves other than panes: `fill(el, node, view, ctx)` fills the element the view made (with the node's `data-id`, flex, natural-size classes, and `carreau-cell` for cells); `attached(el, node, view)` runs once the new tree is attached, to place **persistent elements** (`view.persist(key, parent, create)`, `view.persisted(key)`: created once, moved with `moveBefore`, removed after a render that doesn't place them); `commitFocus(node, view)` takes the keyboard focus when navigation mode is left on the node. Splits are rendered by the view itself.
+* **Renderers** (`registerRenderer(type, renderer)`, view.ts), for leaves other than panes: `fill(el, node, view, ctx)` fills the element the view made, once, when it makes it (with the node's `data-id`; the view keeps its flex, natural-size classes, and `carreau-cell` for cells up to date). The element is kept across renders, so listeners look the node up by id. `attached(el, node, view)` runs on every render, once the tree is in place, to update it and place **persistent elements** (`view.persist(key, parent, create)`, `view.persisted(key)`: created once, moved with `moveBefore`, removed after a render that doesn't place them); `commitFocus(node, view)` takes the keyboard focus when navigation mode is left on the node. Splits are rendered by the view itself.
   * **Every scroll split** renders as a **frame** (`.carreau-framed`, `data-id`, with the panel's look) that doesn't scroll, holding an inner scroller (`.carreau-frame-inner`, the actual `.carreau-scroll`, keyed by `data-scroll` = the split's id for scroll memory). A split whose kind has `lastFixed` has its last child below the scroller, outside. The DOM then differs from the tree, but navigation, rects and drops go by the tree.
   * **Fading edges** (like buche's scroll-fader): the scroller's edges fade out where there's more to see that way. A CSS mask on the scroller (so only its content fades, whatever is behind), whose fade sizes (`--carreau-fade-start`, `--carreau-fade-end`, animated: registered with `@property`) grow while content is scrolled off before (`.fade-start`) or there's more after (`.fade-end`). `updateFade` sets them, on scroll, on render, and when the scroller or its children resize (a ResizeObserver). `scroll-padding` keeps what's scrolled into view clear of the fade.
   * Renderers' focus handlers must ignore focus events while `view.rendering` (see the pitfalls).
@@ -791,7 +791,7 @@ ws.lifecycle = { … };                       // default: instant (`instantLifec
 * Removal checks again that it can happen (the main tree must keep a tab); if not, the tab stays.
 * **Display**: while a tab is closing, its × is replaced by an **idle animation**: a rotating arc (a conic gradient in the tab's accent, masked to a ring, 0.9s per turn). Its title and icon fade a little.
   * **Hovering** it shows a small **red ×** inside the arc; clicking it force-closes. (It stops pointerdown, so it's not a drag.)
-  * Re-renders recreate the element: give it a negative animation delay from the clock (`-(now mod 0.9s)`), so the rotation doesn't restart on every render.
+  * It is kept across renders, but made again when it moves elsewhere (from a tab to the strip): give it a negative animation delay from the clock (`-(now mod 0.9s)`), so the rotation stays in phase.
   * A cell with no tab bar shows the arc at the right end of its top strip (an empty strip grows to fit it).
 * Demo lifecycle: shell cells (whose `long` starts with `$`) take 1.2s to close; tabs with status `"unresponsive"` never finish closing, until forced; everything else closes at once.
 
@@ -828,14 +828,11 @@ Tab contents must survive any relayout: moves, drops between trees, floating, do
 
 * **One persistent content element per tab id.** Create it once, by calling the host's `renderTab`, wrap it in a `.carreau-content` div, and cache it. When a tab leaves all trees entirely (a new layout is loaded), drop its element.
 * **All tabs' contents live in their pane's body**, in whichever tree. Inactive ones are just hidden (`hidden` / `display: none`), which does not unload iframes.
-* **Move contents with `Element.moveBefore`**, which keeps iframes, focus and so on alive. Fall back to `appendChild` when it is missing (iframes then reload). `moveBefore` only preserves state when the node and the destination are both connected to the same document. So the renderer must:
-  1. build the new main tree and window elements;
-  2. **attach them next to the old ones**;
-  3. move each content element into its new pane body;
-  4. only then remove the old elements.
-
-  Never build a detached tree and `replaceChildren`: the old tree, iframes included, is torn down first.
-* Pitfall: while old and new are both attached, look pane bodies up **inside the new elements**. A document-wide `querySelector('[data-id=…]')` finds the old pane first. The content then stays in the old tree and dies with it.
+* **Move contents with `Element.moveBefore`**, which keeps iframes, focus and so on alive. Fall back to `insertBefore` when it is missing (iframes then reload). `moveBefore` only preserves state when the node and the destination are both connected to the same document.
+* **Render in place, not by rebuilding.** Every element the view makes (a node's, by its id; a pane's tab bar, body, strip; a tab, by pane and tab id; splitters, gaps, windows...) is kept across renders by key (`Retained`), made once with its listeners, and updated on each render. Listeners read what the element shows now through the store (`cur()`), never from closures over the render that made them (nodes are replaced by undo; indices change). A render only moves elements whose parent or position changed (`syncChildren`), so what didn't change keeps its scroll position, its observers, its iframes' layout: switching tabs touches classes and `hidden`, nothing else.
+  * **Top-down**: an element goes into its parent, which is already in place (connected), before its children go into it. What moves then always moves between connected parents (keeping state), and an element is never moved into its own descendant.
+  * Elements that a render didn't ask for stay where they were until the end of the render (`syncChildren` leaves the stores' elements after the listed children), so the contents they hold can move out first; then they are swept. Unknown nodes (an in-place field) are removed by the next render.
+  * Never build a detached tree and `replaceChildren`: the old tree, iframes included, is torn down first.
 * Because contents persist, the host's `renderTab` output must not show layout facts that change, such as the pane id or weight.
 * The demo uses tab `data` to say what to embed (a YouTube id, or a stateful `srcdoc` page), plus an optional fixed height for scroll cells. YouTube embeds need a referrer (`referrerpolicy="strict-origin-when-cross-origin"`), or they fail with error 153.
 * **Pointer events.** Iframes swallow pointer events, so during tab or pane drags, splitter and window resizes, and window moves:
@@ -870,8 +867,9 @@ In a `scroll-column`, children take their **natural height** (their content deci
   * Give the scroll split a panel background of its own: slightly darker than panes, with rounded corners and the pane outline. Otherwise that padding shows the page background and the split looks as if it ended with its content.
   * A scroll split nested *inside* a scroll split along the other axis is naturally sized along the outer axis, as any child there.
 * **No splitters** between naturally sized children; draw a fixed 4px gap instead.
-* **Keep scroll positions across re-renders.** Keep the last known `scrollLeft`/`scrollTop` of every scroll split (by id), and of every tab scroller (by pane id), in a map, and restore it after rebuilding. Otherwise every click resets the scroll.
-  * Update the map from `scroll` events (capture phase on the workspace), and from the elements' current values before rebuilding, but **only for visible elements**.
+* **Keep scroll positions across re-renders.** Scrollers are kept across renders (see [Tab contents](#tab-contents-and-embeds-iframes)), so they keep their positions; still, keep the last known `scrollLeft`/`scrollTop` of every scroll split (by id), and of every tab scroller (by pane id), in a map, and restore it after a render, for scrollers that are new, or were hidden. Write only what differs.
+  * Update the map from `scroll` events (capture phase on the workspace), and from the elements' current values before rendering, but **only for visible elements**.
+  * The resize observers (sticky splits, edge fades) keep observing across renders: only what appeared or went is (un)observed. Observing anew notifies a frame later, which shows as a jump.
   * A scroll split hidden in an inactive group tab (`display: none`) has lost its offset and reads 0. Reading it would erase its position, and switching back to its tab would reset the scroll.
 * **Navigation** still uses logical rects from weights, which treats scroll children as equal shares. Within the scroll split, up and down follow the true order. Coming in from the side picks a pane by its logical position, which may be off-screen; scrolling the selection into view handles that.
 * **Clipping.** Every overlay is clipped to the *visible* rect of the nodes involved: the node's rect intersected with the client rect of each scroll ancestor, up to the tree's layer. This covers the selection outline, the border lines, tab dots, zones and previews.
@@ -920,7 +918,7 @@ In a `scroll-column`, children take their **natural height** (their content deci
 * Weight swaps on pane swap keep the geometry fixed, which is what makes swap/unswap exact.
 * Filter every candidate choice through the drop function, including the shape no-op test, so the UI never offers pointless drops.
 * A focused text field moved with `moveBefore` must be re-focused (Chrome stops feeding it text). Don't let focus handlers re-render during a render.
-* Persist tab contents and move them with `moveBefore`, attaching new elements before removing old ones, and looking bodies up in the new elements only. Reorder windows with `moveBefore` too.
+* Persist tab contents and move them with `moveBefore`. Render in place, top-down, removing what's gone only at the end. Reorder windows with `moveBefore` too.
 * Disable iframe pointer events and capture the pointer during every gesture.
 * After Esc, block drag restarts for a moment, since the button is still down.
-* Restore scroll positions (scroll splits and tab scrollers) after every re-render.
+* Restore scroll positions (scroll splits and tab scrollers) after every re-render, for the scrollers that were hidden or are new.

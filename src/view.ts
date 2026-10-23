@@ -49,11 +49,15 @@ type MenuItem = { label: string; enabled?: boolean; run: () => void } | { label:
 
 /** How the view renders a leaf node type other than panes (see `registerRenderer`). */
 export interface NodeRenderer {
-  /** Fill the node's element (made by the view: it has the node's id, flex and size classes). */
+  /**
+   * Fill the node's element, once, when the view makes it (it has the node's id; the view keeps
+   * its flex and size classes up to date). The element is kept across renders: listeners
+   * should look the node up by its id, as it may be replaced (undo).
+   */
   fill(el: HTMLElement, node: LayoutNode, view: View, ctx: Ctx): void;
   /**
-   * Once the new tree is attached (the old one still is): place persistent elements into the
-   * node's element (`view.persist`), so that their state survives re-renders.
+   * On every render, once the tree is in place: update the node's element, and place
+   * persistent elements into it (`view.persist`), so that their state survives re-renders.
    */
   attached?(el: HTMLElement, node: LayoutNode, view: View): void;
   /** Leaving navigation mode with the node selected: give it the keyboard focus. */
@@ -68,6 +72,9 @@ const RENDERERS: Record<string, NodeRenderer> = {};
 export function registerRenderer(type: LayoutNode["type"], r: NodeRenderer): void {
   RENDERERS[type] = r;
 }
+
+/** The elements of the view's stores (`Persistent`, `Retained`): see `syncChildren`. */
+const MANAGED = new WeakSet<Node>();
 
 /**
  * Elements created once and moved around across renders, never recreated (their state, e.g.
@@ -92,6 +99,7 @@ class Persistent {
     let el = this.els.get(key) as E | undefined;
     if (!el) {
       el = create();
+      MANAGED.add(el);
       this.els.set(key, el);
       if (dispose) this.disposers.set(key, dispose);
     }
@@ -111,6 +119,74 @@ class Persistent {
     this.seen.clear();
   }
 }
+
+/**
+ * The view's own elements (nodes' elements, tab bars, tabs, splitters...), kept across renders
+ * by key: made once, listeners included, then updated and moved in place by each render, only
+ * where something changed. What they hold stays put: scroll positions, observers, the iframes
+ * inside. Their listeners read what they currently show through `cur` (the data of the latest
+ * render). One that a render doesn't ask for goes away after it.
+ */
+class Retained {
+  private recs = new Map<string, { el: HTMLElement; data: unknown }>();
+  private seen = new Set<string>();
+
+  get<E extends HTMLElement, D>(key: string, data: D, create: (cur: () => D) => E): E {
+    this.seen.add(key);
+    let rec = this.recs.get(key);
+    if (rec) rec.data = data;
+    else {
+      const r: { el: HTMLElement; data: unknown } = { el: null!, data };
+      r.el = create(() => r.data as D);
+      MANAGED.add(r.el);
+      this.recs.set(key, (rec = r));
+    }
+    return rec.el as E;
+  }
+
+  /** Remove the elements not asked for since the last sweep. */
+  sweep(): void {
+    for (const [key, rec] of this.recs)
+      if (!this.seen.has(key)) {
+        rec.el.remove();
+        this.recs.delete(key);
+      }
+    this.seen.clear();
+  }
+}
+
+/**
+ * Make `kids` the first children of `parent`, in order, moving only those out of place (see
+ * `move`). The view's stores' elements after them stay until placed elsewhere or swept (e.g.
+ * tab contents, and what a node no longer shows); anything else goes (e.g. an in-place field).
+ */
+function syncChildren(parent: HTMLElement, kids: HTMLElement[]): void {
+  kids.forEach((k, i) => {
+    const at = parent.childNodes[i] ?? null;
+    if (at !== k) move(parent, k, at);
+  });
+  for (const n of [...parent.childNodes].slice(kids.length)) if (!MANAGED.has(n)) n.remove();
+}
+
+/** HTML set through `setHTML`, by element (to set it only when it changes). */
+const HTML = new WeakMap<Element, string>();
+
+/** Set an element's inner HTML, if it changed (it replaces its children). */
+function setHTML(el: HTMLElement, html: string): boolean {
+  if (HTML.get(el) === html) return false;
+  HTML.set(el, html);
+  el.innerHTML = html;
+  return true;
+}
+
+/** Set an attribute, or remove it (null). */
+function setAttr(el: HTMLElement, name: string, value: string | null): void {
+  if (value === null) el.removeAttribute(name);
+  else if (el.getAttribute(name) !== value) el.setAttribute(name, value);
+}
+
+const div = (className: string) => Object.assign(document.createElement("div"), { className });
+const span = (className: string) => Object.assign(document.createElement("span"), { className });
 
 /** Docking a floating window: hold it still this long (ms), within this many pixels. */
 const HOLD_TO_DOCK = 1000;
@@ -149,7 +225,11 @@ export class View implements DndHost {
   private contents = new Persistent();
   /** Other persistent elements, for renderers (`persist`). */
   private extras = new Persistent();
-  /** Renderers' `attached` calls, for after the new tree is attached. */
+  /** The view's own elements (see `Retained`). */
+  private parts = new Retained();
+  /** Each pane's body, this render (where its tabs' contents go: see `placeContents`). */
+  private bodies = new Map<string, HTMLElement>();
+  /** Renderers' `attached` calls, for after the tree is in place. */
   private pendingAttach: (() => void)[] = [];
   private renderingNow = false;
   /** A render was asked for during one: do it again after. */
@@ -174,6 +254,9 @@ export class View implements DndHost {
       updateFade(el.classList.contains("carreau-scroll") ? el : el.parentElement!);
     }
   });
+  /** What `sticky` and `fader` observe (kept across renders: see `restoreScroll`). */
+  private stickyEls = new Set<Element>();
+  private fadeEls = new Set<Element>();
   private lastSelection = "";
   private lastTab = "";
 
@@ -209,7 +292,6 @@ export class View implements DndHost {
     opts: ViewOptions = {},
   ) {
     this.opts = { ...opts, renderTab: opts.renderTab ?? ((t) => t.content ?? t.title) };
-    const div = (cls: string) => Object.assign(document.createElement("div"), { className: cls });
     this.el = div("carreau");
     this.rootEl = div("carreau-root");
     this.selBox = div("carreau-selection");
@@ -256,7 +338,7 @@ export class View implements DndHost {
       },
       { capture: true },
     );
-    // A change of the selection alone restyles; anything else rebuilds.
+    // A change of the selection alone restyles; anything else renders (in place).
     ws.onChange((kind) => (kind === "selection" ? this.refreshSelection() : this.render()));
     new ResizeObserver(() => {
       // Keep floating windows inside a workspace that changed size.
@@ -355,21 +437,30 @@ export class View implements DndHost {
     } while (this.renderAgain);
   }
 
+  /**
+   * Bring the DOM in line with the workspace, in place: elements are kept by key (nodes' by
+   * their ids: see `Retained`), updated, and moved only where they changed places. Top-down:
+   * an element is in its (connected) parent before its children go into it, so that what moves
+   * stays connected (moveBefore only preserves state, e.g. an iframe's, then). Elements that
+   * aren't needed anymore go at the end, once everything they held has moved out.
+   */
   private renderNow(): void {
-    // Carry scroll positions over (only visible elements: hidden ones read 0).
+    // Remember scroll positions (only visible elements: hidden ones read 0), for scrollers
+    // that were hidden, or are new.
     for (const el of this.el.querySelectorAll<HTMLElement>(".carreau-scroll, .carreau-tabs"))
       if (el.getClientRects().length) this.rememberScroll(el);
-    // Attach the new elements *before* removing the old ones, so that tab contents (iframes)
-    // can be moved across while staying connected (moveBefore only preserves state then).
-    const old = [...this.rootEl.childNodes, ...this.floatLayer.childNodes];
-    const tree = this.renderNode(this.ws.root, rootCtx());
-    const floats = this.ws.floating.map((w) => this.renderFloat(w));
-    this.rootEl.append(tree);
-    this.floatLayer.append(...floats);
-    this.placeContents([tree, ...floats]);
+    this.bodies.clear();
+    const root = rootCtx();
+    const tree = this.nodeEl(this.ws.root, root);
+    syncChildren(this.rootEl, [tree]);
+    this.renderNode(tree, this.ws.root, root);
+    const floats = this.ws.floating.map((w) => this.floatEl(w));
+    syncChildren(this.floatLayer, floats);
+    this.ws.floating.forEach((w, i) => this.fillFloat(floats[i], w));
+    this.placeContents();
     for (const fn of this.pendingAttach) fn();
     this.extras.sweep();
-    for (const n of old) n.remove();
+    this.parts.sweep();
     this.restoreScroll();
     this.revealSelection();
   }
@@ -440,31 +531,37 @@ export class View implements DndHost {
     return this.scrollPos.get(this.scrollKey(el) ?? "")?.atEnd ?? true;
   }
 
+  /**
+   * Scrollers: back where they were (those that kept their element are already, unless they
+   * were hidden), or at their end if they stick there. The observers keep watching what they
+   * watched (observing anew would notify, a frame later): only what changed is (un)observed.
+   */
   private restoreScroll(): void {
-    this.sticky.disconnect();
-    this.fader.disconnect();
+    const sticky = new Set<Element>();
+    const fade = new Set<Element>();
     for (const el of this.el.querySelectorAll<HTMLElement>(".carreau-scroll, .carreau-tabs")) {
-      if (el.classList.contains("carreau-reverse")) for (const c of [el, ...el.children]) this.sticky.observe(c);
+      if (el.classList.contains("carreau-reverse")) for (const c of [el, ...el.children]) sticky.add(c);
       const pos = this.scrollPos.get(this.scrollKey(el) ?? "");
       if (this.stuck(el)) toEnd(el);
-      else if (pos && el.getClientRects().length) [el.scrollLeft, el.scrollTop] = [pos.left, pos.top];
+      else if (pos && el.getClientRects().length && (el.scrollLeft !== pos.left || el.scrollTop !== pos.top)) [el.scrollLeft, el.scrollTop] = [pos.left, pos.top];
       if (el.classList.contains("carreau-scroll")) {
-        for (const x of [el, ...el.children]) this.fader.observe(x);
+        for (const x of [el, ...el.children]) fade.add(x);
         updateFade(el);
       }
     }
+    observeOnly(this.sticky, this.stickyEls, sticky);
+    observeOnly(this.fader, this.fadeEls, fade);
+    this.stickyEls = sticky;
+    this.fadeEls = fade;
   }
 
   /**
    * Put every content tab's element into its pane's body; only the shown one shows (the active
    * tab's, or its complex's first one's: see `shownIndex`), updated by its complex type's `show`.
    */
-  private placeContents(trees: HTMLElement[]): void {
-    // The old elements are still attached: look panes up in the new ones only.
-    const paneEls = new Map<string, HTMLElement>();
-    for (const t of trees) for (const el of [t, ...t.querySelectorAll<HTMLElement>(".carreau-pane")]) if (el.classList.contains("carreau-pane")) paneEls.set(el.dataset.id!, el);
+  private placeContents(): void {
     for (const p of this.ws.trees().flatMap((t) => panes(t))) {
-      const body = paneEls.get(p.id)?.querySelector<HTMLElement>(":scope > .carreau-body");
+      const body = this.bodies.get(p.id);
       if (!body) continue;
       const shown = shownIndex(p);
       p.tabs.forEach((tab, i) => {
@@ -489,38 +586,64 @@ export class View implements DndHost {
   }
 
   /**
-   * Render a node, given the context its parent gave it (see kinds.ts). `cell`: the scroll
-   * split's cell it is in (through splits), if any: see `decorateScrollCell`.
+   * A node's element (kept across renders, by its id: see `Retained`), to place, then fill
+   * (`renderNode`). `ctx`: the context it is rendered in (for a renderer's `fill`, when made).
    */
-  private renderNode(node: LayoutNode, ctx: Ctx, cell?: ScrollCell): HTMLElement {
-    const el = document.createElement("div");
-    el.dataset.id = node.id;
+  private nodeEl(node: LayoutNode, ctx: Ctx): HTMLElement {
+    const type = isSplit(node) ? "split" : node.type;
+    return this.parts.get(`node:${type}:${node.id}`, node.id, (cur) => {
+      const el = document.createElement("div");
+      el.dataset.id = node.id;
+      if (node.type === "pane")
+        el.addEventListener("pointerdown", (e) => {
+          // Primary button only (selecting re-renders, which would break a middle click), and
+          // only the innermost cell (presses bubble through group holders too; other kinds of
+          // cells in the group select themselves).
+          if (e.button !== 0 || (e.target as HTMLElement).closest(".carreau-cell") !== el) return;
+          if (this.ws.selection.id !== cur()) this.ws.select({ id: cur() });
+        });
+      else if (!isSplit(node)) {
+        const r = RENDERERS[node.type];
+        if (!r) throw new Error(`No renderer for ${node.type} (see registerRenderer)`);
+        r.fill(el, node, this, ctx);
+      }
+      return el;
+    });
+  }
+
+  /**
+   * Render a node into its element (in place already), given the context its parent gave it
+   * (see kinds.ts). `cell`: the scroll split's cell it is in (through splits), if any: see
+   * `decorateScrollCell`.
+   */
+  private renderNode(el: HTMLElement, node: LayoutNode, ctx: Ctx, cell?: ScrollCell): void {
     el.style.flex = ctx.sizedAlong ? "none" : `${node.weight} 1 0`;
-    if (ctx.sizedAlong) el.classList.add(`carreau-natural-${ctx.sizedAlong}`);
-    if (isCell(node)) el.classList.add("carreau-cell");
+    for (const o of ["row", "column"] as const) el.classList.toggle(`carreau-natural-${o}`, ctx.sizedAlong === o);
+    el.classList.toggle("carreau-cell", isCell(node));
     // A direct child of a scroll split is one of its cells (a pane, or a split of panes). In a
     // scroll-column, its height can be set (`size`): by any of its panes' bars.
-    if (ctx.cellOf && (node.type === "pane" || isSplit(node))) {
-      cell = { node, el, axis: ctx.cellOf };
-      if (ctx.cellOf === "column" && node.size) {
-        el.style.height = `${node.size}px`;
-        el.classList.add("carreau-cell-sized");
+    if (node.type === "pane" || isSplit(node)) {
+      let sized = false;
+      if (ctx.cellOf) {
+        cell = { node, el, axis: ctx.cellOf };
+        sized = ctx.cellOf === "column" && !!node.size;
       }
+      el.style.height = sized ? `${node.size}px` : "";
+      el.classList.toggle("carreau-cell-sized", sized);
     }
     if (node.type === "pane") this.fillPane(el, node, ctx, cell);
     else if (isSplit(node)) this.fillSplit(el, node, ctx, cell);
     else {
       const r = RENDERERS[(node as LayoutNode).type];
-      if (!r) throw new Error(`No renderer for ${(node as LayoutNode).type} (see registerRenderer)`);
-      r.fill(el, node, this, ctx);
-      if (r.attached) this.pendingAttach.push(() => r.attached!(el, node, this));
+      if (r?.attached) this.pendingAttach.push(() => r.attached!(el, node, this));
     }
-    return el;
   }
 
   private fillSplit(el: HTMLElement, node: SplitNode, ctx: Ctx, cell?: ScrollCell): void {
     const k = kind(node);
-    el.classList.add("carreau-split", `carreau-${k.axis}`);
+    el.classList.add("carreau-split");
+    el.classList.toggle("carreau-row", k.axis === "row");
+    el.classList.toggle("carreau-column", k.axis === "column");
     const childCtx = k.childContext(node, ctx);
     // A scroll split is a frame that doesn't scroll (with the panel's look), holding an inner
     // element that scrolls (its edges fade where there's more: see `updateFade`). The inner
@@ -528,21 +651,35 @@ export class View implements DndHost {
     // sits below the inner element, outside, so that it stays put (overscroll bounce included).
     const fixed = k.lastFixed ? node.children[node.children.length - 1] : undefined;
     const kids = fixed ? node.children.slice(0, -1) : node.children;
+    const framed = !!(k.scroll || fixed);
+    el.classList.toggle("carreau-framed", framed);
     let scroller = el;
-    if (k.scroll || fixed) {
-      el.classList.add("carreau-framed");
-      scroller = Object.assign(document.createElement("div"), { className: `carreau-split carreau-${k.axis} carreau-frame-inner` });
-      scroller.dataset.scroll = node.id;
-      el.append(scroller);
+    if (framed) {
+      scroller = this.parts.get(`inner:${node.id}`, null, () => {
+        const s = div("carreau-split carreau-frame-inner");
+        s.dataset.scroll = node.id;
+        return s;
+      });
+      scroller.classList.toggle("carreau-row", k.axis === "row");
+      scroller.classList.toggle("carreau-column", k.axis === "column");
     }
-    if (k.scroll) scroller.classList.add("carreau-scroll", `carreau-scroll-${k.axis}`);
-    if (isSticky(node)) scroller.classList.add("carreau-reverse");
-    kids.forEach((c, i) => {
-      // Children sized by their content get a fixed gap; others, a splitter.
-      if (i > 0) scroller.append(childCtx.sizedAlong ? Object.assign(document.createElement("div"), { className: "carreau-gap" }) : this.renderSplitter(node, i));
-      scroller.append(this.renderNode(c, childCtx, cell));
-    });
-    if (fixed) el.append(this.renderNode(fixed, childCtx));
+    for (const x of framed ? [el, scroller] : [el]) {
+      const on = x === scroller;
+      x.classList.toggle("carreau-scroll", on && !!k.scroll);
+      x.classList.toggle("carreau-scroll-row", on && !!k.scroll && k.axis === "row");
+      x.classList.toggle("carreau-scroll-column", on && !!k.scroll && k.axis === "column");
+      x.classList.toggle("carreau-reverse", on && isSticky(node));
+    }
+    const els = kids.map((c) => this.nodeEl(c, childCtx));
+    const fixedEl = fixed && this.nodeEl(fixed, childCtx);
+    if (framed) syncChildren(el, fixedEl ? [scroller, fixedEl] : [scroller]);
+    // Children sized by their content get a fixed gap; others, a splitter.
+    syncChildren(
+      scroller,
+      els.flatMap((c, i) => (i === 0 ? [c] : [childCtx.sizedAlong ? this.gap(node, kids[i]) : this.splitter(node, kids[i]), c])),
+    );
+    kids.forEach((c, i) => this.renderNode(els[i], c, childCtx, cell));
+    if (fixed) this.renderNode(fixedEl!, fixed, childCtx);
   }
 
   /** A pane: its tab bar (at the bottom) and body. It decides its display from its context. */
@@ -551,57 +688,68 @@ export class View implements DndHost {
     const display = paneDisplay(node, ctx);
     const activeTab = node.tabs[node.active];
     if (activeTab) el.style.setProperty("--focus-accent", cellAccent(activeTab));
-    if (cell) this.decorateScrollCell(el, node, cell);
-    const bar = this.renderTabBar(node, ctx);
-    if (!display.showTabBar) {
-      bar.hidden = true;
-      el.classList.add("no-tabbar");
-    }
-    el.append(bar);
-    const body = Object.assign(document.createElement("div"), { className: "carreau-body" });
+    else el.style.removeProperty("--focus-accent");
+    const kids = this.decorateScrollCell(el, node, cell);
+    const bar = this.tabBar(node);
+    bar.hidden = !display.showTabBar;
+    el.classList.toggle("no-tabbar", !display.showTabBar);
+    const body = this.parts.get(`body:${node.id}`, null, () => div("carreau-body"));
+    this.bodies.set(node.id, body);
+    syncChildren(el, [...kids, bar, body]);
+    this.fillTabBar(bar, node, ctx, el);
+    const bodyKids: HTMLElement[] = [];
     // With no tab bar, a strip on top (the cell's `long`, or an empty one) is the handle.
     if (activeTab && ((display.showLong && activeTab.long) || !display.showTabBar)) {
-      const long = Object.assign(document.createElement("div"), { className: "carreau-long", title: "Drag to move this pane" });
-      if (display.showLong && activeTab.long) long.innerHTML = activeTab.long;
-      else long.classList.add("empty");
+      const long = this.parts.get(`long:${node.id}`, { node, el }, (cur) => {
+        const l = div("carreau-long");
+        l.title = "Drag to move this pane";
+        l.addEventListener("pointerdown", (e) => {
+          const { node, el } = cur();
+          this.dnd.arm(e, { kind: "pane", paneId: node.id }, node.tabs[node.active]?.title ?? "pane", el);
+        });
+        return l;
+      });
+      const html = display.showLong ? (activeTab.long ?? "") : "";
+      setHTML(long, html);
+      long.classList.toggle("empty", !html);
       // No tab bar: the closing indicator goes on the strip.
       const closingTab = node.tabs.find((t) => this.ws.isClosing(t.id));
+      long.classList.toggle("closing", !!closingTab);
       if (closingTab) {
-        long.classList.add("closing");
-        long.append(this.closingSpinner(closingTab.id));
+        const s = this.closingSpinner(closingTab.id, `long:${node.id}`);
+        if (long.lastChild !== s) move(long, s);
       }
       long.style.setProperty("--cell-accent", cellAccent(activeTab));
-      long.addEventListener("pointerdown", (e) => this.dnd.arm(e, { kind: "pane", paneId: node.id }, activeTab.title, el));
-      body.append(long);
+      bodyKids.push(long);
     }
     // Group tabs: their layouts, all rendered (inactive ones hidden, so that the contents
     // inside stay in the document). Content tabs are placed by placeContents().
     const childCtx = kind(node).childContext(node, ctx);
+    const groups: [HTMLElement, LayoutNode, Ctx][] = [];
     node.tabs.forEach((t, i) => {
       const inner = t.group?.children[0];
       if (!inner) return;
-      const g = Object.assign(document.createElement("div"), { className: "carreau-group", hidden: i !== shownIndex(node) });
+      const g = this.parts.get(`group:${node.id}:${t.id}`, null, () => div("carreau-group"));
       g.dataset.groupTab = t.id;
+      g.hidden = i !== shownIndex(node);
       g.classList.toggle("natural-row", ctx.natural.row);
       g.classList.toggle("natural-column", ctx.natural.column);
-      g.append(this.renderNode(inner, kind(t.group!).childContext(t.group!, childCtx)));
-      body.append(g);
+      const innerCtx = kind(t.group!).childContext(t.group!, childCtx);
+      groups.push([g, inner, innerCtx]);
+      bodyKids.push(g);
     });
     body.classList.toggle("shows-group", !!activeGroup(node));
     // An empty pane (a named one stays, empty): a hint.
-    if (!node.tabs.length) {
-      const own = this.opts.renderEmpty;
-      if (own) this.persist(`empty:${node.id}`, body, () => own(node) ?? hint());
-      else body.append(hint());
+    const own = this.opts.renderEmpty;
+    if (!node.tabs.length && !own) bodyKids.push(this.parts.get(`hint:${node.id}`, null, hint));
+    // (Contents, and the host's empty pane, stay after these: see placeContents.)
+    syncChildren(body, bodyKids);
+    if (!node.tabs.length && own) this.persist(`empty:${node.id}`, body, () => own(node) ?? hint());
+    for (const [g, inner, innerCtx] of groups) {
+      const innerEl = this.nodeEl(inner, innerCtx);
+      syncChildren(g, [innerEl]);
+      this.renderNode(innerEl, inner, innerCtx);
     }
-    el.append(body);
-    el.addEventListener("pointerdown", (e) => {
-      // Primary button only (selecting re-renders, which would break a middle click), and
-      // only the innermost cell (presses bubble through group holders too; other kinds of
-      // cells in the group select themselves).
-      if (e.button !== 0 || (e.target as HTMLElement).closest(".carreau-cell") !== el) return;
-      if (this.ws.selection.id !== node.id) this.ws.select({ id: node.id });
-    });
   }
 
   /**
@@ -610,35 +758,44 @@ export class View implements DndHost {
    * at the top right. In a scroll-column, the bar resizes the cell (all the bars of a split
    * cell resize the same cell, so they stay in sync): dragging outward (up from its top half,
    * down from its bottom half) grows it, inward shrinks it, and the dragged edge stays put on
-   * screen. Double-click: back to its natural height.
+   * screen. Double-click: back to its natural height. Returns those elements, for the pane.
    */
-  private decorateScrollCell(el: HTMLElement, node: PaneNode, cell: ScrollCell): void {
-    el.classList.add("carreau-scrollcell", `carreau-scrollcell-${cell.axis}`);
-    const status = node.tabs[node.active]?.status;
+  private decorateScrollCell(el: HTMLElement, node: PaneNode, cell?: ScrollCell): HTMLElement[] {
+    el.classList.toggle("carreau-scrollcell", !!cell);
+    el.classList.toggle("carreau-scrollcell-row", cell?.axis === "row");
+    el.classList.toggle("carreau-scrollcell-column", cell?.axis === "column");
+    const status = cell && node.tabs[node.active]?.status;
     if (status) el.dataset.status = status;
-    const gutter = Object.assign(document.createElement("div"), { className: "carreau-gutter" });
-    gutter.append(Object.assign(document.createElement("div"), { className: "carreau-gutter-status" }));
-    el.append(gutter);
-    if (cell.axis === "column") {
-      gutter.classList.add("resizes");
-      gutter.title = "Drag to resize; double-click: natural height";
-      gutter.addEventListener("pointerdown", (e) => this.resizeCell(e, cell, gutter));
-    }
-    if (this.ws.canClosePane(node.id) && !node.tabs.some((t) => this.ws.isClosing(t.id))) {
-      const close = Object.assign(document.createElement("span"), { className: "carreau-cell-close", title: "Close" });
-      close.addEventListener("pointerdown", (e) => e.stopPropagation()); // not a drag, nor a selection
-      close.addEventListener("click", (e) => {
+    else delete el.dataset.status;
+    if (!cell) return [];
+    const gutter = this.parts.get(`gutter:${node.id}`, cell, (cur) => {
+      const g = div("carreau-gutter");
+      g.append(div("carreau-gutter-status"));
+      g.addEventListener("pointerdown", (e) => cur().axis === "column" && this.resizeCell(e, cur(), g));
+      return g;
+    });
+    const resizes = cell.axis === "column";
+    gutter.classList.toggle("resizes", resizes);
+    setAttr(gutter, "title", resizes ? "Drag to resize; double-click: natural height" : null);
+    if (!this.ws.canClosePane(node.id) || node.tabs.some((t) => this.ws.isClosing(t.id))) return [gutter];
+    const close = this.parts.get(`cell-close:${node.id}`, node.id, (cur) => {
+      const c = span("carreau-cell-close");
+      c.title = "Close";
+      c.addEventListener("pointerdown", (e) => e.stopPropagation()); // not a drag, nor a selection
+      c.addEventListener("click", (e) => {
         e.stopPropagation();
-        this.ws.closePane(node.id);
+        this.ws.closePane(cur());
       });
-      el.append(close);
-    }
+      return c;
+    });
+    return [gutter, close];
   }
 
   /**
    * Drag a bar in a scroll-column's cell: resize the cell (see `decorateScrollCell`). A double
    * press (a double click) puts it back to its natural height. (Detected here, by the cell, not
-   * by `dblclick`: a re-render between the two presses would replace the bar.)
+   * by `dblclick`: a re-render between the two presses can replace the bar, e.g. if the cell
+   * moved.)
    */
   private resizeCell(e: PointerEvent, cell: ScrollCell, gutter: HTMLElement): void {
     const { el, node } = cell;
@@ -688,150 +845,218 @@ export class View implements DndHost {
     });
   }
 
-  private renderTabBar(node: PaneNode, ctx: Ctx): HTMLElement {
-    const bar = Object.assign(document.createElement("div"), { className: "carreau-tabbar" });
+  /** A pane's tab bar (to place, then fill: `fillTabBar`). */
+  private tabBar(node: PaneNode): HTMLElement {
+    return this.parts.get(`bar:${node.id}`, null, () => div("carreau-tabbar"));
+  }
+
+  private fillTabBar(bar: HTMLElement, node: PaneNode, ctx: Ctx, paneEl: HTMLElement): void {
+    const data = { node, ctx, paneEl };
     // Tabs never shrink: they scroll horizontally (scrollbar hidden), with shadows.
-    const wrap = Object.assign(document.createElement("div"), { className: "carreau-tabs-wrap" });
-    const scroller = Object.assign(document.createElement("div"), { className: "carreau-tabs" });
-    scroller.dataset.pane = node.id;
-    scroller.addEventListener("scroll", () => updateTabShadows(scroller));
-    scroller.addEventListener(
-      "wheel",
-      (e) => {
-        // A plain mouse wheel scrolls the tabs sideways.
-        if (e.deltaX !== 0 || scroller.scrollWidth <= scroller.clientWidth) return;
-        scroller.scrollLeft += e.deltaY;
-        e.preventDefault();
-      },
-      { passive: false },
-    );
-    wrap.append(scroller);
+    const wrap = this.parts.get(`tabs:${node.id}`, null, () => {
+      const wrap = div("carreau-tabs-wrap");
+      const scroller = div("carreau-tabs");
+      scroller.dataset.pane = node.id;
+      scroller.addEventListener("scroll", () => updateTabShadows(scroller));
+      scroller.addEventListener(
+        "wheel",
+        (e) => {
+          // A plain mouse wheel scrolls the tabs sideways.
+          if (e.deltaX !== 0 || scroller.scrollWidth <= scroller.clientWidth) return;
+          scroller.scrollLeft += e.deltaY;
+          e.preventDefault();
+        },
+        { passive: false },
+      );
+      wrap.append(scroller);
+      return wrap;
+    });
+    const scroller = wrap.firstElementChild as HTMLElement;
+    const kids: HTMLElement[] = [];
     // Its name, if it has one: left of the tabs (double-click: edit it). It's a handle, like the
     // header's empty part.
     if (node.name) {
-      const name = Object.assign(document.createElement("span"), { className: "carreau-pane-name", textContent: node.name, title: `${node.name} (double-click to rename)` });
-      name.addEventListener("pointerdown", (e) => this.dnd.arm(e, { kind: "pane", paneId: node.id }, node.name!, bar.parentElement!));
-      name.addEventListener("dblclick", () => this.editPaneName(node.id));
-      bar.append(name);
+      const name = this.parts.get(`pane-name:${node.id}`, data, (cur) => {
+        const name = span("carreau-pane-name");
+        name.addEventListener("pointerdown", (e) => this.dnd.arm(e, { kind: "pane", paneId: cur().node.id }, cur().node.name ?? "pane", cur().paneEl));
+        name.addEventListener("dblclick", () => this.editPaneName(cur().node.id));
+        return name;
+      });
+      if (name.textContent !== node.name) name.textContent = node.name;
+      setAttr(name, "title", `${node.name} (double-click to rename)`);
+      kids.push(name);
     }
-    bar.append(wrap);
+    kids.push(wrap);
+    // The empty part of the header moves the pane.
+    kids.push(
+      this.parts.get(`tabspace:${node.id}`, data, (cur) => {
+        const space = div("carreau-tabspace");
+        space.title = "Drag to move this pane";
+        space.addEventListener("pointerdown", (e) => {
+          const { node, paneEl } = cur();
+          this.dnd.arm(e, { kind: "pane", paneId: node.id }, node.tabs[node.active]?.title ?? node.name ?? "pane", paneEl);
+        });
+        return space;
+      }),
+    );
+    if (!ctx.floating)
+      // "More" button at the right end: opens the pane menu.
+      kids.push(
+        this.parts.get(`more:${node.id}`, data, (cur) => {
+          const more = Object.assign(div("carreau-more"), { title: "Pane options", textContent: "⋯" });
+          more.addEventListener("pointerdown", (e) => e.stopPropagation());
+          more.addEventListener("click", () => (this.menuAnchor === more ? this.closeMenu() : this.openMenu(more, cur().node)));
+          return more;
+        }),
+      );
+    syncChildren(bar, kids);
+    const tabs: HTMLElement[] = [];
     node.tabs.forEach((t, i) => {
       // Merged tabs (a complex): a link icon between them, which drags the whole complex.
-      if (i > 0 && t.link && t.link === node.tabs[i - 1].link) {
-        const link = linkIcon();
-        const members = complexAt(node, i).tabs;
-        link.addEventListener("pointerdown", (e) => this.dnd.arm(e, { kind: "complex", link: t.link! }, members.map((m) => m.title).join(" + "), link));
-        scroller.append(link);
-      }
-      scroller.append(this.renderTab(node, t, i, ctx));
+      if (i > 0 && t.link && t.link === node.tabs[i - 1].link)
+        tabs.push(
+          this.parts.get(`link:${node.id}:${t.id}`, { node, i }, (cur) => {
+            const link = linkIcon();
+            link.addEventListener("pointerdown", (e) => {
+              const { node, i } = cur();
+              const members = complexAt(node, i).tabs;
+              this.dnd.arm(e, { kind: "complex", link: node.tabs[i].link! }, members.map((m) => m.title).join(" + "), link);
+            });
+            return link;
+          }),
+        );
+      tabs.push(this.renderTab(node, t, i, ctx));
     });
-    // The empty part of the header moves the pane.
-    const space = Object.assign(document.createElement("div"), { className: "carreau-tabspace", title: "Drag to move this pane" });
-    space.addEventListener("pointerdown", (e) => this.dnd.arm(e, { kind: "pane", paneId: node.id }, node.tabs[node.active]?.title ?? node.name ?? "pane", bar.parentElement!));
-    bar.append(space);
-    if (!ctx.floating) {
-      // "More" button at the right end: opens the pane menu.
-      const more = Object.assign(document.createElement("div"), { className: "carreau-more", title: "Pane options", textContent: "⋯" });
-      more.addEventListener("pointerdown", (e) => e.stopPropagation());
-      more.addEventListener("click", () => (this.menuAnchor === more ? this.closeMenu() : this.openMenu(more, node)));
-      bar.append(more);
-    }
-    return bar;
+    syncChildren(scroller, tabs);
   }
 
   /** A tab: [icon][short][×]. The status changes how the icon looks (see the CSS). */
-  private renderTab(node: PaneNode, t: PaneNode["tabs"][number], i: number, ctx: Ctx): HTMLElement {
-    const tab = Object.assign(document.createElement("div"), { className: "carreau-tab" + (i === node.active ? " active" : "") });
-    tab.dataset.tab = t.id;
-    const icon = t.icon ?? (t.group ? "▦" : null);
-    if (icon) tab.append(Object.assign(document.createElement("span"), { className: "carreau-tab-icon", innerHTML: icon }));
-    const short = Object.assign(document.createElement("span"), { className: "carreau-tab-short" });
-    if (t.short) short.innerHTML = t.short;
-    else short.textContent = t.title;
-    tab.append(short);
-    if (t.group) tab.classList.add("is-group");
-    if (t.link && complexAt(node, i).tabs.length > 1) tab.classList.add("linked");
-    if (t.status) tab.classList.add(`status-${t.status}`);
-    tab.style.setProperty("--tab-accent", cellAccent(t));
-    if (this.ws.isClosing(t.id)) {
-      tab.classList.add("closing");
-      tab.append(this.closingSpinner(t.id));
-    } else if (this.ws.canCloseTab(t.id)) {
-      const close = Object.assign(document.createElement("span"), { className: "carreau-tab-close", title: "Close tab" });
-      close.addEventListener("pointerdown", (e) => e.stopPropagation()); // not a drag
-      close.addEventListener("click", (e) => {
-        e.stopPropagation(); // not an activation
-        this.ws.closeTab(t.id);
+  private renderTab(node: PaneNode, t: Tab, i: number, ctx: Ctx): HTMLElement {
+    const key = `${node.id}:${t.id}`;
+    const tab = this.parts.get(`tab:${key}`, { node, t, i, ctx }, (cur) => {
+      const tab = div("carreau-tab");
+      tab.dataset.tab = t.id;
+      tab.addEventListener("auxclick", (e) => e.button === 1 && this.ws.closeTab(cur().t.id)); // middle click
+      tab.addEventListener("mousedown", (e) => e.button === 1 && e.preventDefault()); // no autoscroll
+      tab.addEventListener("click", () => {
+        const { node, i } = cur();
+        this.ws.activateTab(node.id, i);
+        this.focusShownGroup(node.id);
       });
-      tab.append(close);
-    }
-    tab.addEventListener("auxclick", (e) => e.button === 1 && this.ws.closeTab(t.id)); // middle click
-    tab.addEventListener("mousedown", (e) => e.button === 1 && e.preventDefault()); // no autoscroll
-    tab.addEventListener("click", () => {
-      this.ws.activateTab(node.id, i);
-      this.focusShownGroup(node.id);
-    });
-    // Right click: the tab's menu (close, send to, collapse its group).
-    tab.addEventListener("contextmenu", (e) => {
-      e.preventDefault();
-      this.openTabMenu(e, node, t);
-    });
-    tab.addEventListener("pointerdown", (e) => this.dnd.arm(e, { kind: "tab", tabId: t.id }, t.title, tab));
-    if (!ctx.floating)
-      // Double click: maximize the pane (or restore it if it already is).
+      // Right click: the tab's menu (close, send to, collapse its group).
+      tab.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        this.openTabMenu(e, cur().node, cur().t);
+      });
+      tab.addEventListener("pointerdown", (e) => this.dnd.arm(e, { kind: "tab", tabId: cur().t.id }, cur().t.title, tab));
+      // Double click: maximize the pane (or restore it if it already is). Not in a window.
       tab.addEventListener("dblclick", () => {
+        const { node, ctx } = cur();
+        if (ctx.floating) return;
         this.ws.select({ id: node.id });
         if (this.ws.maximized?.id === node.id && !this.ws.maximized.range) this.ws.restore();
         else this.ws.maximize();
       });
+      return tab;
+    });
+    tab.classList.toggle("active", i === node.active);
+    tab.classList.toggle("is-group", !!t.group);
+    tab.classList.toggle("linked", !!t.link && complexAt(node, i).tabs.length > 1);
+    for (const c of [...tab.classList]) if (c.startsWith("status-") && c !== `status-${t.status}`) tab.classList.remove(c);
+    if (t.status) tab.classList.add(`status-${t.status}`);
+    tab.style.setProperty("--tab-accent", cellAccent(t));
+    const kids: HTMLElement[] = [];
+    const icon = t.icon ?? (t.group ? "▦" : null);
+    if (icon) {
+      const el = this.parts.get(`tab-icon:${key}`, null, () => span("carreau-tab-icon"));
+      setHTML(el, icon);
+      kids.push(el);
+    }
+    const short = this.parts.get(`tab-short:${key}`, null, () => span("carreau-tab-short"));
+    if (t.short) setHTML(short, t.short);
+    else if (HTML.get(short) !== undefined || short.textContent !== t.title) {
+      HTML.delete(short);
+      short.textContent = t.title;
+    }
+    kids.push(short);
+    const closing = this.ws.isClosing(t.id);
+    tab.classList.toggle("closing", closing);
+    if (closing) kids.push(this.closingSpinner(t.id, `tab:${key}`));
+    else if (this.ws.canCloseTab(t.id))
+      kids.push(
+        this.parts.get(`tab-close:${key}`, t.id, (cur) => {
+          const close = span("carreau-tab-close");
+          close.title = "Close tab";
+          close.addEventListener("pointerdown", (e) => e.stopPropagation()); // not a drag
+          close.addEventListener("click", (e) => {
+            e.stopPropagation(); // not an activation
+            this.ws.closeTab(cur());
+          });
+          return close;
+        }),
+      );
+    syncChildren(tab, kids);
     return tab;
   }
 
   /**
    * Shown instead of a tab's × while it closes: a rotating arc. Hovered, it shows a red ×:
-   * clicking it closes forcefully, without waiting.
+   * clicking it closes forcefully, without waiting. `where`: what it is in (a tab, a strip).
    */
-  private closingSpinner(tabId: string): HTMLElement {
-    const s = Object.assign(document.createElement("span"), { className: "carreau-closing", title: "Closing… click to force close" });
-    // Re-rendering recreates it: keep the rotation continuous, in phase with the clock.
-    s.style.setProperty("--phase", `-${performance.now() % 900}ms`);
-    s.addEventListener("pointerdown", (e) => e.stopPropagation()); // not a drag
-    s.addEventListener("click", (e) => {
-      e.stopPropagation();
-      this.ws.forceClose(tabId);
+  private closingSpinner(tabId: string, where: string): HTMLElement {
+    return this.parts.get(`closing:${where}`, tabId, (cur) => {
+      const s = span("carreau-closing");
+      s.title = "Closing… click to force close";
+      // Made again where it moves (e.g. to the strip): keep the rotation in phase with the clock.
+      s.style.setProperty("--phase", `-${performance.now() % 900}ms`);
+      s.addEventListener("pointerdown", (e) => e.stopPropagation()); // not a drag
+      s.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.ws.forceClose(cur());
+      });
+      return s;
     });
-    return s;
   }
 
-  private renderSplitter(parent: SplitNode, i: number): HTMLElement {
-    const s = Object.assign(document.createElement("div"), { className: "carreau-splitter" });
-    s.addEventListener("pointerdown", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const [a, b] = [parent.children[i - 1], parent.children[i]];
-      const [ea, eb] = [this.elOf(a.id)!, this.elOf(b.id)!];
-      const horiz = kind(parent).axis === "row";
-      const size = (el: HTMLElement) => (horiz ? el.getBoundingClientRect().width : el.getBoundingClientRect().height);
-      const [pa, pb] = [size(ea), size(eb)];
-      const wTot = a.weight + b.weight;
-      const start = horiz ? e.clientX : e.clientY;
-      this.el.classList.add("is-resizing");
-      // Undoable; consecutive resizes of this same splitter coalesce into one step.
-      const token = this.ws.beginResize(`${parent.id}:${i}`);
-      trackPointer(e, s, (ev) => {
-        const na = clamp(pa + (horiz ? ev.clientX : ev.clientY) - start, 30, pa + pb - 30);
-        a.weight = (wTot * na) / (pa + pb);
-        b.weight = wTot - a.weight;
-        ea.style.flex = `${a.weight} 1 0`;
-        eb.style.flex = `${b.weight} 1 0`;
-        this.decorate();
-      }, () => {
-        this.el.classList.remove("is-resizing");
-        this.ws.endResize(token);
-        this.ws.emit();
+  /** The gap before a child of a split sized by its content. */
+  private gap(parent: SplitNode, child: LayoutNode): HTMLElement {
+    return this.parts.get(`gap:${parent.id}:${child.id}`, null, () => div("carreau-gap"));
+  }
+
+  /** The splitter before a child of a split: it resizes the child and the one before it. */
+  private splitter(parent: SplitNode, child: LayoutNode): HTMLElement {
+    return this.parts.get(`splitter:${parent.id}:${child.id}`, { parent, child }, (cur) => {
+      const s = div("carreau-splitter");
+      s.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const { parent, child } = cur();
+        const i = parent.children.indexOf(child);
+        const [a, b] = [parent.children[i - 1], parent.children[i]];
+        const [ea, eb] = [this.elOf(a.id)!, this.elOf(b.id)!];
+        const horiz = kind(parent).axis === "row";
+        const size = (el: HTMLElement) => (horiz ? el.getBoundingClientRect().width : el.getBoundingClientRect().height);
+        const [pa, pb] = [size(ea), size(eb)];
+        const wTot = a.weight + b.weight;
+        const start = horiz ? e.clientX : e.clientY;
+        this.el.classList.add("is-resizing");
+        // Undoable; consecutive resizes of this same splitter coalesce into one step.
+        const token = this.ws.beginResize(`${parent.id}:${i}`);
+        trackPointer(e, s, (ev) => {
+          const na = clamp(pa + (horiz ? ev.clientX : ev.clientY) - start, 30, pa + pb - 30);
+          a.weight = (wTot * na) / (pa + pb);
+          b.weight = wTot - a.weight;
+          ea.style.flex = `${a.weight} 1 0`;
+          eb.style.flex = `${b.weight} 1 0`;
+          this.decorate();
+        }, () => {
+          this.el.classList.remove("is-resizing");
+          this.ws.endResize(token);
+          this.ws.emit();
+        });
       });
+      return s;
     });
-    return s;
   }
 
   /** Apply selection & maximization. Pure CSS: the DOM structure is untouched. */
@@ -1073,6 +1298,13 @@ export class View implements DndHost {
     const n = this.ws.selection.range ? null : this.ws.node(this.ws.selection.id);
     if (n && n.type !== "pane") return RENDERERS[n.type]?.commitFocus?.(n, this);
     if (n?.type !== "pane") return;
+    // A pane showing a group with a focus child (e.g. a prompt-column's prompt): into it.
+    const root = activeGroup(n)?.children[0];
+    const target = root && kind(root).focusChild?.(root);
+    if (target) {
+      this.ws.select({ id: target.id });
+      return this.commitFocus();
+    }
     const tab = n.tabs[n.active];
     const shown = n.tabs[shownIndex(n)];
     if (tab) this.ws.lifecycle.commitFocus?.(tab, (shown && this.contents.get(shown.id)) ?? null);
@@ -1080,14 +1312,14 @@ export class View implements DndHost {
 
   /**
    * A tab was clicked: if the pane now shows a group whose root has a focus child (e.g. a
-   * prompt-column's prompt), select it, and (out of navigation mode) give it the keyboard focus.
+   * prompt-column's prompt), select it. Out of navigation mode, what is selected (that, or the
+   * pane's tab) gets the keyboard focus.
    */
   private focusShownGroup(paneId: string): void {
     const p = this.ws.node(paneId);
     const root = p?.type === "pane" ? activeGroup(p)?.children[0] : undefined;
     const target = root && kind(root).focusChild?.(root);
-    if (!target) return;
-    this.ws.select({ id: target.id });
+    if (target) this.ws.select({ id: target.id });
     if (this.navMode === "off") this.commitFocus();
   }
 
@@ -1101,29 +1333,50 @@ export class View implements DndHost {
   // -------------------------------------------------------------------------
   // Floating windows
 
-  private renderFloat(win: FloatingWindow): HTMLElement {
-    const el = Object.assign(document.createElement("div"), { className: "carreau-float" });
+  /** A floating window's element (kept by its root's id), to place, then fill (`fillFloat`). */
+  private floatEl(win: FloatingWindow): HTMLElement {
+    return this.parts.get(`float:${win.root.id}`, win, (cur) => {
+      const el = div("carreau-float");
+      el.addEventListener("pointerdown", () => this.raiseFloat(cur(), el), { capture: true });
+      return el;
+    });
+  }
+
+  private fillFloat(el: HTMLElement, win: FloatingWindow): void {
     el.classList.toggle("carreau-float-bare", !!win.bare);
     el.classList.toggle("carreau-float-fit", !!win.fit);
     this.placeFloat(el, win);
+    const key = win.root.id;
+    const root = rootCtx(true);
+    const content = this.nodeEl(win.root, root);
+    const kids: HTMLElement[] = [];
     // Title bar: moves the window; holding it still for a second docks the whole window.
-    if (!win.bare) {
-      const bar = Object.assign(document.createElement("div"), { className: "carreau-float-bar", title: "Drag to move; hold still for a second to dock" });
-      bar.addEventListener("pointerdown", (e) => this.armFloatMove(e, win));
-      el.append(bar);
-    }
-    const content = this.renderNode(win.root, rootCtx(true));
-    content.style.flex = win.fit ? "0 1 auto" : "1 1 0";
-    el.append(content);
-    el.addEventListener("pointerdown", () => this.raiseFloat(win, el), { capture: true });
-    if (win.bare) return el;
+    if (!win.bare)
+      kids.push(
+        this.parts.get(`float-bar:${key}`, win, (cur) => {
+          const bar = div("carreau-float-bar");
+          bar.title = "Drag to move; hold still for a second to dock";
+          bar.addEventListener("pointerdown", (e) => this.armFloatMove(e, cur()));
+          return bar;
+        }),
+      );
+    kids.push(content);
     // Resize from any corner or edge; the window never leaves the workspace.
-    for (const dir of ["n", "s", "e", "w", "ne", "nw", "se", "sw"]) {
-      const handle = Object.assign(document.createElement("div"), { className: `carreau-float-resize carreau-resize-${dir}` });
+    if (!win.bare) for (const dir of ["n", "s", "e", "w", "ne", "nw", "se", "sw"]) kids.push(this.floatResizer(win, el, dir));
+    syncChildren(el, kids);
+    this.renderNode(content, win.root, root);
+    content.style.flex = win.fit ? "0 1 auto" : "1 1 0";
+  }
+
+  /** A handle on a window's corner or edge (`dir`: n, se...): it resizes the window. */
+  private floatResizer(win: FloatingWindow, el: HTMLElement, dir: string): HTMLElement {
+    return this.parts.get(`float-resize:${win.root.id}:${dir}`, win, (cur) => {
+      const handle = div(`carreau-float-resize carreau-resize-${dir}`);
       handle.addEventListener("pointerdown", (e) => {
         e.preventDefault();
         e.stopPropagation();
         this.el.classList.add("is-resizing");
+        const win = cur();
         const start = { ...win.rect };
         const [x0, y0] = [e.clientX, e.clientY];
         trackPointer(e, handle, (ev) => {
@@ -1147,9 +1400,8 @@ export class View implements DndHost {
           this.ws.emit();
         });
       });
-      el.append(handle);
-    }
-    return el;
+      return handle;
+    });
   }
 
   /** Place a window, fitting it inside the workspace (shrinking it if needed). */
@@ -1303,8 +1555,11 @@ function inPlaceInput(
   return input;
 }
 
-/** Move a node, preserving its state (iframes, focus, ...) where `moveBefore` exists. */
-function move(parent: HTMLElement, node: HTMLElement): void {
+/**
+ * Move a node (to the end of `parent`, or before `before`), preserving its state (iframes,
+ * focus, ...) where `moveBefore` exists.
+ */
+function move(parent: HTMLElement, node: HTMLElement, before: Node | null = null): void {
   // A focused text field moved by moveBefore keeps the focus but stops taking text (Chrome):
   // focus it again afterwards, caret included. (Fields, and editable elements: e.g. a
   // CodeMirror editor's.)
@@ -1322,7 +1577,7 @@ function move(parent: HTMLElement, node: HTMLElement): void {
           return [r.startContainer, r.startOffset, r.endContainer, r.endOffset] as const;
         })
       : [];
-  moveRaw(parent, node);
+  moveRaw(parent, node, before);
   if (field && caret) {
     field.blur();
     field.focus({ preventScroll: true });
@@ -1349,16 +1604,16 @@ function hint(): HTMLElement {
   return Object.assign(document.createElement("div"), { className: "carreau-empty", textContent: "Empty: drop tabs here, or send them here" });
 }
 
-function moveRaw(parent: HTMLElement, node: HTMLElement): void {
+function moveRaw(parent: HTMLElement, node: HTMLElement, before: Node | null): void {
   const p = parent as HTMLElement & { moveBefore?: (n: Node, ref: Node | null) => void };
   if (p.moveBefore && node.isConnected && parent.isConnected) {
     try {
-      return p.moveBefore(node, null);
+      return p.moveBefore(node, before);
     } catch {
       // fall through
     }
   }
-  parent.appendChild(node);
+  parent.insertBefore(node, before);
 }
 
 export const hasMoveBefore = typeof (Element.prototype as { moveBefore?: unknown }).moveBefore === "function";
@@ -1374,6 +1629,12 @@ function updateFade(el: HTMLElement): void {
   const max = row ? el.scrollWidth - el.clientWidth : el.scrollHeight - el.clientHeight;
   el.classList.toggle("fade-start", pos > 1);
   el.classList.toggle("fade-end", pos < max - 1);
+}
+
+/** Have an observer observe `next` (it observed `prev`): only what changed is (un)observed. */
+function observeOnly(obs: ResizeObserver, prev: Set<Element>, next: Set<Element>): void {
+  for (const x of prev) if (!next.has(x)) obs.unobserve(x);
+  for (const x of next) if (!prev.has(x)) obs.observe(x);
 }
 
 /** Whether a scroll split is scrolled to its end, along its axis (1px tolerance). */
