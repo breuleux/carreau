@@ -250,7 +250,7 @@
 @keyframes carreau-unresponsive { 50% { opacity: 0.5; } }
 /* a cell's "long" (e.g. the command or prompt behind it), at the top, tinted by its accent */
 .carreau-long {
-  position: relative; margin: -10px -10px 10px; padding: 6px 10px; flex: none; cursor: grab;
+  position: relative; margin: -10px -10px 10px; padding: 6px 10px; flex: none; cursor: grab; user-select: text;
   font: 12px ui-monospace, monospace; color: light-dark(#23252b, #d7d9de); white-space: pre-wrap; overflow-wrap: anywhere;
   background: color-mix(in oklch, var(--cell-accent) 24%, var(--carreau-pane-bg));
   border-bottom: 1px solid color-mix(in oklch, var(--cell-accent) 40%, var(--carreau-pane-bg));
@@ -363,6 +363,7 @@
 .carreau-cell-close:hover { color: light-dark(#1d1e22, #eee); background: light-dark(#e3e5ea, #3a3d48); }
 /* a secondary focus: what cell operations act on, when not the selection (Workspace.operand) */
 .carreau.nav-mode .carreau-pane.secondary { outline: 1px dotted light-dark(#8a8d98, #80838d); outline-offset: -2px; }
+.carreau-long.over-text { cursor: text; }
 .carreau-long.empty { padding: 0; height: 7px; }
 .carreau-long.closing { padding-right: 28px; }
 .carreau-long.empty.closing { height: 20px; }

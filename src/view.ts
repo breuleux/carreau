@@ -179,6 +179,23 @@ function setHTML(el: HTMLElement, html: string): boolean {
   return true;
 }
 
+/** Whether a point is on the text inside `el` (a character's box), not beside it. */
+function overText(el: HTMLElement, x: number, y: number): boolean {
+  const pos = document.caretPositionFromPoint?.(x, y);
+  const node = pos?.offsetNode;
+  if (!pos || !node || node.nodeType !== Node.TEXT_NODE || !el.contains(node)) return false;
+  const len = node.textContent?.length ?? 0;
+  const r = document.createRange();
+  // The caret goes before or after the character under the point: try both.
+  for (const o of [pos.offset - 1, pos.offset]) {
+    if (o < 0 || o >= len) continue;
+    r.setStart(node, o);
+    r.setEnd(node, o + 1);
+    for (const b of r.getClientRects()) if (x >= b.left && x < b.right && y >= b.top && y < b.bottom) return true;
+  }
+  return false;
+}
+
 /** Set an attribute, or remove it (null). */
 function setAttr(el: HTMLElement, name: string, value: string | null): void {
   if (value === null) el.removeAttribute(name);
@@ -703,7 +720,18 @@ export class View implements DndHost {
       const long = this.parts.get(`long:${node.id}`, { node, el }, (cur) => {
         const l = div("carreau-long");
         l.title = "Drag to move this pane";
+        // Its text can be selected (and copied): a press on the text selects, one beside it
+        // drags. The cursor tells which.
+        l.addEventListener("pointermove", (e) => {
+          if (!e.buttons) l.classList.toggle("over-text", overText(l, e.clientX, e.clientY));
+        });
+        l.addEventListener("pointerleave", () => l.classList.remove("over-text"));
+        // A press beside the text drags, without selecting anything on its way.
+        let pressOnText = false;
+        l.addEventListener("selectstart", (e) => pressOnText || e.preventDefault());
         l.addEventListener("pointerdown", (e) => {
+          pressOnText = overText(l, e.clientX, e.clientY);
+          if (pressOnText) return;
           const { node, el } = cur();
           this.dnd.arm(e, { kind: "pane", paneId: node.id }, node.tabs[node.active]?.title ?? "pane", el);
         });
