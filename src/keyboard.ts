@@ -17,6 +17,9 @@ export type NavAction =
   | "float"
   | "closeTab"
   | "closePane"
+  /** close the focused tab right away, without waiting for (or letting) its contents agree to
+   *  it (`Workspace.forceClose`): for one that refuses to close, or hangs */
+  | "forceCloseTab"
   | "group"
   | "collapse"
   | "renameTab"
@@ -464,6 +467,15 @@ export class KeyboardNav {
       case "closePane": {
         const n = this.operand();
         if (n) ws.closePane(n.id);
+        return;
+      }
+      case "forceCloseTab": {
+        const n = this.operand();
+        if (n?.type === "pane") {
+          const tab = (n as PaneNode).tabs[(n as PaneNode).active];
+          if (tab && (ws.isClosing(tab.id) || ws.canCloseTab(tab.id))) ws.forceClose(tab.id);
+          else if (!tab) ws.closePane(n.id);
+        }
         return;
       }
       case "growWidth":
