@@ -815,14 +815,15 @@ export class DragDrop {
     const main = d.minis?.main ?? d.main ?? line.levels[0];
     const r0 = bandAt(line, b0, b1, main.span);
     mk("rect", { x: r0.x, y: r0.y, width: r0.w, height: r0.h, fill: WHITE, ...edged(main), class: "carreau-indicator" + (isActive(main) ? " active" : "") });
-    // Mini lines: grey, with the stretch of the full line their choice covers in white.
+    // Mini lines: grey, with the stretch of the full line their choice covers in white. The
+    // active one gets a shadow (see the CSS): same size, same outline.
     const lo = Math.min(...all.map((c) => c.span[0]));
     const hi = Math.max(...all.map((c) => c.span[1]));
     const row = sideAxis[line.side] === "row"; // (a vertical line)
     for (const { choice, rect: r } of d.minis?.items ?? []) {
       const active = isActive(choice);
       const g = mk("g", { class: "carreau-indicator carreau-mini" + (active ? " active" : "") });
-      mk("rect", { x: r.x, y: r.y, width: r.w, height: r.h, rx: 1, fill: GREY, ...edged(choice) }, g);
+      mk("rect", { x: r.x, y: r.y, width: r.w, height: r.h, rx: 1, fill: GREY, stroke: grey(0.4), "stroke-width": 1 }, g);
       const [len0, len] = row ? [r.y, r.h] : [r.x, r.w];
       const f0 = (Math.max(choice.span[0], lo) - lo) / (hi - lo || 1);
       const f1 = (Math.min(choice.span[1], hi) - lo) / (hi - lo || 1);

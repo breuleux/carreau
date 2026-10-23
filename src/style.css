@@ -112,6 +112,8 @@
   stroke: light-dark(#8a8d98, #7d808b); stroke-width: 1.5; stroke-dasharray: 6 4;
 }
 .carreau-indicator { transition: fill 80ms; }
+/* the active mini line (a line's other choice, under the cursor): a shadow (same size, same outline) */
+.carreau-mini.active { filter: drop-shadow(0 1px 2px rgb(0 0 0 / 0.6)) drop-shadow(0 0 4px rgb(0 0 0 / 0.35)); }
 .carreau.is-dragging .carreau-selection { display: none !important; }
 
 /* scroll splits: children take their natural size along the axis */
