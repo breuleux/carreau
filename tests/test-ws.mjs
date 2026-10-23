@@ -616,6 +616,83 @@ for (const [a, b] of [["swapUp", "swapDown"], ["swapLeft", "swapRight"], ["swapR
   try { deserialize(JSON.stringify({ type: "pane", id: "p", weight: 1, active: 0, tabs: [], size: -3 })); } catch { refused = true; }
   check("a bad size is refused on load", refused);
 }
+// Resizing the focus (keyboard: grow/shrink width/height)
+{
+  const { groupPane } = await server.ssrLoadModule("/src/model.ts");
+  const share = (ws, i) => { const kids = ws.root.children; return kids[i].weight / kids.reduce((s, c) => s + c.weight, 0); };
+  const ws = new Workspace(row([pane(["A"]), pane(["B"]), pane(["C"])]));
+  ws.select({ id: ws.root.children[0].id });
+  ws.resizeFocus("row", 1);
+  check(`wider: A's share 1/3 → ${share(ws, 0).toFixed(3)}, B and C even`, Math.abs(share(ws, 0) - (1 / 3 + 0.05)) < 1e-9 && Math.abs(share(ws, 1) - share(ws, 2)) < 1e-9);
+  ws.resizeFocus("row", 1);
+  ws.resizeFocus("row", -1);
+  check(`twice wider, once narrower: ${share(ws, 0).toFixed(3)}`, Math.abs(share(ws, 0) - (1 / 3 + 0.05)) < 1e-9);
+  ws.undo();
+  check(`one undo step for the three: ${share(ws, 0).toFixed(3)}`, Math.abs(share(ws, 0) - 1 / 3) < 1e-9);
+  for (let i = 0; i < 20; i++) ws.resizeFocus("row", 1);
+  check(`at most 95%: ${share(ws, 0).toFixed(3)}`, Math.abs(share(ws, 0) - 0.95) < 1e-9 && !ws.resizeFocus("row", 1));
+  check("no column around it: taller does nothing", !ws.resizeFocus("column", 1));
+  check("the weights keep their total (no blank space)", Math.abs(ws.root.children.reduce((s, c) => s + c.weight, 0) - 3) < 1e-9);
+  // Shrinking one as far as it goes, then the other: no blank space, no jump.
+  const two = new Workspace(row([pane(["alpha"]), pane(["beta"])]));
+  two.select({ id: two.root.children[1].id });
+  for (let i = 0; i < 20; i++) two.resizeFocus("row", -1);
+  two.select({ id: two.root.children[0].id });
+  two.resizeFocus("row", -1);
+  const w = two.root.children.map((c) => c.weight);
+  check(`beta at 5%, then alpha narrower: alpha ${(w[0] / (w[0] + w[1])).toFixed(2)}, weights summing to ${(w[0] + w[1]).toFixed(2)}`, Math.abs(w[0] / (w[0] + w[1]) - 0.9) < 1e-9 && Math.abs(w[0] + w[1] - 2) < 1e-9);
+  // Through a group: inside it, its holder (in a column) gets taller.
+  const g = new Workspace(column([groupPane("G", row([pane(["x"]), pane(["y"])]), 1), pane(["z"])]));
+  g.select({ id: panes(g.root).find((p) => p.tabs[0].title === "x").id });
+  g.resizeFocus("column", 1);
+  check(`from inside a group: its holder taller (${(g.root.children[0].weight / (g.root.children[0].weight + g.root.children[1].weight)).toFixed(2)})`, Math.abs(g.root.children[0].weight / (g.root.children[0].weight + g.root.children[1].weight) - 0.55) < 1e-9);
+  // A scroll-column's cell: its height, from its measured size.
+  const sc = new Workspace(row([pane(["L"]), scrollColumn([pane(["c1"]), pane(["c2"])])]));
+  const c1 = panes(sc.root).find((p) => p.tabs[0].title === "c1");
+  sc.select({ id: c1.id });
+  check("a cell with no size, nothing to measure it: nothing", !sc.resizeFocus("column", 1));
+  sc.resizeFocus("column", 1, () => 100);
+  sc.resizeFocus("column", 1, () => 100);
+  check(`taller, from its measured 100px: ${sc.node(c1.id).size}px`, sc.node(c1.id).size === 148);
+  sc.resizeFocus("row", 1);
+  check("wider: in the row, the scroll column's holder", sc.root.children[1].weight > sc.root.children[0].weight);
+}
+// Clear: the finished cells (done, standby, error) in the selection
+{
+  const { groupPane } = await server.ssrLoadModule("/src/model.ts");
+  const st = (title, status) => ({ id: "t" + title, title, ...(status ? { status } : {}) });
+  const titles = (ws) => panes(ws.root).map((p) => p.tabs.map((t) => t.title).join("+")).join(" ");
+  let ws = new Workspace(column([pane([st("A", "done")]), pane([st("B", "running")]), pane([st("C", "error")]), pane([st("D", "standby"), st("E")]), pane([st("F", "done")])]));
+  ws.select({ id: ws.root.id, range: [0, 3] });
+  const n = await ws.clear();
+  check(`clear in a range (not F, outside it): ${n} removed: ${titles(ws)}`, n === 3 && titles(ws) === "B E F");
+  ws.undo();
+  check(`one undo step: ${titles(ws)}`, titles(ws) === "A B C D+E F");
+  // A refused close: that tab stays.
+  ws.lifecycle = { closeTab: async (t) => { if (t.title === "C") throw new Error("no"); }, forceCloseTab: async () => {} };
+  ws.select({ id: ws.root.id });
+  await ws.clear();
+  check(`C refuses: it stays: ${titles(ws)}`, titles(ws) === "B C E");
+  // Inside a group: its cells; the group tab itself (whatever its status) stays.
+  ws = new Workspace(row([pane(["L"]), groupPane("G", column([pane([st("x", "done")]), pane([st("y")])]), 1)]));
+  ws.root.children[1].tabs[0].status = "done";
+  ws.select({ id: ws.root.id });
+  await ws.clear();
+  check(`a group: its done cell goes, not the (done) group tab: ${titles(ws)}`, titles(ws) === "L G y");
+  // From a prompt: its column; the selection stays on the prompt.
+  ws = new Workspace(row([pane(["L"]), promptColumn([pane([st("p1", "done")]), pane([st("p2")]), pane([st("p3", "error")])])]));
+  const col = ws.root.children[1].tabs[0].group.children[0];
+  const q = col.children.at(-1).id;
+  ws.select({ id: q });
+  await ws.clear();
+  check(`from the prompt: its column cleared: ${titles(ws)}`, titles(ws) === "L Prompt p2" && ws.selection.id === q);
+  // The selected cell cleared: the selection goes to what's left around it.
+  ws = new Workspace(row([pane(["L"]), column([pane([st("a", "done")]), pane([st("b", "done")])])]));
+  const colId = ws.root.children[1].id;
+  ws.select({ id: colId });
+  await ws.clear();
+  check(`the selected column emptied: the selection on what's left (${ws.node(ws.selection.id)?.type})`, titles(ws) === "L" && !!ws.node(ws.selection.id));
+}
 // Next/previous tab from a lone tab in a group: up to the first pane with several tabs
 {
   const { groupPane } = await server.ssrLoadModule("/src/model.ts");

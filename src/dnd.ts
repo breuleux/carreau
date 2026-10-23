@@ -153,6 +153,8 @@ const ESC_COOLDOWN = 500;
 
 export class DragDrop {
   state: DragState | null = null;
+  /** The layout's index, during a drag (it doesn't change meanwhile). */
+  private index: LayoutIndex | null = null;
   /** No drag may start before this time. */
   private cooldownUntil = 0;
 
@@ -211,6 +213,7 @@ export class DragDrop {
     document.body.append(ghost);
     sourceEl.classList.add("carreau-drag-source");
     this.host.el.classList.add("is-dragging");
+    this.index = null;
     this.state = { subject, ghost, sourceEl, win, hoverPane: null, lines: [], tabBar: null, zones: null, inCenter: false, near: null, active: null, space: null };
   }
 
@@ -218,6 +221,7 @@ export class DragDrop {
     const d = this.state;
     if (!d) return;
     this.state = null;
+    this.index = null;
     d.ghost.remove();
     d.sourceEl.classList.remove("carreau-drag-source");
     this.host.el.classList.remove("is-dragging");
@@ -229,7 +233,27 @@ export class DragDrop {
   }
 
   private tryDrop(target: DropTarget): ForestResult | null {
+    if (this.splitsInCell(target)) return null;
     return this.ws.tryDrop(this.state!.subject, target, this.state!.win);
+  }
+
+  /**
+   * Whether a drop would split a scroll split's cell, or something inside it, along the scroll
+   * split's axis (e.g. stacking a pane above another in a row that is a scroll-column's cell):
+   * not offered, as that's no different from inserting before or after the cell, which the
+   * scroll split's own insertions (between its cells, at its start and end) offer.
+   */
+  private splitsInCell(t: DropTarget): boolean {
+    const idx = (this.index ??= this.ws.index());
+    if (t.kind === "side") {
+      const e = idx.get(t.targetId);
+      return !!e && e.ctx.inCell === sideAxis[t.side];
+    }
+    if (t.kind === "between") {
+      const e = idx.get(t.splitId);
+      return !!e && isSplit(e.node) && e.ctx.inCell !== null && e.ctx.inCell === kind(e.node).axis;
+    }
+    return false;
   }
 
   move(ev: PointerEvent): void {

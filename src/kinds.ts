@@ -15,6 +15,11 @@ export interface Ctx {
   sizedAlong: Orientation | null;
   /** The node is a direct child of a scroll split along this axis: one of its "cells". */
   cellOf: Orientation | null;
+  /**
+   * The node is in a cell of a scroll split along this axis: the cell itself, or inside it
+   * through splits (not through groups: a group's layout is its own).
+   */
+  inCell: Orientation | null;
   /** The node is in a floating window. */
   floating: boolean;
 }
@@ -23,6 +28,7 @@ export const rootCtx = (floating = false): Ctx => ({
   natural: { row: false, column: false },
   sizedAlong: null,
   cellOf: null,
+  inCell: null,
   floating,
 });
 
@@ -140,6 +146,7 @@ export function splitKind(axis: Orientation, scroll: boolean): NodeKind {
         natural: { ...ctx.natural, [axis]: byContent },
         sizedAlong: byContent ? axis : null,
         cellOf: scroll ? axis : null,
+        inCell: scroll ? axis : ctx.inCell,
         floating: ctx.floating,
       };
     },
@@ -153,7 +160,7 @@ const slot: NodeKind = {
   scroll: false,
   sides: [],
   navStep: false,
-  childContext: (_n, ctx) => ({ ...ctx, sizedAlong: null, cellOf: null }),
+  childContext: (_n, ctx) => ({ ...ctx, sizedAlong: null, cellOf: null, inCell: null }),
   // Removing the root leaves the slot empty (normalization then drops what held it).
 };
 
@@ -168,7 +175,7 @@ const pane: NodeKind = {
   cell: true,
   // A group's layout fills the holder's body, and inherits its natural-size context (inside
   // a scroll split the holder sizes to its content, so the group's parts must too).
-  childContext: (_n, ctx) => ({ ...ctx, sizedAlong: null, cellOf: null }),
+  childContext: (_n, ctx) => ({ ...ctx, sizedAlong: null, cellOf: null, inCell: null }),
   replaceChild(n, i, child) {
     (n as PaneNode).tabs[i].group = child as SplitNode;
   },

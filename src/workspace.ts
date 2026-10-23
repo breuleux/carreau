@@ -80,6 +80,9 @@ export type Command =
   | "restore";
 
 const EPS = 1e-6;
+/** Resizing the focus (`resizeFocus`): a share step (of the split), a cell's height step (px). */
+const SHARE_STEP = 0.05;
+const CELL_STEP = 24;
 /** How many layout changes can be undone. */
 const UNDO_LIMIT = 200;
 
@@ -127,10 +130,14 @@ export function registerOperand(type: LayoutNode["type"], fn: OperandOf): void {
 
 /** A pending close: of a tab, or of a pane (with all its tabs). */
 interface CloseOp {
-  kind: "tab" | "pane";
+  /** a tab, a pane (all its tabs), or a batch of tabs (`clear`) */
+  kind: "tab" | "pane" | "tabs";
   id: string;
   tabIds: string[];
 }
+
+/** Statuses of finished cells: what `clear` removes. */
+export const CLEARABLE = new Set(["done", "standby", "error"]);
 
 function sameSel(a: Selection | null, b: Selection | null): boolean {
   if (!a || !b) return a === b;
@@ -578,12 +585,68 @@ export class Workspace {
   }
 
   /**
+   * Clear the selection (or `sel`): close every tab with a finished status (`CLEARABLE`:
+   * "done", "standby", "error") in it, inside groups too (a group tab itself, never: only what
+   * it holds). Emptied panes go. Meanwhile the tabs show as closing; once their contents have
+   * closed (through the lifecycle), they are removed together, as one undo step. (A refused
+   * close: that tab stays.) On a node that holds no tabs (e.g. a prompt): its parent's. The
+   * selection stays, or goes to what's left of it. Resolves to how many tabs were removed.
+   */
+  async clear(sel: Selection = this.selection): Promise<number> {
+    let n = this.node(sel.id);
+    if (!n) return 0;
+    let nodes = this.selectedNodes(sel);
+    if (n.type !== "pane" && !isSplit(n)) {
+      n = this.index().parent((n as LayoutNode).id); // (other leaf types, if any)
+      if (!n) return 0;
+      nodes = [n];
+    }
+    const tabs = nodes.flatMap((x) => [...walk(x)]).flatMap(({ node }) => (node.type === "pane" ? node.tabs : []));
+    const clearable = tabs.filter((t) => !t.group && CLEARABLE.has(t.status ?? "") && !this.closing.has(t.id));
+    if (!clearable.length) return 0;
+    const op: CloseOp = { kind: "tabs", id: "", tabIds: clearable.map((t) => t.id) };
+    for (const id of op.tabIds) this.closing.set(id, op);
+    this.emit();
+    const results = await Promise.allSettled(clearable.map((t) => closeTabWith(t, this.lifecycle)));
+    // (Forced meanwhile: already gone, and out of the batch.)
+    const closed = op.tabIds.filter((id) => results[clearable.findIndex((t) => t.id === id)].status === "fulfilled");
+    this.endClose(op);
+    // (The selection now: it may have moved while the contents closed.)
+    const was = this.selection;
+    const tree = this.treeOf(was.id);
+    const path = (tree && pathTo(tree, was.id)) ?? [];
+    const removed =
+      closed.length > 0 &&
+      this.change((forest) => {
+        for (const id of closed) {
+          const ft = findTab(forest, id);
+          if (!ft) continue;
+          ft.pane.tabs.splice(ft.index, 1);
+          if (ft.index < ft.pane.active || ft.pane.active >= ft.pane.tabs.length) ft.pane.active = Math.max(0, ft.pane.active - 1);
+        }
+      });
+    // The selection went with what was cleared: to what's left of it (the innermost survivor).
+    if (removed && !this.node(was.id)) {
+      const left = [...path].reverse().find((x) => x.type !== "slot" && this.node(x.id));
+      if (left) this.select({ id: left.id });
+    }
+    if (!removed) this.emit();
+    return removed ? closed.length : 0;
+  }
+
+  /**
    * Close what a tab's pending close is about (the tab, or its whole pane) right away: call
    * the forceful close without waiting for it, and remove it.
    */
   forceClose(tabId: string): boolean {
     if (!this.closing.has(tabId)) this.leaveComplex(tabId);
-    const op = this.closing.get(tabId) ?? { kind: "tab" as const, id: tabId, tabIds: [tabId] };
+    let op = this.closing.get(tabId) ?? { kind: "tab" as const, id: tabId, tabIds: [tabId] };
+    if (op.kind === "tabs") {
+      // One tab of a batch (a clear): that tab alone, now; the batch goes on without it.
+      this.closing.delete(tabId);
+      op.tabIds = op.tabIds.filter((x) => x !== tabId);
+      op = { kind: "tab", id: tabId, tabIds: [tabId] };
+    }
     const n = op.kind === "pane" ? this.node(op.id) : null;
     const ft = op.kind === "tab" ? this.findTab(op.id) : null;
     if (!n && !ft) return false;
@@ -813,6 +876,60 @@ export class Workspace {
   canCollapse(paneId: string): boolean {
     const p = this.node(paneId);
     return p?.type === "pane" && canCollapse(p);
+  }
+
+  /**
+   * Grow (`delta` > 0) or shrink (< 0) the focus along an axis: the innermost node around the
+   * selection whose size along that axis can change (up through splits, and through groups to
+   * their holders). In a plain split along the axis: its share of it, 5% of the split per step
+   * (the others keep their proportions, and the weights their total). A cell of a
+   * scroll-column, vertically: its height (`size`), 24px per step; `measure` gives a node's current size in pixels along the axis,
+   * for a cell that has no size yet. Steps on the same node and axis make one undo step (like a
+   * splitter drag). Returns whether something changed.
+   */
+  resizeFocus(axis: "row" | "column", delta: number, measure?: (id: string) => number | null): boolean {
+    const idx = this.index();
+    let x: LayoutNode | null = idx.node(this.selection.id);
+    while (x) {
+      const p: LayoutNode | null = idx.parent(x.id);
+      if (p?.type === "slot") {
+        x = idx.holder(x.id); // a group's root: its holder's size
+        continue;
+      }
+      if (!p || p.type === "forest" || !isSplit(p)) return false;
+      const k = kind(p);
+      if (k.axis === axis) {
+        if (k.scroll && axis === "column" && (x.type === "pane" || isSplit(x))) return this.resizeCell(x as PaneNode | SplitNode, delta, measure);
+        if (!k.scroll && p.children.length > 1) return this.resizeShare(p, x, delta);
+      }
+      x = p;
+    }
+    return false;
+  }
+
+  private resizeShare(split: SplitNode, x: LayoutNode, delta: number): boolean {
+    const total = split.children.reduce((s, c) => s + c.weight, 0);
+    const others = total - x.weight;
+    const frac = Math.min(0.95, Math.max(0.05, x.weight / total + SHARE_STEP * Math.sign(delta)));
+    if (others <= 0 || Math.abs(frac - x.weight / total) < 1e-9) return false;
+    const token = this.beginResize(`focus:${x.id}:${kind(split).axis}`);
+    // The total stays the same: weights are flex-grow factors, and summing to less than the
+    // number of children (after normalization, their average is 1) would leave blank space.
+    const scale = ((1 - frac) * total) / others;
+    for (const c of split.children) c.weight = c === x ? frac * total : c.weight * scale;
+    this.endResize(token);
+    this.emit();
+    return true;
+  }
+
+  private resizeCell(x: PaneNode | SplitNode, delta: number, measure?: (id: string) => number | null): boolean {
+    const start = x.size ?? measure?.(x.id);
+    if (!start) return false;
+    const token = this.beginResize(`focus:${x.id}:column`);
+    x.size = Math.max(40, Math.round(start + CELL_STEP * Math.sign(delta)));
+    this.endResize(token);
+    this.emit();
+    return true;
   }
 
   /** The scroll split a pane shows (as its active group's root), if any. */

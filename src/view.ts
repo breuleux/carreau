@@ -113,6 +113,8 @@ interface ScrollCell {
   axis: "row" | "column";
 }
 
+/** Two presses on a cell's bar within this long (ms) are a double click. */
+const DOUBLE_PRESS = 400;
 /** A resized scroll-column cell's minimum height. */
 const MIN_CELL = 40;
 /** Minimum size of a floating window. */
@@ -138,6 +140,8 @@ export class View implements DndHost {
   /** Renderers' `attached` calls, for after the new tree is attached. */
   private pendingAttach: (() => void)[] = [];
   private renderingNow = false;
+  /** The latest press on a cell's bar, to tell a double click (see `resizeCell`). */
+  private lastBarPress: { id: string; t: number } | null = null;
   /** Last known scroll position of each scroll split / tab scroller, by node id. */
   private scrollPos = new Map<string, { left: number; top: number; atEnd: boolean }>();
   /** Keeps sticky (reverse) scroll splits at their end while their content grows. */
@@ -557,13 +561,6 @@ export class View implements DndHost {
       gutter.classList.add("resizes");
       gutter.title = "Drag to resize; double-click: natural height";
       gutter.addEventListener("pointerdown", (e) => this.resizeCell(e, cell, gutter));
-      gutter.addEventListener("dblclick", () => {
-        if (cell.node.size === undefined) return;
-        const token = this.ws.beginResize(`cell:${cell.node.id}`);
-        delete cell.node.size;
-        this.ws.endResize(token);
-        this.ws.emit();
-      });
     }
     if (this.ws.canClosePane(node.id) && !node.tabs.some((t) => this.ws.isClosing(t.id))) {
       const close = Object.assign(document.createElement("span"), { className: "carreau-cell-close", title: "Close" });
@@ -576,12 +573,29 @@ export class View implements DndHost {
     }
   }
 
-  /** Drag a bar in a scroll-column's cell: resize the cell (see `decorateScrollCell`). */
+  /**
+   * Drag a bar in a scroll-column's cell: resize the cell (see `decorateScrollCell`). A double
+   * press (a double click) puts it back to its natural height. (Detected here, by the cell, not
+   * by `dblclick`: a re-render between the two presses would replace the bar.)
+   */
   private resizeCell(e: PointerEvent, cell: ScrollCell, gutter: HTMLElement): void {
     const { el, node } = cell;
     if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
+    const now = performance.now();
+    const last = this.lastBarPress;
+    this.lastBarPress = { id: node.id, t: now };
+    if (last?.id === node.id && now - last.t < DOUBLE_PRESS) {
+      this.lastBarPress = null;
+      if (node.size === undefined) return;
+      // (Its own undo step: not merged with a drag of the bar just before.)
+      const token = this.ws.beginResize(`cell-reset:${node.id}`);
+      delete node.size;
+      this.ws.endResize(token);
+      this.ws.emit();
+      return;
+    }
     gutter.setPointerCapture(e.pointerId);
     const startY = e.clientY;
     const rect = el.getBoundingClientRect();
@@ -595,8 +609,9 @@ export class View implements DndHost {
     let anchor = anchorEdge();
     const token = this.ws.beginResize(`cell:${node.id}`);
     this.el.classList.add("is-resizing");
-    gutter.classList.add("resizing");
+    let moved = false;
     const move = (ev: PointerEvent) => {
+      moved = true;
       const h = Math.max(MIN_CELL, Math.round(startHeight + (startY - ev.clientY) * sign));
       node.size = h;
       el.style.height = `${h}px`;
@@ -609,8 +624,8 @@ export class View implements DndHost {
       gutter.removeEventListener("pointermove", move);
       gutter.removeEventListener("pointerup", up);
       gutter.removeEventListener("pointercancel", up);
-      gutter.classList.remove("resizing");
       this.el.classList.remove("is-resizing");
+      if (!moved) return; // a mere press (maybe half a double click): nothing to re-render
       this.ws.endResize(token);
       this.ws.emit();
     };

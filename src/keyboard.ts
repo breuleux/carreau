@@ -20,6 +20,16 @@ export type NavAction =
   | "group"
   | "collapse"
   | "renameTab"
+  /** remove the finished cells (done, standby, error) in the selection (`Workspace.clear`) */
+  | "clear"
+  /** the focus, wider or narrower (its share of a row; see `Workspace.resizeFocus`) */
+  | "growWidth"
+  | "shrinkWidth"
+  /** the focus, taller or shorter (its share of a column, or a scroll-column cell's height) */
+  | "growHeight"
+  | "shrinkHeight"
+  /** a new cell (created by the focused one) into the focused cell's own tabs */
+  | "insertInto"
   /** a new cell (created by the focused one) beside the focused cell, on that side */
   | `insert${Dir}`
   /** a new cell into the tabs of the cell on that side (or where it would be) */
@@ -422,6 +432,25 @@ export class KeyboardNav {
         if (n) ws.closePane(n.id);
         return;
       }
+      case "growWidth":
+      case "shrinkWidth":
+      case "growHeight":
+      case "shrinkHeight": {
+        const axis = action.endsWith("Width") ? "row" : "column";
+        // (A cell's current size, when it has none of its own: measured.)
+        ws.resizeFocus(axis, action.startsWith("grow") ? 1 : -1, (id) => {
+          const r = this.view.pxRect(id);
+          return r && (axis === "row" ? r.w : r.h);
+        });
+        return;
+      }
+      case "clear":
+        void ws.clear();
+        return;
+      case "insertInto":
+        // Into the focused cell's tabs (a split: its most recently focused pane's).
+        ws.spawn({ split: "tab" });
+        return;
       default: {
         const m = /^(insert|move)(Into)?(Left|Right|Up|Down)$/.exec(action);
         if (!m) return ws.run(action as Command);

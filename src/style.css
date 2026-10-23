@@ -284,19 +284,32 @@
 .carreau-gutter.resizes { cursor: ns-resize; }
 .carreau-gutter::before {
   content: ""; position: absolute; left: 50%; transform: translateX(-50%); top: 12px; bottom: 6px; width: 2px; border-radius: 1px;
-  background: var(--focus-accent, #8a8d96); transition: width 0.1s;
+  background: var(--focus-accent, #8a8d96);
 }
+/* The status circle, as in buche's echo-box: none without a status; done: empty; running: a
+   small throbbing dot; standby: half full; error: red; unresponsive: blinking. (An empty one
+   is filled with the long strip's tint: it sits on the strip.) */
 .carreau-gutter-status {
-  position: absolute; left: 50%; top: 7px; transform: translateX(-50%); width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box;
+  display: none; position: absolute; left: 50%; top: 7px; transform: translateX(-50%); width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box;
   border: 2px solid var(--focus-accent, #8a8d96);
-  /* hollow: the long strip's tint (it sits on the strip) */
   background: color-mix(in oklch, var(--focus-accent, #8a8d96) 24%, var(--carreau-pane-bg));
 }
-.carreau-scrollcell[data-status="done"] .carreau-gutter-status { background: var(--focus-accent, #8a8d96); }
+.carreau-scrollcell[data-status] .carreau-gutter-status { display: block; }
+.carreau-gutter-status::after {
+  content: ""; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 0; height: 0; border-radius: 50%;
+}
+.carreau-scrollcell[data-status="running"] .carreau-gutter-status::after {
+  width: 4px; height: 4px; background: var(--focus-accent, #8a8d96); animation: carreau-throb 2.4s ease-in-out infinite;
+}
+@keyframes carreau-throb { 0%, 100% { opacity: 1; } 50% { opacity: 0.2; } }
+/* standby: half full (the bottom half) */
+.carreau-scrollcell[data-status="standby"] .carreau-gutter-status {
+  background: linear-gradient(to top, var(--focus-accent, #8a8d96) 50%, color-mix(in oklch, var(--focus-accent, #8a8d96) 24%, var(--carreau-pane-bg)) 50%);
+}
 .carreau-scrollcell[data-status="error"] .carreau-gutter-status { border-color: #e5484d; background: #e5484d; }
 .carreau-scrollcell[data-status="error"] .carreau-gutter::before { background: #e5484d; }
 .carreau-scrollcell[data-status="unresponsive"] .carreau-gutter-status { animation: carreau-unresponsive 1.1s steps(1, end) infinite; }
-.carreau-scrollcell.selected > .carreau-gutter::before, .carreau-scrollcell.focus-path > .carreau-gutter::before, .carreau-gutter.resizing::before, .carreau-gutter.resizes:hover::before { width: 4px; }
+.carreau-scrollcell.selected > .carreau-gutter::before, .carreau-scrollcell.focus-path > .carreau-gutter::before { width: 4px; }
 .carreau-cell-close {
   position: absolute; top: 4px; right: 5px; z-index: 1; width: 18px; height: 18px; border-radius: 3px;
   display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: 15px; line-height: 1;

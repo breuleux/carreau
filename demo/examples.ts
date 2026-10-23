@@ -72,7 +72,7 @@ export const examples: Example[] = [
   {
     name: "Notebook",
     description:
-      "Cells in a scroll column show their command or prompt on top and hide a lone tab. Tab icons show statuses: done (faded), error (red), unresponsive (blinking).",
+      "Cells in a scroll column show their command or prompt on top and hide a lone tab. Statuses (the bar's circle): done (empty), running (a throbbing dot), standby (half full), error (red), unresponsive (blinking); none: no circle. Alt+Q, L clears the finished ones (done, standby, error) in the selection.",
     build: () =>
       row([
         pane(
@@ -88,7 +88,7 @@ export const examples: Example[] = [
           [
             pane([cell("ls", SHELL, "$ ls -la ~/projects/carreau", "oklch(0.75 0.12 160)", "done",
               ["total 48", "drwxr-xr-x  src/", "drwxr-xr-x  tests/", "-rw-r--r--  design.md", "-rw-r--r--  package.json"].join("\n"))]),
-            pane([cell("Explain", PROMPT, "Explain what normalizeTree does, in two sentences.", "oklch(0.72 0.13 300)", undefined,
+            pane([cell("Explain", PROMPT, "Explain what normalizeTree does, in two sentences.", "oklch(0.72 0.13 300)", "standby",
               "It normalizes a whole layout tree, then wraps a root scroll split in a group tab. Scroll splits thereby always live in a tab, so they can be moved around as a whole.")]),
             pane([cell("make test", SHELL, "$ make test", "oklch(0.72 0.15 25)", "error",
               ["running 63 checks…", "FAIL weights preserved", "  expected 0.5,0.5,1,1", "make: *** [test] Error 1"].join("\n"))]),
@@ -97,7 +97,7 @@ export const examples: Example[] = [
               pane([cell("ssh", SHELL, "$ ssh build-box", "oklch(0.78 0.13 75)", "unresponsive", "(no response for 2 minutes)")]),
             ]),
             pane([
-              cell("Draft", PROMPT, "Draft release notes for the cells feature.", "oklch(0.72 0.13 300)", undefined,
+              cell("Draft", PROMPT, "Draft release notes for the cells feature.", "oklch(0.72 0.13 300)", "running",
                 "Cells now carry an icon, a short name, a long description, an accent and a status."),
               cell("Shorter", PROMPT, "Make it shorter.", "oklch(0.72 0.13 300)", "done", "Cells: icons, statuses, accents, and their command on top."),
             ]),

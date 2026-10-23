@@ -1,0 +1,27 @@
+// Double-clicking a cell's bar: back to its natural height (undoable); no hover styling.
+import { chromium } from "playwright";
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1300, height: 800 } });
+page.on("pageerror", (e) => console.log("PAGEERROR", e.message));
+await page.goto("http://localhost:5317/?example=Notebook");
+await page.waitForTimeout(300);
+const cell = page.locator(".carreau-scrollcell", { has: page.locator(".carreau-long", { hasText: "make test" }) });
+const h = async () => Math.round((await cell.boundingBox()).height);
+const size = () => cell.evaluate((el) => window.ws.node(el.dataset.id).size ?? "natural");
+const h0 = await h();
+const g = await cell.locator(".carreau-gutter").boundingBox();
+const x = g.x + g.width / 2, y = g.y + g.height * 0.8;
+await page.mouse.move(x, y); await page.mouse.down(); await page.mouse.move(x, y + 90, { steps: 6 }); await page.mouse.up();
+console.log(`natural ${h0}px; dragged: ${await h()}px (size ${await size()})`);
+const bar = await cell.locator(".carreau-gutter").boundingBox();
+const before = await cell.locator(".carreau-gutter").evaluate((el) => getComputedStyle(el, "::before").width);
+await page.mouse.move(bar.x + bar.width / 2, bar.y + bar.height / 2);
+await page.waitForTimeout(150);
+console.log("bar width, not hovered → hovered:", before, "→", await cell.locator(".carreau-gutter").evaluate((el) => getComputedStyle(el, "::before").width));
+await page.mouse.dblclick(bar.x + bar.width / 2, bar.y + bar.height / 2);
+await page.waitForTimeout(100);
+console.log(`double-clicked: ${await h()}px (size ${await size()})`);
+await page.evaluate(() => window.ws.undo());
+await page.waitForTimeout(100);
+console.log(`undo: ${await h()}px (size ${await size()})`);
+await browser.close();

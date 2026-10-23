@@ -7,41 +7,63 @@ import { examples } from "./examples";
 import { commitCellFocus, promptCell, spawnCell } from "./cellclasses";
 import { plotElement } from "./plots";
 import { headedEditor } from "./prompteditor";
-import { deserialize, serialize } from "../src/model";
+import { deserialize, genId, serialize } from "../src/model";
 import { hasMoveBefore, View } from "../src/view";
 import { Workspace } from "../src/workspace";
-import { bridgeFrameKeys, KeyboardNav, NavConfig } from "../src/keyboard";
+import { bridgeFrameKeys, KeyboardNav, NavBinding, NavConfig, NavContext } from "../src/keyboard";
 // Prompt columns (an optional module): their rendering, and their configuration below.
 import "../src/prompt-view";
 import { configurePrompts } from "../src/prompt";
+
+/**
+ * A command of the host's own (bound like the built-in actions, below): duplicate the focused
+ * tab into its pane. It acts on the operand, as cell operations do (from a prompt: the cell above).
+ */
+function duplicateTab({ ws }: NavContext): void {
+  ws.withOperand(() => {
+    const n = ws.node(ws.selection.id);
+    const tab = n?.type === "pane" && !ws.selection.range ? n.tabs[n.active] : undefined;
+    if (!tab || tab.group) return null; // (content tabs only: a group's layout has ids of its own)
+    const { link: _link, ...copy } = structuredClone(tab);
+    return ws.placer({ split: "tab" }).apply({ ...copy, id: genId("t"), title: `${tab.title} (copy)`, short: undefined });
+  }, null);
+}
 
 // Navigation mode: hold Alt after Alt+Q (or Alt+Q, Q for sticky mode), then use these.
 const navConfig: NavConfig = {
   // side: "left" | "right" | "either" (default): which Alt key counts.
   activation: { modifier: "Alt", code: "KeyQ", side: "either" },
   bindings: {
+    KeyD: duplicateTab, // the host's own command (any function)
     ArrowLeft: "focusLeft",
     ArrowRight: "focusRight",
     ArrowUp: "focusUp",
     ArrowDown: "focusDown",
-    KeyH: "focusLeft",
-    KeyL: "focusRight",
-    KeyK: "focusUp",
-    KeyJ: "focusDown",
+    // KeyH: "focusLeft",
+    // KeyL: "focusRight",
+    // KeyK: "focusUp",
+    // KeyJ: "focusDown",
     "Shift+ArrowLeft": "expandLeft",
     "Shift+ArrowRight": "expandRight",
     "Shift+ArrowUp": "expandUp",
     "Shift+ArrowDown": "expandDown",
-    "Shift+KeyH": "expandLeft",
-    "Shift+KeyL": "expandRight",
-    "Shift+KeyK": "expandUp",
-    "Shift+KeyJ": "expandDown",
+    // "Shift+KeyH": "expandLeft",
+    // "Shift+KeyL": "expandRight",
+    // "Shift+KeyK": "expandUp",
+    // "Shift+KeyJ": "expandDown",
     KeyU: "unexpand",
-    KeyP: "parent",
-    KeyR: "root",
-    KeyC: "child",
-    BracketRight: "nextTab",
-    BracketLeft: "prevTab",
+    KeyL: "clear", // the finished cells (done, standby, error) in the selection
+    Comma: "prevTab",
+    Period: "nextTab",
+    Slash: "root",
+    "Shift+Comma": "parent",
+    "Shift+Period": "child",
+    // Resize the focus: [ ] narrower / wider; with Shift ({ }), shorter / taller. (Tabs: the
+    // Ctrl+Tab and Cmd+←/→ shortcuts, below.)
+    BracketRight: "growHeight",
+    "Shift+BracketRight": "growWidth",
+    BracketLeft: "shrinkHeight",
+    "Shift+BracketLeft": "shrinkWidth",
     KeyM: "toggleMaximize",
     KeyF: "float",
     KeyG: "group",
@@ -55,36 +77,45 @@ const navConfig: NavConfig = {
     "Shift+KeyX": "closePane",
   },
   // S, then a direction: swap. (Holding S swaps repeatedly.)
+  // Without navigation mode: redundant ways to switch tabs. (Chrome keeps Ctrl+Tab for its own
+  // tabs; other browsers, or an app shell, pass it on.)
+  shortcuts: {
+    "Ctrl+Tab": "nextTab",
+    "Ctrl+Shift+Tab": "prevTab",
+    "Cmd+ArrowRight": "nextTab",
+    "Cmd+ArrowLeft": "prevTab",
+  },
   prefixes: {
     KeyS: {
       ArrowLeft: "swapLeft",
       ArrowRight: "swapRight",
       ArrowUp: "swapUp",
       ArrowDown: "swapDown",
-      KeyH: "swapLeft",
-      KeyL: "swapRight",
-      KeyK: "swapUp",
-      KeyJ: "swapDown",
+      // KeyH: "swapLeft",
+      // KeyL: "swapRight",
+      // KeyK: "swapUp",
+      // KeyJ: "swapDown",
     },
     // I, then a direction: a new cell (the focused cell decides what) into the tabs of the cell
     // in that direction; with Shift, beside the focused cell, on that side.
     KeyI: {
+      Enter: "insertInto",
       ArrowLeft: "insertIntoLeft",
       ArrowRight: "insertIntoRight",
       ArrowUp: "insertIntoUp",
       ArrowDown: "insertIntoDown",
-      KeyH: "insertIntoLeft",
-      KeyL: "insertIntoRight",
-      KeyK: "insertIntoUp",
-      KeyJ: "insertIntoDown",
+      // KeyH: "insertIntoLeft",
+      // KeyL: "insertIntoRight",
+      // KeyK: "insertIntoUp",
+      // KeyJ: "insertIntoDown",
       "Shift+ArrowLeft": "insertLeft",
       "Shift+ArrowRight": "insertRight",
       "Shift+ArrowUp": "insertUp",
       "Shift+ArrowDown": "insertDown",
-      "Shift+KeyH": "insertLeft",
-      "Shift+KeyL": "insertRight",
-      "Shift+KeyK": "insertUp",
-      "Shift+KeyJ": "insertDown",
+      // "Shift+KeyH": "insertLeft",
+      // "Shift+KeyL": "insertRight",
+      // "Shift+KeyK": "insertUp",
+      // "Shift+KeyJ": "insertDown",
     },
     // A, then a direction: move the focused tab the same way.
     KeyA: {
@@ -92,18 +123,18 @@ const navConfig: NavConfig = {
       ArrowRight: "moveIntoRight",
       ArrowUp: "moveIntoUp",
       ArrowDown: "moveIntoDown",
-      KeyH: "moveIntoLeft",
-      KeyL: "moveIntoRight",
-      KeyK: "moveIntoUp",
-      KeyJ: "moveIntoDown",
+      // KeyH: "moveIntoLeft",
+      // KeyL: "moveIntoRight",
+      // KeyK: "moveIntoUp",
+      // KeyJ: "moveIntoDown",
       "Shift+ArrowLeft": "moveLeft",
       "Shift+ArrowRight": "moveRight",
       "Shift+ArrowUp": "moveUp",
       "Shift+ArrowDown": "moveDown",
-      "Shift+KeyH": "moveLeft",
-      "Shift+KeyL": "moveRight",
-      "Shift+KeyK": "moveUp",
-      "Shift+KeyJ": "moveDown",
+      // "Shift+KeyH": "moveLeft",
+      // "Shift+KeyL": "moveRight",
+      // "Shift+KeyK": "moveUp",
+      // "Shift+KeyJ": "moveDown",
     },
   },
 };
@@ -202,12 +233,16 @@ const legend: [string, string][] = [
   ["Alt+Q Q", "sticky navigation mode (Q / Esc to leave)"],
 ];
 // Group bindings by action, for a compact legend.
+// (A command of the host's own is named by its function.)
+const actionName = (a: NavBinding) => (typeof a === "function" ? a.name : a);
 const byAction = new Map<string, string[]>();
-for (const [k, a] of Object.entries(navConfig.bindings)) byAction.set(a, [...(byAction.get(a) ?? []), label(k)]);
+for (const [k, a] of Object.entries(navConfig.bindings)) byAction.set(actionName(a), [...(byAction.get(actionName(a)) ?? []), label(k)]);
 for (const [a, ks] of byAction) legend.push([ks.join(" "), a]);
+for (const [k, sc] of Object.entries(navConfig.shortcuts ?? {}))
+  legend.push([`${label(k)} (anytime)`, actionName(typeof sc === "object" ? sc.run : sc)]);
 for (const [p, table] of Object.entries(navConfig.prefixes ?? {})) {
   const byA = new Map<string, string[]>();
-  for (const [k, a] of Object.entries(table)) byA.set(a, [...(byA.get(a) ?? []), label(k)]);
+  for (const [k, a] of Object.entries(table)) byA.set(actionName(a), [...(byA.get(actionName(a)) ?? []), label(k)]);
   for (const [a, ks] of byA) legend.push([`${label(p)}, ${ks.join(" ")}`, a]);
 }
 for (const [k, a] of legend) {
