@@ -20,6 +20,12 @@ export type NavAction =
   | "group"
   | "collapse"
   | "renameTab"
+  /** name the focused pane (or rename it), in place */
+  | "namePane"
+  /** toggle the focus in the marks ("stored selections": `Workspace.toggleMark`) */
+  | "mark"
+  /** move what's marked to the focus (`Workspace.moveMarked`) */
+  | "moveMarked"
   /** remove the finished cells (done, standby, error) in the selection (`Workspace.clear`) */
   | "clear"
   /** the focus, wider or narrower (its share of a row; see `Workspace.resizeFocus`) */
@@ -211,8 +217,11 @@ export class KeyboardNav {
     if (mode === "off") this.clearPrefix();
     if (mode === this.mode) return;
     const was = this.mode;
-    // Multi-selections only live within navigation mode.
-    if (mode === "off") this.ws.clearMultiSelection();
+    // Multi-selections, and marks, only live within navigation mode.
+    if (mode === "off") {
+      this.ws.clearMultiSelection();
+      this.ws.clearMarks();
+    }
     this.mode = mode;
     this.view.setNavMode(mode);
     if (was === "off") {
@@ -442,6 +451,17 @@ export class KeyboardNav {
           const r = this.view.pxRect(id);
           return r && (axis === "row" ? r.w : r.h);
         });
+        return;
+      }
+      case "mark":
+        ws.toggleMark();
+        return;
+      case "moveMarked":
+        ws.moveMarked();
+        return;
+      case "namePane": {
+        const n = this.operand();
+        if (n?.type === "pane") this.view.editPaneName(n.id);
         return;
       }
       case "clear":

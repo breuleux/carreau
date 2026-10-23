@@ -53,6 +53,9 @@ const navConfig: NavConfig = {
     // "Shift+KeyJ": "expandDown",
     KeyU: "unexpand",
     KeyL: "clear", // the finished cells (done, standby, error) in the selection
+    KeyN: "namePane",
+    KeyX: "mark", // marks (numbered): then V moves them all to the focus
+    KeyV: "moveMarked",
     Comma: "prevTab",
     Period: "nextTab",
     Slash: "root",
@@ -72,7 +75,6 @@ const navConfig: NavConfig = {
     KeyZ: "undo",
     "Shift+KeyZ": "redo",
     KeyW: "closeTab",
-    KeyX: "closeTab",
     "Shift+KeyW": "closePane",
     "Shift+KeyX": "closePane",
   },

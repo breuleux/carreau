@@ -1,0 +1,21 @@
+// Dragging a named pane (by its name) into an unnamed pane's tab bar: the name goes along.
+import { chromium } from "playwright";
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1300, height: 800 } });
+page.on("pageerror", (e) => console.log("PAGEERROR", e.message));
+const bars = () => page.evaluate(() => [...document.querySelectorAll(".carreau-tabbar:not([hidden])")].map((b) => (b.querySelector(".carreau-pane-name")?.textContent ? `[${b.querySelector(".carreau-pane-name").textContent}] ` : "") + ([...b.querySelectorAll(".carreau-tab-short")].map((t) => t.textContent).join(" ") || "∅")).join(" | "));
+await page.goto("http://localhost:5317/?example=IDE");
+await page.waitForTimeout(200);
+await page.evaluate(() => { const p = window.ws.trees().flatMap((t) => [...(function* w(n) { yield n; for (const c of n.children ?? []) yield* w(c); })(t)]).find((n) => n.type === "pane" && n.tabs.some((t) => t.title === "Outline")); window.ws.namePane(p.id, "side"); });
+await page.waitForTimeout(100);
+console.log("before:", await bars());
+const name = await page.locator(".carreau-pane-name", { hasText: "side" }).boundingBox();
+const term = await page.locator(".carreau-tab", { hasText: /^Problems$/ }).boundingBox();
+await page.mouse.move(name.x + 5, name.y + 5); await page.mouse.down();
+await page.mouse.move(name.x - 60, name.y - 60, { steps: 4 });
+await page.mouse.move(term.x + term.width + 4, term.y + term.height / 2, { steps: 8 });
+console.log("over Terminal's tab bar:", await page.evaluate(() => window.view.drag.active?.target.kind));
+await page.mouse.up();
+await page.waitForTimeout(100);
+console.log("after:", await bars());
+await browser.close();

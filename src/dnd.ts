@@ -457,7 +457,8 @@ export class DragDrop {
       ? [["float", { kind: "float", paneId }]]
       : [
           ["swap", { kind: "swap", paneId }],
-          ...(paneDisplay(pane, e.ctx).showTabBar ? [] : [["tab", { kind: "tab", paneId, index: pane.tabs.length }] as [Zones["centers"][number]["kind"], DropTarget]]),
+          // (Also for an empty pane: into it.)
+          ...(paneDisplay(pane, e.ctx).showTabBar && pane.tabs.length ? [] : [["tab", { kind: "tab", paneId, index: pane.tabs.length }] as [Zones["centers"][number]["kind"], DropTarget]]),
           // Merge with its active tab, if the dragged tab can.
           ...(st && st.tabs.every((t) => canMerge(pane, pane.active, t)) ? [["link", { kind: "merge", tabId: pane.tabs[pane.active].id }] as [Zones["centers"][number]["kind"], DropTarget]] : []),
         ];

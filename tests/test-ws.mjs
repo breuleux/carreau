@@ -693,6 +693,118 @@ for (const [a, b] of [["swapUp", "swapDown"], ["swapLeft", "swapRight"], ["swapR
   await ws.clear();
   check(`the selected column emptied: the selection on what's left (${ws.node(ws.selection.id)?.type})`, titles(ws) === "L" && !!ws.node(ws.selection.id));
 }
+// Pane names, and sending things to panes
+{
+  const { deserialize, serialize, groupPane } = await server.ssrLoadModule("/src/model.ts");
+  const ws = new Workspace(row([pane([{ id: "tA", title: "A" }, { id: "tA2", title: "A2" }]), pane([{ id: "tB", title: "B" }]), pane([{ id: "tC", title: "C" }])]));
+  const [pA, pB, pC] = ws.root.children;
+  const show = () => panes(ws.root).map((p) => (p.name ? p.name + ":" : "") + p.tabs.map((t) => t.title).join("+")).join(" ");
+  check("name a pane", ws.namePane(pB.id, " logs ") && ws.node(pB.id).name === "logs");
+  check("names are unique (ignoring case)", !ws.namePane(pC.id, "Logs") && ws.namePane(pB.id, "Logs"));
+  check("reserved names: refused (default: the directions)", !ws.namePane(pC.id, "left") && !ws.namePane(pC.id, "UP"));
+  ws.reservedNames = [...ws.reservedNames, "main"];
+  check("configurable", !ws.canNamePane(pC.id, "main") && ws.canNamePane(pC.id, "side"));
+  check("found by name", ws.paneByName("logs")?.id === pB.id);
+  check("survives serialization", deserialize(serialize(ws.data())).root.children[1].name === "Logs");
+  ws.undo();
+  check("undoable", ws.node(pB.id).name === "logs");
+  ws.namePane(pB.id, "");
+  check("a blank name: no name", ws.node(pB.id).name === undefined);
+  ws.namePane(pB.id, "logs");
+  // Sending: by name, into its tabs; by side, into the neighbour's.
+  ws.sendTo("tA2", "logs");
+  check(`A2 sent to "logs": ${show()}`, show() === "A logs:B+A2 C");
+  ws.sendTo("tA2", "right");
+  check(`A2 sent right (from logs): into C's tabs: ${show()}`, show() === "A logs:B C+A2");
+  check("to itself, or to nothing: refused", !ws.canSendTo("tB", "logs") && !ws.canSendTo("tB", "nope"));
+  ws.sendTo(pC.id, "logs");
+  check(`a whole pane sent to "logs": its tabs: ${show()}`, show() === "A logs:B+C+A2");
+  ws.sendTo("tC", "up");
+  check(`up, where there's nothing: where it would be (a new pane above): ${show()}`, show().includes("C ") && ws.root.type === "column");
+  // A named pane showing a group: into its own tabs (not inside the group).
+  const g = new Workspace(row([pane([{ id: "tX", title: "X" }]), groupPane("G", row([pane(["g1"]), pane(["g2"])]), 1)]));
+  g.namePane(g.root.children[1].id, "grp");
+  g.sendTo("tX", "grp");
+  check("into a named group holder's own tabs", g.root.tabs?.map((t) => t.title).join("+") === "G+X");
+  // A path by name (for hosts).
+  check("a path by name", ws.cellAt(ws.selection.id, { name: "logs" }) === ws.paneByName("logs").id);
+}
+// Named panes stay when emptied (until closed)
+{
+  const { deserialize, serialize } = await server.ssrLoadModule("/src/model.ts");
+  const ws = new Workspace(row([pane([{ id: "tA", title: "A" }]), pane([{ id: "tB", title: "B", status: "done" }]), pane([{ id: "tC", title: "C" }])]));
+  const [pA, pB, pC] = ws.root.children.map((p) => p.id);
+  ws.namePane(pA, "inbox");
+  ws.namePane(pB, "done-stuff");
+  const show = () => panes(ws.root).map((p) => (p.name ? p.name + ":" : "") + (p.tabs.map((t) => t.title).join("+") || "∅")).join(" ");
+  ws.sendTo("tA", "right");
+  check(`its only tab sent away: a named pane stays, empty: ${show()}`, show() === "inbox:∅ done-stuff:B+A C");
+  ws.sendTo("tC", "inbox");
+  check(`sent back in; C's (unnamed) pane goes: ${show()}`, show() === "inbox:C done-stuff:B+A");
+  ws.select({ id: pA });
+  await ws.closeTab("tC");
+  check(`its last tab closed: still there, and focused: ${show()}`, show() === "inbox:∅ done-stuff:B+A" && ws.selection.id === pA);
+  ws.select({ id: pB });
+  await ws.clear();
+  check(`cleared: still there: ${show()}`, show() === "inbox:∅ done-stuff:A");
+  check("no swapping with an empty pane; dropping into it, yes", !ws.tryDrop({ kind: "tab", tabId: "tA" }, { kind: "swap", paneId: pA }) && !!ws.tryDrop({ kind: "tab", tabId: "tA" }, { kind: "tab", paneId: pA, index: 0 }));
+  check("survives serialization", deserialize(serialize(ws.data())).root.children[0].tabs.length === 0);
+  await ws.closePane(pA);
+  check(`closed (Close pane): gone: ${show()}`, show() === "done-stuff:A");
+  check("the main tree's last tab, in a named pane: closable (the pane stays)", ws.canCloseTab("tA"));
+}
+// Dropping a named pane into another pane's tabs: its name goes along (to an unnamed one)
+{
+  const t = (x) => ({ id: "t" + x, title: x });
+  const ws = new Workspace(row([pane([t("A")]), pane([t("B")]), pane([t("C")])]));
+  const [pA, pB, pC] = ws.root.children.map((p) => p.id);
+  ws.namePane(pA, "notes");
+  ws.namePane(pC, "logs");
+  const show = () => panes(ws.root).map((p) => (p.name ? p.name + ":" : "") + (p.tabs.map((x) => x.title).join("+") || "∅")).join(" ");
+  ws.commitDrop(ws.tryDrop({ kind: "pane", paneId: pA }, { kind: "tab", paneId: pB, index: 1 }));
+  check(`"notes" dropped into B's (unnamed) pane: the name goes along: ${show()}`, show() === "notes:B+A logs:C");
+  ws.undo();
+  ws.commitDrop(ws.tryDrop({ kind: "pane", paneId: pA }, { kind: "tab", paneId: pC, index: 1 }));
+  check(`"notes" dropped into "logs": logs keeps its name; notes stays behind, empty: ${show()}`, show() === "notes:∅ B logs:C+A");
+  ws.undo();
+  ws.sendTo(pA, "right");
+  check(`the same with Send to: ${show()}`, show() === "notes:B+A logs:C");
+}
+// Marks (stored selections), moved together to the focus
+{
+  const t = (x) => ({ id: "t" + x, title: x });
+  const ws = new Workspace(row([pane([t("A"), t("A2")]), column([pane([t("B")]), pane([t("C")])]), pane([t("D")])]));
+  const show = () => panes(ws.root).map((p) => p.tabs.map((x) => x.title).join("+")).join(" ");
+  const pA = ws.root.children[0].id, col = ws.root.children[1].id, pD = ws.root.children[2].id;
+  ws.select({ id: pA });
+  ws.activateTab(pA, 1);
+  ws.toggleMark();
+  check(`a pane: its active tab is marked: ${ws.marked}`, ws.marked.join() === "tA2");
+  ws.toggleMark();
+  check("toggled again: unmarked", ws.marked.length === 0);
+  ws.toggleMark();
+  ws.select({ id: col });
+  ws.toggleMark();
+  check(`a split: its panes: ${ws.marked.length} marks`, ws.marked.length === 3 && ws.marked[0] === "tA2");
+  ws.select({ id: pD });
+  const n = ws.moveMarked();
+  check(`moved to the focus (D), in order: ${show()} (${n})`, n === 3 && show() === "A D+A2+B+C" && ws.selection.id === pD && ws.marked.length === 0);
+  ws.undo();
+  check(`one undo step: ${show()}`, show() === "A+A2 B C D");
+  // A mark whose tab is gone: ignored.
+  ws.select({ id: pA }); ws.activateTab(pA, 1); ws.toggleMark();
+  await ws.closeTab("tA2");
+  check("a closed tab's mark: gone", ws.validMarks().length === 0);
+  // To a prompt: each as a cell just above it.
+  const pw = new Workspace(row([pane([t("X")]), pane([t("Y")]), promptColumn([pane([t("c1")])])]));
+  pw.select({ id: pw.root.children[0].id }); pw.toggleMark();
+  pw.select({ id: pw.root.children[1].id }); pw.toggleMark();
+  const colId = pw.root.children.at(-1).tabs[0].group.children[0].id;
+  const colNode = () => pw.node(colId);
+  pw.select({ id: colNode().children.at(-1).id });
+  pw.moveMarked();
+  check(`to a prompt: cells above it: ${colNode().children.map((c) => (c.type === "prompt" ? "⏎" : c.tabs[0].title)).join(",")}`, colNode().children.map((c) => (c.type === "prompt" ? "⏎" : c.tabs[0].title)).join(",") === "c1,X,Y,⏎");
+}
 // Next/previous tab from a lone tab in a group: up to the first pane with several tabs
 {
   const { groupPane } = await server.ssrLoadModule("/src/model.ts");

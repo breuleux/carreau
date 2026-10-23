@@ -282,7 +282,8 @@ export function mergeKey(t: Tab): string | null {
  */
 export function paneDisplay(p: PaneNode, ctx: Ctx): { cell: boolean; showTabBar: boolean; showLong: boolean } {
   const cell = ctx.natural.row || ctx.natural.column;
-  const showTabBar = !cell || p.tabs.length !== 1 || !!p.tabs[0].group;
+  // (A named pane shows it: its name is there.)
+  const showTabBar = !cell || p.tabs.length !== 1 || !!p.tabs[0].group || !!p.name;
   return { cell, showTabBar, showLong: cell };
 }
 

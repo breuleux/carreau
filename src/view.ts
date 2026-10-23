@@ -11,6 +11,7 @@ import {
   PaneNode,
   Rect,
   SplitNode,
+  Tab,
   activeGroup,
   clamp,
   complexAt,
@@ -36,6 +37,9 @@ export interface ViewOptions {
   /** Content of a tab body. */
   renderTab?: (tab: PaneNode["tabs"][number], pane: PaneNode) => HTMLElement | string;
 }
+
+/** A menu's item: an action, or a "Send to" submenu (for a tab or a pane, by id). */
+type MenuItem = { label: string; enabled?: boolean; run: () => void } | { label: string; sendTo: string };
 
 /** How the view renders a leaf node type other than panes (see `registerRenderer`). */
 export interface NodeRenderer {
@@ -532,6 +536,8 @@ export class View implements DndHost {
       body.append(g);
     });
     body.classList.toggle("shows-group", !!activeGroup(node));
+    // An empty pane (a named one stays, empty): a hint.
+    if (!node.tabs.length) body.append(Object.assign(document.createElement("div"), { className: "carreau-empty", textContent: "Empty: drop tabs here, or send them here" }));
     el.append(body);
     el.addEventListener("pointerdown", (e) => {
       // Primary button only (selecting re-renders, which would break a middle click), and
@@ -652,6 +658,14 @@ export class View implements DndHost {
       { passive: false },
     );
     wrap.append(scroller);
+    // Its name, if it has one: left of the tabs (double-click: edit it). It's a handle, like the
+    // header's empty part.
+    if (node.name) {
+      const name = Object.assign(document.createElement("span"), { className: "carreau-pane-name", textContent: node.name, title: `${node.name} (double-click to rename)` });
+      name.addEventListener("pointerdown", (e) => this.dnd.arm(e, { kind: "pane", paneId: node.id }, node.name!, bar.parentElement!));
+      name.addEventListener("dblclick", () => this.editPaneName(node.id));
+      bar.append(name);
+    }
     bar.append(wrap);
     node.tabs.forEach((t, i) => {
       // Merged tabs (a complex): a link icon between them, which drags the whole complex.
@@ -665,7 +679,7 @@ export class View implements DndHost {
     });
     // The empty part of the header moves the pane.
     const space = Object.assign(document.createElement("div"), { className: "carreau-tabspace", title: "Drag to move this pane" });
-    space.addEventListener("pointerdown", (e) => this.dnd.arm(e, { kind: "pane", paneId: node.id }, node.tabs[node.active]?.title ?? "pane", bar.parentElement!));
+    space.addEventListener("pointerdown", (e) => this.dnd.arm(e, { kind: "pane", paneId: node.id }, node.tabs[node.active]?.title ?? node.name ?? "pane", bar.parentElement!));
     bar.append(space);
     if (!ctx.floating) {
       // "More" button at the right end: opens the pane menu.
@@ -708,6 +722,11 @@ export class View implements DndHost {
     tab.addEventListener("click", () => {
       this.ws.activateTab(node.id, i);
       this.focusShownGroup(node.id);
+    });
+    // Right click: the tab's menu (close, send to, collapse its group).
+    tab.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      this.openTabMenu(e, node, t);
     });
     tab.addEventListener("pointerdown", (e) => this.dnd.arm(e, { kind: "tab", tabId: t.id }, t.title, tab));
     if (!ctx.floating)
@@ -814,6 +833,20 @@ export class View implements DndHost {
     // The panes holding the groups the selection is in: their tabs show the focus too.
     const tree = this.ws.treeOf(sel.id);
     for (const n of (tree && pathTo(tree, sel.id)?.slice(0, -1)) ?? []) if (n.type === "pane") this.elOf(n.id)?.classList.add("focus-path");
+    // Marks (stored selections): numbered, in the order marked, on the tab (or the pane's tab
+    // bar); where the tab bar is hidden, on the cell's long strip.
+    for (const el of this.el.querySelectorAll("[data-mark]")) el.removeAttribute("data-mark");
+    this.ws.validMarks().forEach((id, i) => {
+      const mark = String(i + 1);
+      const tabEl = this.el.querySelector<HTMLElement>(`.carreau-tab[data-tab="${id}"]`);
+      const paneEl = tabEl ? tabEl.closest<HTMLElement>(".carreau-pane") : this.elOf(id);
+      if (tabEl && !tabEl.closest<HTMLElement>(".carreau-tabbar")!.hidden) tabEl.dataset.mark = mark;
+      else if (!tabEl && paneEl?.querySelector<HTMLElement>(":scope > .carreau-tabbar:not([hidden])")) paneEl.querySelector<HTMLElement>(":scope > .carreau-tabbar")!.dataset.mark = mark;
+      else {
+        const strip = paneEl?.querySelector<HTMLElement>(":scope > .carreau-body > .carreau-long");
+        if (strip) strip.dataset.mark = mark;
+      }
+    });
     // What cell operations act on, if not the selection (see `Workspace.operand`): shown in
     // navigation mode, as a secondary focus.
     const op = this.ws.operand();
@@ -824,33 +857,96 @@ export class View implements DndHost {
   // -------------------------------------------------------------------------
   // Pane menu, in-place editing, navigation mode
 
+  /** The pane menu (its ⋯ button). */
   private openMenu(anchor: HTMLElement, node: PaneNode): void {
-    this.closeMenu();
-    const menu = Object.assign(document.createElement("div"), { className: "carreau-menu" });
-    const item = (label: string, enabled: boolean, action: () => void) => {
-      const b = Object.assign(document.createElement("button"), { textContent: label, disabled: !enabled });
-      b.addEventListener("click", () => {
-        this.closeMenu();
-        action();
-      });
-      menu.append(b);
-    };
-    item("Float", panes(this.ws.root).length > 1 && !!find(this.ws.root, node.id), () => this.floatPane(node.id));
-    if (this.ws.canCollapse(node.id)) item("Collapse group", true, () => this.ws.collapse(node.id));
-    item("Close pane", this.ws.canClosePane(node.id), () => this.ws.closePane(node.id));
+    const items: MenuItem[] = [
+      { label: "Float", enabled: panes(this.ws.root).length > 1 && !!find(this.ws.root, node.id), run: () => this.floatPane(node.id) },
+    ];
+    if (this.ws.canCollapse(node.id)) items.push({ label: "Collapse group", run: () => this.ws.collapse(node.id) });
+    items.push({ label: "Close pane", enabled: this.ws.canClosePane(node.id), run: () => this.ws.closePane(node.id) });
     const sc = this.ws.scrollOf(node.id);
     if (sc && !kind(sc).alwaysSticky) {
       const [start, end] = kind(sc).axis === "row" ? ["left", "right"] : ["top", "bottom"];
-      item(`Stick to ${sc.reverse ? start : end}`, true, () => this.ws.toggleReverse(sc.id));
+      items.push({ label: `Stick to ${sc.reverse ? start : end}`, run: () => this.ws.toggleReverse(sc.id) });
     }
+    items.push({ label: node.name ? "Rename pane…" : "Name pane…", run: () => this.editPaneName(node.id) });
+    if (node.name) items.push({ label: "Remove name", run: () => this.ws.namePane(node.id, null) });
+    items.push({ label: "Send to", sendTo: node.id });
     // The header is at the bottom of panes: open upwards.
     const g = anchor.getBoundingClientRect();
     const b = this.el.getBoundingClientRect();
-    Object.assign(menu.style, { right: `${b.right - g.right}px`, bottom: `${b.bottom - g.top + 2}px` });
+    this.showMenu(items, { right: b.right - g.right, bottom: b.bottom - g.top + 2 }, anchor);
+  }
+
+  /** A tab's menu (right click): close it, send it somewhere, collapse its group. */
+  private openTabMenu(e: MouseEvent, node: PaneNode, t: Tab): void {
+    const items: MenuItem[] = [{ label: "Close tab", enabled: this.ws.canCloseTab(t.id), run: () => this.ws.closeTab(t.id) }];
+    items.push({ label: "Send to", sendTo: t.id });
+    if (t.group && this.ws.canCollapse(node.id)) items.push({ label: "Collapse group", run: () => this.ws.collapse(node.id) });
+    const b = this.el.getBoundingClientRect();
+    this.showMenu(items, { left: e.clientX - b.left, top: e.clientY - b.top });
+  }
+
+  /**
+   * Show a menu, at a position in the workspace (from its left/top, or its right/bottom). A
+   * "Send to" item opens a submenu: arrows (to the neighbour on that side), then the named
+   * panes. `anchor`: the button that opened it (it toggles it).
+   */
+  private showMenu(items: MenuItem[], at: { left?: number; top?: number; right?: number; bottom?: number }, anchor?: HTMLElement): void {
+    this.closeMenu();
+    const menu = Object.assign(document.createElement("div"), { className: "carreau-menu" });
+    const button = (label: string, enabled: boolean, run: () => void, cls = "") => {
+      const b = Object.assign(document.createElement("button"), { textContent: label, disabled: !enabled, className: cls });
+      b.addEventListener("click", () => {
+        this.closeMenu();
+        run();
+      });
+      return b;
+    };
+    for (const it of items) {
+      if ("run" in it) menu.append(button(it.label, it.enabled !== false, it.run));
+      else menu.append(this.sendToItem(it.label, it.sendTo, button));
+    }
+    for (const [k, v] of Object.entries(at)) if (v !== undefined) menu.style.setProperty(k, `${v}px`);
     this.el.append(menu);
+    // (Kept inside the workspace.)
+    const r = menu.getBoundingClientRect();
+    const b = this.el.getBoundingClientRect();
+    if (r.right > b.right) menu.style.left = `${Math.max(0, b.width - r.width - 4)}px`;
+    if (r.bottom > b.bottom) menu.style.top = `${Math.max(0, b.height - r.height - 4)}px`;
     this.menu = menu;
-    this.menuAnchor = anchor;
-    anchor.classList.add("open");
+    this.menuAnchor = anchor ?? null;
+    anchor?.classList.add("open");
+  }
+
+  /** A "Send to" item: its submenu (shown on hover) has the four sides, then the named panes. */
+  private sendToItem(label: string, id: string, button: (label: string, enabled: boolean, run: () => void, cls?: string) => HTMLButtonElement): HTMLElement {
+    const row = Object.assign(document.createElement("div"), { className: "carreau-menu-sub" });
+    row.append(Object.assign(document.createElement("button"), { textContent: `${label}  ▸`, className: "carreau-menu-subtitle" }));
+    const sub = Object.assign(document.createElement("div"), { className: "carreau-submenu" });
+    const arrows = Object.assign(document.createElement("div"), { className: "carreau-menu-arrows" });
+    for (const [side, glyph] of [["left", "←"], ["right", "→"], ["up", "↑"], ["down", "↓"]]) {
+      const b = button(glyph, this.ws.canSendTo(id, side), () => this.ws.sendTo(id, side), "carreau-menu-arrow");
+      b.title = `Send ${side}`;
+      arrows.append(b);
+    }
+    sub.append(arrows);
+    const names = this.ws
+      .trees()
+      .flatMap((t) => panes(t))
+      .filter((p) => p.name && p.id !== id && !p.tabs.some((x) => x.id === id))
+      .map((p) => p.name!)
+      .sort((a, b) => a.localeCompare(b));
+    for (const name of names) sub.append(button(name, this.ws.canSendTo(id, name), () => this.ws.sendTo(id, name), "carreau-menu-name"));
+    if (!names.length) sub.append(Object.assign(document.createElement("div"), { className: "carreau-menu-note", textContent: "No named panes" }));
+    row.append(sub);
+    // Open on the side where there's room.
+    row.addEventListener("pointerenter", () => {
+      sub.classList.remove("to-right");
+      const r = sub.getBoundingClientRect();
+      if (r.left < this.el.getBoundingClientRect().left) sub.classList.add("to-right");
+    });
+    return row;
   }
 
   private closeMenu(): void {
@@ -872,6 +968,46 @@ export class View implements DndHost {
     const holder = this.ws.node(this.ws.selection.id);
     // Naming is part of grouping: Escape, or an empty name, cancels the grouping itself.
     if (holder?.type === "pane") this.editTabTitle(holder.tabs[holder.active].id, () => this.ws.discardLastStep());
+  }
+
+  /**
+   * Edit a pane's name in place, left of its tabs (a new one, if it has none). Enter (or leaving
+   * the field) confirms, Escape cancels; blank: no name. A name it can't have (reserved, or
+   * another pane's) shows as invalid, and isn't taken.
+   */
+  editPaneName(paneId: string): void {
+    const p = this.ws.node(paneId);
+    const bar = this.elOf(paneId)?.querySelector<HTMLElement>(":scope > .carreau-tabbar");
+    if (p?.type !== "pane" || !bar) return;
+    bar.hidden = false; // (a cell's hidden tab bar: shown while naming)
+    const input = Object.assign(document.createElement("input"), { className: "carreau-pane-name-edit", value: p.name ?? "", placeholder: "Name", spellcheck: false });
+    const fit = () => (input.size = Math.max(6, input.value.length + 1));
+    const valid = () => !input.value.trim() || this.ws.canNamePane(paneId, input.value);
+    fit();
+    input.addEventListener("input", () => {
+      fit();
+      input.classList.toggle("invalid", !valid());
+    });
+    for (const ev of ["pointerdown", "click", "dblclick", "auxclick", "contextmenu"]) input.addEventListener(ev, (e) => e.stopPropagation());
+    let done = false;
+    const finish = (commit: boolean) => {
+      if (done) return;
+      if (commit && !valid()) return; // (Enter on an invalid name: keep editing)
+      done = true;
+      if (!commit || !this.ws.namePane(paneId, input.value)) this.ws.emit(); // re-render: back to how it was
+    };
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === "Escape") {
+        e.preventDefault();
+        finish(e.key === "Enter");
+      }
+    });
+    input.addEventListener("blur", () => (valid() ? finish(true) : finish(false)));
+    const label = bar.querySelector(".carreau-pane-name");
+    if (label) label.replaceWith(input);
+    else bar.prepend(input);
+    input.focus();
+    input.select();
   }
 
   /**
@@ -916,6 +1052,8 @@ export class View implements DndHost {
    * active tab, through the host's `lifecycle.commitFocus`; other cells, through their renderer.
    */
   commitFocus(): void {
+    // Editing something in place (a tab's title, a pane's name): the field keeps the focus.
+    if (document.activeElement?.matches?.(".carreau-tab-edit, .carreau-pane-name-edit") && this.el.contains(document.activeElement)) return;
     const n = this.ws.selection.range ? null : this.ws.node(this.ws.selection.id);
     if (n && n.type !== "pane") return RENDERERS[n.type]?.commitFocus?.(n, this);
     if (n?.type !== "pane") return;

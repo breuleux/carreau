@@ -138,7 +138,7 @@
 .carreau.is-dragging iframe, .carreau.is-resizing iframe { pointer-events: none; }
 
 /* pane menu */
-.carreau-menu {
+.carreau-menu, .carreau-submenu {
   position: absolute; z-index: 30; display: flex; flex-direction: column; min-width: 110px; padding: 4px;
   background: light-dark(#ffffff, #2a2c36); border: 1px solid light-dark(#d3d6de, #3a3d4a); border-radius: 6px; box-shadow: 0 6px 20px light-dark(#0003, #0009);
 }
@@ -147,6 +147,34 @@
 }
 .carreau-menu button:hover:not(:disabled) { background: light-dark(#eceef3, #3a3e4e); }
 .carreau-menu button:disabled { color: light-dark(#aaa, #666); cursor: default; }
+/* "Send to": a submenu, on hover (on the side where there's room): the four sides, then names */
+.carreau-menu-sub { position: relative; display: flex; flex-direction: column; }
+.carreau-submenu { display: none; right: 100%; bottom: -4px; margin-right: 4px; min-width: 120px; }
+.carreau-submenu.to-right { right: auto; left: 100%; margin-right: 0; margin-left: 4px; }
+.carreau-menu-sub:hover > .carreau-submenu { display: flex; }
+.carreau-menu-sub:hover > .carreau-menu-subtitle { background: light-dark(#eceef3, #3a3e4e); }
+.carreau-menu-arrows { display: flex; gap: 2px; padding-bottom: 3px; margin-bottom: 3px; border-bottom: 1px solid light-dark(#e3e5ea, #3a3d4a); }
+.carreau-menu .carreau-menu-arrow { flex: 1; text-align: center; padding: 4px 0; font-size: 13px; }
+.carreau-menu-note { padding: 4px 10px; font-size: 12px; color: light-dark(#999, #777); font-style: italic; }
+/* marks (stored selections): a numbered badge, on the tab, the pane's tab bar, or a cell's strip */
+.carreau-tab[data-mark]::before, .carreau-tabbar[data-mark]::before, .carreau-long[data-mark]::before {
+  content: attr(data-mark); flex: none; display: inline-flex; align-items: center; justify-content: center; align-self: center;
+  min-width: 15px; height: 15px; padding: 0 3px; box-sizing: border-box; border-radius: 8px; margin-right: 6px;
+  font: 600 10px system-ui; font-style: normal; color: #fff; background: light-dark(#3a6fd8, #5a8cf0);
+}
+.carreau-tabbar[data-mark]::before { margin-left: 2px; }
+/* an empty pane (a named one stays, empty) */
+.carreau-empty { margin: auto; font-size: 12px; font-style: italic; color: light-dark(#a5a8b0, #5c5f69); text-align: center; }
+/* a pane's name, left of its tabs; and editing it */
+.carreau-pane-name {
+  flex: none; align-self: center; max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 0 8px 0 6px; font-style: italic; font-size: 12px; color: light-dark(#8a8d96, #80838d); cursor: grab;
+}
+.carreau-pane-name-edit {
+  align-self: center; margin: 0 6px 0 4px; font: italic 12px system-ui; color: light-dark(#1d1e22, #eee); background: light-dark(#fff, #15161b);
+  border: 1px solid light-dark(#9aa0b8, #5a5f78); border-radius: 3px; padding: 0 4px; height: 18px; outline: none;
+}
+.carreau-pane-name-edit.invalid { border-color: #e5484d; color: #e5484d; }
 
 /* floating windows */
 .carreau-floats { position: absolute; inset: 0; pointer-events: none; z-index: 7; overflow: hidden; }

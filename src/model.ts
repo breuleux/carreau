@@ -87,6 +87,7 @@ function validate(n: any): void {
   if (n.type === "pane") {
     if (!Array.isArray(n.tabs)) throw new Error("Pane without tabs");
     if (n.size !== undefined && !(typeof n.size === "number" && n.size > 0)) throw new Error("A pane's size is a positive number");
+    if (n.name !== undefined && (typeof n.name !== "string" || !n.name.trim())) throw new Error("A pane's name is a non-empty string");
     n.active = Math.max(0, Math.min(n.active ?? 0, n.tabs.length - 1));
     for (const t of n.tabs) {
       if (t.group) validate(t.group);
@@ -125,7 +126,8 @@ export function shape(node: LayoutNode, withWeights = false): string {
 
 /**
  * Clean up a node, returning what replaces it (null: nothing left).
- *  - panes: group tabs whose layout is gone disappear; a pane with no tabs disappears
+ *  - panes: group tabs whose layout is gone disappear; a pane with no tabs disappears (unless
+ *    it's named: it stays, empty, until closed)
  *  - splits: drop empty children; flatten same-type children (and plain same-axis children of
  *    a scroll split); rescale weights to average 1; collapse a single child (not scroll
  *    splits: they could not be recreated by dragging)
@@ -144,7 +146,7 @@ export function normalize(node: LayoutNode): LayoutNode | null {
       if (i < node.active) node.active--;
       return false;
     });
-    if (node.tabs.length === 0) return null;
+    if (node.tabs.length === 0 && !node.name) return null; // (a named pane stays, empty)
     normalizeLinks(node);
     node.active = Math.max(0, Math.min(node.active, node.tabs.length - 1));
     return node;
@@ -448,7 +450,7 @@ function applyDropRaw(root: SplitNode, subject: DragSubject, target: DropTarget)
     } else {
       if (subject.kind === "complex") return null; // (a tab trades places with one tab)
       const ft = findTab(root, subject.tabId);
-      if (!ft || ft.pane === dest) return null;
+      if (!ft || ft.pane === dest || !dest.tabs.length) return null; // (an empty pane: nothing to trade)
       [dest.tabs[dest.active], ft.pane.tabs[ft.index]] = [ft.pane.tabs[ft.index], dest.tabs[dest.active]];
     }
     return { paneId: dest.id };
@@ -481,7 +483,8 @@ function applyDropRaw(root: SplitNode, subject: DragSubject, target: DropTarget)
       return { paneId: dest.id };
     }
     const active = detachTabs(d);
-    if (d.pane.tabs.length === 0 && target.kind === "side" && target.targetId === d.pane.id) return null;
+    // Its pane, emptied, goes: beside it is where it already is. (Unless the pane is named: it stays.)
+    if (d.pane.tabs.length === 0 && !d.pane.name && target.kind === "side" && target.targetId === d.pane.id) return null;
     moving = { type: "pane", id: genId("p"), weight: 1, tabs: d.tabs, active };
   }
 
@@ -494,6 +497,13 @@ function applyDropRaw(root: SplitNode, subject: DragSubject, target: DropTarget)
     if (target.join || (l?.link && l.link === r?.link)) return null;
     dest.tabs.splice(target.index, 0, ...moving.tabs);
     dest.active = target.index + moving.active;
+    // A named pane's name goes with its tabs, to a pane that has none. One that has a name
+    // keeps it: then the dropped pane stays behind, empty, with its own (it isn't lost).
+    if (moving.name && !dest.name) dest.name = moving.name;
+    else if (moving.name && subject.kind === "pane") {
+      replaceNode(root, TOMB, { type: "pane", id: moving.id, weight: moving.weight, tabs: [], active: 0, name: moving.name });
+      return { paneId: dest.id };
+    }
     removeNode(root, TOMB);
     return { paneId: dest.id };
   }
@@ -503,7 +513,7 @@ function applyDropRaw(root: SplitNode, subject: DragSubject, target: DropTarget)
     // Nothing goes after a fixed last child: just before it.
     const index = kind(s).lastFixed ? Math.min(target.index, s.children.length - 1) : target.index;
     // 1/N of the split, N counting the new node but not what is leaving.
-    const staying = s.children.filter((c) => c.id !== TOMB && !(c.type === "pane" && c.tabs.length === 0));
+    const staying = s.children.filter((c) => c.id !== TOMB && !(c.type === "pane" && c.tabs.length === 0 && !c.name));
     moving.weight = staying.length ? staying.reduce((x, c) => x + c.weight, 0) / staying.length : 1;
     s.children.splice(index, 0, moving);
   } else {

@@ -60,6 +60,11 @@ export interface PaneNode {
   active: number;
   /** See `SplitNode.size`. */
   size?: number;
+  /**
+   * Its name, if it has one (most don't): shown left of its tabs, and a destination for
+   * `Workspace.sendTo` ("Send to"). Unique (ignoring case), and not a reserved name.
+   */
+  name?: string;
 }
 
 export interface SplitNode {

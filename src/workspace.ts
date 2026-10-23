@@ -99,7 +99,7 @@ interface Snapshot {
 /** A relative move, as the navigation shortcuts make it. */
 export type Direction = "left" | "right" | "up" | "down" | "parent" | "child";
 /** Where to go from a cell: a move, an explicit cell (or node), or a sequence of these. */
-export type Path = Direction | { id: string } | Path[];
+export type Path = Direction | { id: string } | { name: string } | Path[];
 /** How to place something (see `Workspace.place`). */
 export interface PlaceSpec {
   /** Beside the base, on that side; or into its tabs. */
@@ -404,7 +404,8 @@ export class Workspace {
   /** Whether a tab can be closed: anything but the very last tab of the main tree. */
   canCloseTab(tabId: string): boolean {
     const main = panes(this.root);
-    return !(main.length === 1 && main[0].tabs.length === 1 && main[0].tabs[0].id === tabId);
+    // (The main tree's last tab: not if its pane would go. A named pane stays, empty.)
+    return !(main.length === 1 && main[0].tabs.length === 1 && main[0].tabs[0].id === tabId && !main[0].name);
   }
 
   // -------------------------------------------------------------------------
@@ -442,7 +443,7 @@ export class Workspace {
       return { id: at, last: at };
     }
     if (typeof path !== "string") {
-      const n = this.node(path.id);
+      const n = "name" in path ? this.paneByName(path.name) : this.node(path.id);
       return n ? { id: n.id, last: n.id } : { id: null, last: fromId };
     }
     const sel = { id: fromId };
@@ -467,6 +468,19 @@ export class Workspace {
    * Returns the pane that ends up holding it, or null.
    */
   place(spec: PlaceSpec, what: Placeable): string | null {
+    const result = this.placeDrop(spec, what);
+    if (!result) return null;
+    this.commitDrop(result, undefined, undefined, spec.focus !== false);
+    return result.paneId;
+  }
+
+  /** Whether `place` would place it (and change something). */
+  canPlace(spec: PlaceSpec, what: Placeable): boolean {
+    return !!this.placeDrop(spec, what);
+  }
+
+  /** The drop `place` makes (computed, not committed). */
+  private placeDrop(spec: PlaceSpec, what: Placeable): ForestResult | null {
     const from = this.selection.id;
     const r = spec.base === undefined ? { id: from, last: from } : this.walk(from, spec.base);
     let target: DropTarget | null = null;
@@ -485,10 +499,142 @@ export class Workspace {
       }
     }
     const subject = target && this.subjectOf(what);
-    const result = subject && this.tryDrop(subject, target!);
+    return (subject && this.tryDrop(subject, target!)) || null;
+  }
+
+  // -------------------------------------------------------------------------
+  // Marks: stored selections, to move together
+
+  /**
+   * Marked tabs and panes (ids), in the order marked: "stored selections", to move together
+   * (`moveMarked`). UI state: not part of the layout (not undoable, not saved).
+   */
+  marked: string[] = [];
+
+  /**
+   * Toggle the marks of a selection (default: the operand). A pane: its active tab (or, empty,
+   * the pane); a split or a range: the panes in it. All marked already: unmarked; else, the
+   * missing ones are marked.
+   */
+  toggleMark(sel: Selection | null = this.operand()): void {
+    const n = sel && this.node(sel.id);
+    if (!sel || !n) return;
+    const ids =
+      n.type === "pane" && !sel.range ? [n.tabs[n.active]?.id ?? n.id] : this.selectedNodes(sel).flatMap((x) => panes(x)).map((p) => p.id);
+    if (!ids.length) return;
+    this.marked = this.validMarks();
+    if (ids.every((id) => this.marked.includes(id))) this.marked = this.marked.filter((id) => !ids.includes(id));
+    else this.marked.push(...ids.filter((id) => !this.marked.includes(id)));
+    this.emit();
+  }
+
+  /** Forget the marks. */
+  clearMarks(): void {
+    if (!this.marked.length) return;
+    this.marked = [];
+    this.emit();
+  }
+
+  /** The marks still standing for something (a closed tab's, or pane's, are gone). */
+  validMarks(): string[] {
+    return this.marked.filter((id) => this.findTab(id) || this.node(id)?.type === "pane");
+  }
+
+  /**
+   * Move what's marked to the focus, in the order marked: into the focused pane's tabs (a
+   * split: its most recently focused pane's); on a leaf that isn't a pane (a prompt), each as a
+   * cell just before it. Like drops (a pane's name goes along: see `applyDropRaw`), all in one
+   * undo step; the focus stays. Then the marks are forgotten. Returns how many moved.
+   */
+  moveMarked(): number {
+    const marks = this.validMarks();
+    let moved = 0;
+    this.record(() => {
+      for (const id of marks) {
+        const focus = this.node(this.selection.id);
+        if (!focus) break;
+        let target: DropTarget | null = null;
+        if (isSplit(focus) || focus.type === "pane") {
+          // A pane: its own tabs (even if it shows a group); a split: its most recent pane's.
+          const dest = focus.type === "pane" ? focus : this.node(this.descend(focus));
+          if (dest?.type === "pane") target = { kind: "tab", paneId: dest.id, index: dest.tabs.length };
+        } else {
+          const leaf = focus as LayoutNode; // (other leaf types, if any)
+          const parent = this.index().parent(leaf.id);
+          if (parent && isSplit(parent)) target = { kind: "between", splitId: parent.id, index: parent.children.indexOf(leaf) };
+        }
+        const subject = target && this.subjectOf({ id });
+        const result = subject && this.tryDrop(subject, target!);
+        if (!result) continue;
+        this.commitDrop(result, undefined, undefined, false);
+        moved++;
+      }
+    });
+    this.marked = [];
+    this.emit();
+    return moved;
+  }
+
+  // -------------------------------------------------------------------------
+  // Pane names, and sending things to panes
+
+  /** Names panes can't have (ignoring case): e.g. the directions `sendTo` also takes. */
+  reservedNames: string[] = ["left", "right", "up", "down"];
+
+  /** The pane with that name (ignoring case), in any tree; or null. */
+  paneByName(name: string): PaneNode | null {
+    const key = name.trim().toLowerCase();
+    for (const t of this.trees()) for (const p of panes(t)) if (p.name?.toLowerCase() === key) return p;
+    return null;
+  }
+
+  /** Whether a pane can take that name: not empty, not reserved, not another pane's. */
+  canNamePane(paneId: string, name: string): boolean {
+    const n = name.trim();
+    if (!n || this.reservedNames.some((r) => r.toLowerCase() === n.toLowerCase())) return false;
+    const other = this.paneByName(n);
+    return !other || other.id === paneId;
+  }
+
+  /** Name a pane (null, or blank: no name). Undoable. Returns whether it did. */
+  namePane(paneId: string, name: string | null): boolean {
+    const n = name?.trim() || null;
+    if (n !== null && !this.canNamePane(paneId, n)) return false;
+    return this.change((forest) => {
+      const p = find(forest, paneId)?.node;
+      if (p?.type !== "pane" || (p.name ?? null) === n) return false;
+      if (n === null) delete p.name;
+      else p.name = n;
+    });
+  }
+
+  /**
+   * Send a tab (by id), or a whole pane (its tabs), into another pane's tabs: the pane with
+   * that name, or the neighbour of the pane holding it on that side ("left", "right", "up",
+   * "down"; if there's none, where it would be). Like a drop: undoable; what's sent gets the
+   * focus. Returns the pane that ends up holding it, or null.
+   */
+  sendTo(id: string, to: string): string | null {
+    const result = this.sendDrop(id, to);
     if (!result) return null;
-    this.commitDrop(result, undefined, undefined, spec.focus !== false);
+    this.commitDrop(result);
     return result.paneId;
+  }
+
+  /** Whether `sendTo` would send it (and change something). */
+  canSendTo(id: string, to: string): boolean {
+    return !!this.sendDrop(id, to);
+  }
+
+  private sendDrop(id: string, to: string): ForestResult | null {
+    const src = this.findTab(id)?.pane ?? this.node(id);
+    if (src?.type !== "pane") return null;
+    // A side: into the neighbour's tabs (its most recently focused pane's), as moveInto does.
+    if (to in DIRECTION_SIDES) return this.placeDrop({ split: "tab", base: [{ id: src.id }, to as Direction], force: true }, { id });
+    // A name: into that pane's own tabs (even if it shows a group).
+    const dest = this.paneByName(to);
+    const subject = dest && dest.id !== src.id ? this.subjectOf({ id }) : null;
+    return subject && this.tryDrop(subject, { kind: "tab", paneId: dest!.id, index: dest!.tabs.length });
   }
 
   /**
@@ -665,7 +811,8 @@ export class Workspace {
       if (this.endClose(op)) this.emit();
       return false;
     }
-    if (!this.endClose(op)) return false; // forced meanwhile
+    // Forced meanwhile (it's no longer pending). (An empty pane had nothing pending: it goes.)
+    if (!this.endClose(op) && op.tabIds.length) return false;
     if (!this.remove(op)) {
       this.emit();
       return false;
@@ -758,6 +905,8 @@ export class Workspace {
         const inner = tab.group?.children[0];
         return { select: inner ? this.descend(inner) : pane.id, activate: { paneId: pane.id, tabId: tab.id } };
       }
+      // A named pane stays, empty (a tab of it closed): the focus too.
+      if (gone !== null && pane.name) return { select: pane.id };
       // The pane disappears: up until a parent has something left.
       let x: LayoutNode = pane;
       let holder: PaneNode | null = null;

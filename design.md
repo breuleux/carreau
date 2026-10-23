@@ -84,7 +84,7 @@ type WorkspaceData = { root: Node; floating: FloatingWindow[] }; // last window 
 
 Normalization runs after every structural change, on construction, and on load. It:
 
-* drops panes with no tabs and splits with no children;
+* drops panes with no tabs (unless named: see [Pane names](#pane-names-and-send-to)) and splits with no children;
 * collapses a split with a single child into that child, which inherits the split's weight;
 * **rescales each split's child weights to average 1**, keeping their ratios. Weights become flex-grow factors, and flex-grow factors summing to less than 1 only claim that fraction of the free space. Without rescaling, a few half-splitting moves (each taking half a neighbour's weight) leave children squeezed into part of their parent, with the rest empty;
 * flattens a split nested in a split of the same type. A row of rows is just a row. The inner children's weights are rescaled so that together they keep the inner split's share: `w_k' = w_k / sum(w) * inner.weight`.
@@ -229,6 +229,22 @@ The ⋯ button opens a small menu **above** it (the header is at the bottom), ri
 * **Stick to bottom / top** (scroll-column) or **right / left** (scroll-row), when the pane shows a scroll split: toggles it sticky (`ws.toggleReverse(id)`; `ws.scrollOf(paneId)` finds it). Undoable.
 * Clicking ⋯ again toggles the menu closed, and any other pointerdown closes it. Exclude the anchor from the outside-click check, or the toggle reopens it immediately.
 * Stop `pointerdown` propagation on ⋯, so it doesn't select the pane and re-render (which would replace the anchor).
+* **Name pane… / Rename pane…**, and **Remove name** when it has one (see [Pane names](#pane-names-and-send-to)).
+* **Send to ▸**: the whole pane (its tabs) somewhere else (see below).
+
+**A tab's menu** (right click on it): **Close tab**, **Send to ▸** (that tab), and **Collapse group** when relevant (the tab is a group, and its pane can collapse). It opens at the cursor, kept inside the workspace.
+
+### Pane names and Send to
+
+* Panes can have a **name** (`pane.name`; most don't). It shows **left of the tabs, in grey italics** (it's a handle, like the header's empty part; double-click: rename). A named cell (in a scroll split) shows its tab bar, where the name is.
+* Naming is **in place** (`view.editPaneName(paneId)`: from the ⋯ menu, or the `namePane` keyboard action, which names the operand's pane; demo: N): a field left of the tabs. Enter (or leaving it) confirms, Escape cancels; blank: no name. A name it can't have shows as invalid (red), and Enter doesn't take it.
+  * `ws.namePane(paneId, name | null)`: undoable; refused (false) for a name it can't have: `ws.canNamePane`. Names are **unique**, ignoring case, and can't be one of `ws.reservedNames` (configurable; default: left, right, up, down, which "Send to" uses as directions).
+  * Leaving navigation mode doesn't take the focus from a field being edited in place (a name, a tab's title): `commitFocus` skips it.
+* **Send to** (`ws.sendTo(id, to)`; `ws.canSendTo`): a tab (by id), or a whole pane (its tabs), into another pane's tabs: the pane **with that name** (into its own tabs, even if it shows a group), or the neighbour **on that side** of the pane holding it ("left", "right", "up", "down": into its most recently focused pane's tabs, or where it would be if there's none, as `moveInto…` does). Like a drop: undoable, and what's sent gets the focus.
+  * The **Send to ▸** submenu opens on hover, on the side where there's room: a top row of **four arrows** (← → ↑ ↓), then the **named panes** (sorted; not the one it's in), each disabled when sending there wouldn't do anything.
+* **A named pane stays when emptied** of its tabs (moved away, closed, cleared), until it's closed (**Close pane**). Normalization keeps it; closing its last tab leaves the focus on it; its body shows a hint, and dropping onto its middle offers the "tab" icon (into it). Swapping with an empty pane is refused (nothing to trade). The main tree's last tab can be closed when its pane is named (the pane stays). Pitfall: closing a pane with no tabs has nothing pending: don't take that for "forced meanwhile", or it's never removed.
+* **Dropping a named pane into another pane's tabs** (dragging it, or Send to): its name goes with its tabs, to the receiving pane if it has none. If it has one, it keeps it (a name is never overridden), and the dropped pane **stays behind, empty, with its name** (so it isn't lost: close it if it's not wanted). (A docked window's pane: there's nowhere to stay behind; its name goes only to an unnamed pane.)
+* Hosts can address a pane by name in placements too: `{ name }` in a `Path` (e.g. `ws.placer({ split: "tab", base: { name: "logs" } })`).
 
 
 ## Selection and navigation
@@ -328,6 +344,7 @@ Memory kept by the workspace:
 
 Commands:
 
+* **mark / moveMarked** (keyboard actions; demo: X, V): **marks**, or "stored selections" (`ws.marked`: ids, in the order marked; UI state, not part of the layout). `ws.toggleMark(sel?)` toggles the operand's: a pane, its active tab (an empty one: the pane); a split or a range, the panes in it (all marked already: unmarked). `ws.moveMarked()` moves them all **to the focus**, in that order: into the focused pane's own tabs (a split: its most recently focused pane's; a prompt: each as a cell just before it), like drops (a pane's name goes along), **in one undo step**; the focus stays, and the marks are forgotten. Marks of things gone (closed) are ignored (`validMarks`). **Leaving navigation mode clears them** (so: sticky mode, or keep the modifier held). Shown as **numbered badges**, in the order marked: on the tab, or the pane's tab bar; where the tab bar is hidden, on the cell's strip.
 * **clear** (keyboard action; `ws.clear(sel?)`): remove the **finished cells** in the selection: every tab whose status is `done`, `standby` or `error` (`CLEARABLE`), inside groups too (never a group tab itself, for its own status: only what it holds). Emptied panes go. On a node that holds no tabs (a prompt), its parent's (the prompt's column). The tabs close **as a batch** (a `CloseOp` of kind `"tabs"`): all show as closing, their contents close through the lifecycle, then the ones that closed are **removed together, one undo step** (a refused close keeps its tab; force-closing one takes it out of the batch, now). The selection stays, or, if it went with them, goes to the innermost node left on its path. Demo: L.
 * **growWidth / shrinkWidth / growHeight / shrinkHeight** (keyboard actions; `ws.resizeFocus(axis, delta, measure?)`): resize the focus, the innermost node around the selection whose size along that axis can change (up through splits, and through groups to their holders). In a plain split along the axis: its share, 5% of the split per step, between 5% and 95% (the others keep their proportions). Pitfall: **keep the weights' total** (like a splitter drag does): weights are flex-grow factors, and a total under the number of children (normalization makes their average 1) leaves blank space. A cell of a scroll-column, vertically: its height (`size`, as its bar sets it), 24px per step, from its measured height (the keyboard controller measures it in the view) when it has none. Steps on the same node and axis make one undo step, like a splitter drag. Demo: [ ] narrower / wider, Shift+[ ] shorter / taller.
 * **nextTab / prevTab**: cycle the active tab of the innermost pane around the selection that has several: the selected pane, or, up through the groups' holders, the first with more than one tab (a lone tab in a group has nothing to cycle). If that is a holder, the focus moves into its newly shown tab (`descend`).
