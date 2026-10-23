@@ -176,6 +176,13 @@ function sameSel(a: Selection | null, b: Selection | null): boolean {
   return a.id === b.id && a.range?.[0] === b.range?.[0] && a.range?.[1] === b.range?.[1];
 }
 
+/**
+ * What a change touched. "selection": only the selection, and what is shown with it (the
+ * maximization following it): the structure is the same, nothing needs rebuilding (the view
+ * restyles, see `View.decorate`). "layout": anything else (the default).
+ */
+export type ChangeKind = "layout" | "selection";
+
 export class Workspace {
   root: LayoutNode;
   /** Layout trees pulled out of the hierarchy, shown as floating windows (last: frontmost). */
@@ -194,7 +201,7 @@ export class Workspace {
   private lastPane: string | null = null;
   /** selections preceding each expand, so that they can be undone */
   private expandStack: Selection[] = [];
-  private listeners: (() => void)[] = [];
+  private listeners: ((kind: ChangeKind) => void)[] = [];
   /** How tab contents close (set by the host). */
   lifecycle: Lifecycle = instantLifecycle;
   /** Pending closes, by tab id (a pane's covers all its tabs). Not part of the layout. */
@@ -206,14 +213,17 @@ export class Workspace {
     this.selectImpl(this.selection, false);
   }
 
-  onChange(fn: () => void): void {
+  /** Be told of changes, and of what they touched (see `ChangeKind`). */
+  onChange(fn: (kind: ChangeKind) => void): void {
     this.listeners.push(fn);
   }
 
-  emit(): void {
+  /** Tell the listeners of a change: of the layout (by default), or of the selection only. */
+  emit(kind: ChangeKind = "layout"): void {
     // Tabs can become active in many ways (clicks, commands, drops): record them all here.
-    for (const t of this.trees()) for (const p of panes(t)) if (p.tabs[p.active]) this.touch(`tabs:${p.id}`, p.tabs[p.active].id);
-    for (const fn of this.listeners) fn();
+    if (kind === "layout")
+      for (const t of this.trees()) for (const p of panes(t)) if (p.tabs[p.active]) this.touch(`tabs:${p.id}`, p.tabs[p.active].id);
+    for (const fn of this.listeners) fn(kind);
   }
 
   /** Record `id` as the most recently activated under `key`. */
@@ -1314,7 +1324,8 @@ export class Workspace {
   activateTab(paneId: string, index: number): void {
     const n = this.node(paneId);
     if (n?.type === "pane" && index >= 0 && index < n.tabs.length) n.active = index;
-    this.selectImpl({ id: paneId }, true);
+    this.selectImpl({ id: paneId }, false);
+    this.emit(); // (a layout change: what the pane shows)
   }
 
   private selectImpl(sel: Selection, emit: boolean): void {
@@ -1338,7 +1349,7 @@ export class Workspace {
     if (sel.id === this.root.id && !sel.range) this.clearMaximization();
     const path = pathTo(this.treeOf(sel.id)!, sel.id)!;
     for (let i = 0; i < path.length - 1; i++) this.touch(path[i].id, path[i + 1].id);
-    if (emit) this.emit();
+    if (emit) this.emit("selection");
   }
 
   /** The nodes covered by a selection (one node, or the nodes in the range). */
@@ -1420,7 +1431,7 @@ export class Workspace {
     if (!up) return;
     this.select({ id: up.id }, false);
     this.widenMaximized();
-    this.emit();
+    this.emit("selection");
   }
 
   /** Select the root of the tree holding the selection (main, or a floating window's). */
@@ -1429,14 +1440,14 @@ export class Workspace {
     if (this.selection.id === root.id && !this.selection.range) return;
     this.select({ id: root.id }, false);
     this.widenMaximized(); // (the main root clears the maximization: top level)
-    this.emit();
+    this.emit("selection");
   }
 
   private goChild(): void {
     const child = this.childOf(this.selection);
     if (!child) return;
     this.select({ id: child.id }, false);
-    this.emit();
+    this.emit("selection");
   }
 
   /**
@@ -1449,7 +1460,7 @@ export class Workspace {
     const last = this.lastPane && this.node(this.lastPane);
     if (!last || !isCell(last)) return false;
     this.select({ id: last.id }, false);
-    this.emit();
+    this.emit("selection");
     return true;
   }
 
@@ -1461,7 +1472,7 @@ export class Workspace {
     this.boundary.set(`${target.id}:${opposite[side]}`, sel);
     this.select(target, false);
     this.followMaximized();
-    this.emit();
+    this.emit("selection");
   }
 
   /** Swap the selected pane with the one on a side. The opposite swap undoes it exactly. */
@@ -1551,7 +1562,7 @@ export class Workspace {
     this.select(sel, false);
     this.expandStack = [...stack, prev];
     this.widenMaximized();
-    this.emit();
+    this.emit("selection");
   }
 
   /** Undo the last expansion. */
@@ -1561,7 +1572,7 @@ export class Workspace {
     const stack = this.expandStack;
     this.select(prev, false);
     this.expandStack = stack;
-    this.emit();
+    this.emit("selection");
   }
 
   // -------------------------------------------------------------------------

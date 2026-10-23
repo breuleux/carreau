@@ -28,6 +28,7 @@ import {
   rootCtx,
   shownIndex,
   union,
+  walk,
 } from "./model";
 import { Workspace } from "./workspace";
 
@@ -57,6 +58,8 @@ export interface NodeRenderer {
   attached?(el: HTMLElement, node: LayoutNode, view: View): void;
   /** Leaving navigation mode with the node selected: give it the keyboard focus. */
   commitFocus?(node: LayoutNode, view: View): void;
+  /** The selection changed, and nothing else (no render): update what shows it, if anything. */
+  selectionChanged?(node: LayoutNode, view: View): void;
 }
 
 const RENDERERS: Record<string, NodeRenderer> = {};
@@ -253,7 +256,8 @@ export class View implements DndHost {
       },
       { capture: true },
     );
-    ws.onChange(() => this.render());
+    // A change of the selection alone restyles; anything else rebuilds.
+    ws.onChange((kind) => (kind === "selection" ? this.refreshSelection() : this.render()));
     new ResizeObserver(() => {
       // Keep floating windows inside a workspace that changed size.
       const els = [...this.floatLayer.children] as HTMLElement[];
@@ -367,6 +371,26 @@ export class View implements DndHost {
     this.extras.sweep();
     for (const n of old) n.remove();
     this.restoreScroll();
+    this.revealSelection();
+  }
+
+  /**
+   * The selection changed, and nothing else: show it (no rebuild, so nothing flickers, and
+   * focused fields stay put). Renderers that show something of it are told (`selectionChanged`).
+   */
+  private refreshSelection(): void {
+    // (During a render: its end shows the selection.)
+    if (this.renderingNow) {
+      this.renderAgain = true;
+      return;
+    }
+    for (const t of this.ws.trees())
+      for (const { node } of walk(t)) if (this.elOf(node.id)) RENDERERS[node.type]?.selectionChanged?.(node, this);
+    this.revealSelection();
+  }
+
+  /** Show the selection: styles (`decorate`), and what it selected brought into view. */
+  private revealSelection(): void {
     // Keep the selected tab (active tab of the focused pane) in view when it changes.
     const cur = this.ws.node(this.ws.selection.id);
     const tabKey = cur?.type === "pane" ? `${cur.id}:${cur.active}` : "";

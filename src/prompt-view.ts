@@ -31,6 +31,11 @@ registerRenderer("prompt", {
     );
     EDITORS.get(editorEl)?.update?.(stateOf(view, node.id));
   },
+  // (What it may show includes whether it is selected.)
+  selectionChanged(node, view) {
+    const el = view.persisted(editorKey(node.id));
+    if (el) EDITORS.get(el)?.update?.(stateOf(view, node.id));
+  },
   // Leaving navigation mode on the prompt (or clicking its column's tab): into its editor.
   commitFocus(node, view) {
     const el = view.persisted(editorKey(node.id));

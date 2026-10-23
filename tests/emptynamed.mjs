@@ -19,6 +19,10 @@ const side = await page.locator(".carreau-pane", { has: page.locator(".carreau-p
 const r = await tab("README.md").boundingBox();
 await page.mouse.move(r.x + 10, r.y + 10); await page.mouse.down();
 await page.mouse.move(r.x + 60, r.y - 60, { steps: 4 });
+// Over its empty tab bar: its one dot (into it, as its first tab).
+const bar = await page.locator(".carreau-pane", { has: page.locator(".carreau-pane-name", { hasText: "side" }) }).locator(":scope > .carreau-tabbar").boundingBox();
+await page.mouse.move(bar.x + bar.width / 2, bar.y + bar.height / 2, { steps: 8 });
+console.log("over its tab bar:", await page.evaluate(() => `dots ${window.view.drag.tabBar?.dots.filter((d) => d.choice).length} | active ${window.view.drag.active?.target.kind ?? "none"}`));
 await page.mouse.move(side.x + side.width / 2, side.y + side.height / 2, { steps: 8 });
 console.log("over its middle:", await page.evaluate(() => window.view.drag.zones?.centers.map((c) => c.kind).join(",") + " | active " + (window.view.drag.active?.target.kind ?? "none")));
 await page.mouse.up();

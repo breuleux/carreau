@@ -134,8 +134,8 @@ export interface DragState {
   /** On a line: its main choice (the line itself), and its mini lines, once popped out. */
   main?: Choice | null;
   minis?: { line: SideLine; main: Choice; items: { choice: Choice; rect: Rect }[] } | null;
-  /** Over a scroll split's empty space: inserting there (cached: computing a drop is costly). */
-  space: { key: string; choice: Choice | null } | null;
+  /** Over a scroll split's empty space: the drops there, by where (cached: computing a drop is costly). */
+  space: Map<string, Choice | null>;
   lastEvent?: PointerEvent;
 }
 
@@ -158,6 +158,10 @@ const JOIN_OFFSET = 7;
 /** Center icons' radius; tab link icons' radius. */
 const ICON_R = 22;
 const LINK_R = 9;
+/** In an empty tab bar: how far in its one dot is. */
+const EMPTY_DOT = 6;
+/** Over a scroll split's empty space: how deep its edge zones (split beside its holder) are. */
+const SPACE_ZONE = 0.2;
 
 /** Two chain links, in a 16×16 box (also the view's link icon, between merged tabs). */
 export const LINK_PATHS = ["M6.5 9.5l3-3", "M7 4.5l1.2-1.2a2.6 2.6 0 0 1 3.7 3.7L10.7 8.2", "M9 11.5l-1.2 1.2a2.6 2.6 0 0 1-3.7-3.7L5.3 7.8"];
@@ -231,7 +235,7 @@ export class DragDrop {
     sourceEl.classList.add("carreau-drag-source");
     this.host.el.classList.add("is-dragging");
     this.index = null;
-    this.state = { subject, ghost, sourceEl, win, hoverPane: null, lines: [], tabBar: null, zones: null, inCenter: false, near: null, active: null, space: null };
+    this.state = { subject, ghost, sourceEl, win, hoverPane: null, lines: [], tabBar: null, zones: null, inCenter: false, near: null, active: null, space: new Map() };
   }
 
   end(commit: boolean): void {
@@ -432,10 +436,12 @@ export class DragDrop {
     // Gaps: before the first tab, between tabs (mid-way: merged tabs have a link icon between
     // them), after the last.
     const n = rs.length;
-    const xs = n ? Array.from({ length: n + 1 }, (_, i) => (i === 0 ? rs[0].left : i === n ? rs[n - 1].right : (rs[i - 1].right + rs[i].left) / 2)) : [br.left + 24];
     const sr = bar.querySelector<HTMLElement>(".carreau-tabs")!.getBoundingClientRect();
     const lo = Math.max(sr.left, rect.x + b.left) + 3;
-    const hi = Math.min(sr.right, rect.x + rect.w + b.left) - 3;
+    // (No tabs: the tabs' scroller is empty, zero-wide; the one dot goes at its start, where
+    // the first tab would be, and must not count as scrolled out.)
+    const hi = n ? Math.min(sr.right, rect.x + rect.w + b.left) - 3 : lo + EMPTY_DOT;
+    const xs = n ? Array.from({ length: n + 1 }, (_, i) => (i === 0 ? rs[0].left : i === n ? rs[n - 1].right : (rs[i - 1].right + rs[i].left) / 2)) : [lo + EMPTY_DOT];
     const pane = this.ws.node(paneId) as PaneNode;
     const dragged = this.draggedTabs();
     const dots: TabDot[] = [];
@@ -470,8 +476,11 @@ export class DragDrop {
   }
 
   /**
-   * Over a scroll split's empty space: insert into it where the cursor is along its axis (an
-   * empty one: as its first cell; else, before the first cell whose middle is past the cursor).
+   * Over a scroll split's empty space. Near its edges (`SPACE_ZONE` of it, on each side, where
+   * that is empty space: cells there take their own drops): split beside the pane holding it;
+   * not at the end where a fixed last child is (a prompt column's prompt). Elsewhere: insert
+   * into it where the cursor is along its axis (an empty one: as its first cell; else,
+   * before the first cell whose middle is past the cursor).
    */
   private spaceChoice(scroller: HTMLElement, px: number, py: number): Choice | null {
     const d = this.state!;
@@ -482,28 +491,59 @@ export class DragDrop {
     const k = kind(n);
     const kids = k.lastFixed ? n.children.slice(0, -1) : n.children;
     const row = k.axis === "row";
+    const b = host.el.getBoundingClientRect();
+    const sr = scroller.getBoundingClientRect();
+    const S = { x: sr.left - b.left, y: sr.top - b.top, w: sr.width, h: sr.height };
+    const zone = this.spaceZone(n, S, px, py);
+    if (zone) return zone;
     const index = kids.filter((c) => {
       const r = host.pxRect(c.id);
       return r && (row ? px > r.x + r.w / 2 : py > r.y + r.h / 2);
     }).length;
     const key = `${id}:${index}`;
-    if (d.space?.key === key) return d.space.choice;
+    if (d.space.has(key)) return d.space.get(key)!;
     const target: DropTarget = { kind: "between", splitId: id, index };
     const result = this.tryDrop(target);
     let choice: Choice | null = null;
     if (result) {
-      const b = host.el.getBoundingClientRect();
-      const sr = scroller.getBoundingClientRect();
       const [start, end]: Side[] = row ? ["left", "right"] : ["top", "bottom"];
       // The preview: the empty area; or, at an end, the end cell's edge; between two, the straddle.
       choice =
-        kids.length === 0 ? { target, result, span: [0, 0], rect: { x: sr.left - b.left, y: sr.top - b.top, w: sr.width, h: sr.height } }
+        kids.length === 0 ? { target, result, span: [0, 0], rect: S }
         : index === 0 ? { target, result, span: [0, 0], edge: { nodeId: kids[0].id, side: start } }
         : index === kids.length ? { target, result, span: [0, 0], edge: { nodeId: kids[index - 1].id, side: end } }
         : { target, result, span: [0, 0], straddle: [kids[index - 1].id, kids[index].id] };
     }
-    d.space = { key, choice };
+    d.space.set(key, choice);
     return choice;
+  }
+
+  /**
+   * The edge zone of a scroll split's empty space (rect `S`) under the cursor, if any: a split
+   * beside the pane holding it (as its edge third would, were it hovered). Null: not in one,
+   * or nothing to drop there (the space's own insertion then applies).
+   */
+  private spaceZone(n: SplitNode, S: Rect, px: number, py: number): Choice | null {
+    const d = this.state!;
+    const idx = (this.index ??= this.ws.index());
+    const holder = idx.holder(n.id);
+    const e = holder && idx.get(holder.id);
+    if (!e) return null;
+    const k = kind(n);
+    // (The end where a fixed last child sits: a split there would be hard to aim at, next to it.)
+    const fixedEnd: Side | null = k.lastFixed ? (k.axis === "row" ? "right" : "bottom") : null;
+    const fx = (px - S.x) / S.w;
+    const fy = (py - S.y) / S.h;
+    const near = ([["left", fx], ["right", 1 - fx], ["top", fy], ["bottom", 1 - fy]] as [Side, number][])
+      .filter(([side, f]) => f < SPACE_ZONE && side !== fixedEnd)
+      .sort((a, b) => a[1] - b[1]);
+    for (const [side] of near) {
+      const key = `${n.id}:${side}`;
+      if (!d.space.has(key)) d.space.set(key, this.zoneSide(e, side));
+      const choice = d.space.get(key)!;
+      if (choice) return choice;
+    }
+    return null;
   }
 
   /** The dragged tabs, and their pane: a tab, or a complex's tabs. */
@@ -581,6 +621,15 @@ export class DragDrop {
     return end ? edge(end, side) : edge(r, side);
   }
 
+  /** Where a pane's body (what its group fills: the pane without its tab bar) ends on a side. */
+  private bodyEdge(paneId: string, side: Side): number | null {
+    const body = this.host.elOf(paneId)?.querySelector<HTMLElement>(":scope > .carreau-body");
+    if (!body) return null;
+    const b = this.host.el.getBoundingClientRect();
+    const r = body.getBoundingClientRect();
+    return edge({ x: r.left - b.left, y: r.top - b.top, w: r.width, h: r.height }, side);
+  }
+
   /**
    * Border lines. For each side of the hovered pane P, the nodes whose border lies on P's
    * border on that side (P's ancestors, walking up through group holders, while their edge
@@ -611,22 +660,35 @@ export class DragDrop {
       // its scroll split's empty space. At the workspace's edges, that's the only way to split.)
       const onLine: LayoutNode[] = ownSides ? [idx.node(paneId)!] : [];
       let between: { split: SplitNode; index: number; before: LayoutNode; after: LayoutNode } | null = null;
+      // (`ref`: the edge the next node's must coincide with, to be on the line.)
+      let ref = pe;
       for (let x: LayoutNode = idx.node(paneId)!; ; ) {
         const e = idx.get(x.id)!;
-        const p = e.parent?.type === "slot" ? idx.holder(x.id) : e.parent;
+        const viaSlot = e.parent?.type === "slot";
+        const p = viaSlot ? idx.holder(x.id) : e.parent;
         if (!p || p.type === "forest") break;
+        const pr = host.pxRect(p.id);
         if (kind(p).axis === sideAxis[side]) {
           const kids = (p as SplitNode).children;
           const j = start ? e.index - 1 : e.index + 1;
           if (j >= 0 && j < kids.length) {
             const lo = Math.min(j, e.index);
             between = { split: p as SplitNode, index: lo + 1, before: kids[lo], after: kids[lo + 1] };
-            break;
+            // Next to a fixed last child (a prompt column's prompt): that is the split's end,
+            // like its start: keep walking (from its edge), for the splits around it.
+            if (!(kind(p).lastFixed && j === kids.length - 1 && pr)) break;
+            onLine.push(p);
+            ref = this.lineEdge(p, pr, side);
+            x = p;
+            continue;
           }
         }
-        const pr = host.pxRect(p.id);
-        if (!pr || Math.abs(this.lineEdge(p, pr, side) - pe) > 1.5) break;
+        // (From a group to its holder: the group fills the holder's body; the holder's tab bar,
+        // on that side, doesn't count.)
+        const pEdge = viaSlot ? this.bodyEdge(p.id, side) : pr && this.lineEdge(p, pr, side);
+        if (!pr || pEdge === null || Math.abs(pEdge - ref) > 1.5) break;
         onLine.push(p);
+        ref = this.lineEdge(p, pr, side);
         x = p;
       }
 
