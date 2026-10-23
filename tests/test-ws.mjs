@@ -525,5 +525,146 @@ for (const [a, b] of [["swapUp", "swapDown"], ["swapLeft", "swapRight"], ["swapR
   plain.toggleMaximize();
   check("other cells still maximize themselves", plain.maximized?.id === plain.root.children[1].id);
 }
+// Tab complexes (merging), generic: a test complex type records what it's told
+{
+  const { registerComplex, shownIndex, shape } = await server.ssrLoadModule("/src/model.ts");
+  const calls = [];
+  registerComplex("t", {
+    changed: (_f, c, ch) => calls.push(`changed ${c.tabs.map((t) => t.title).join("+")} in:${ch.entered.map((t) => t.title).join(",")} out:${ch.left.map((t) => t.title).join(",")}`),
+    closing: (_f, c, tab) => calls.push(`closing ${tab.title} of ${c.tabs.map((t) => t.title).join("+")}`),
+  });
+  const kt = (title, key = "t") => ({ id: "t" + title, title, key });
+  const ws = new Workspace(row([pane([kt("A"), kt("N", null)]), pane([kt("B")]), pane([kt("C")]), pane([kt("X", "other")])]));
+  const tabsOf = () => ws.root.children.map((p) => shape(p).replace(/^\[|\]$/g, "")).join(" | ");
+  check("merge with an unmergeable tab, or another key: refused", !ws.tryDrop({ kind: "tab", tabId: "tB" }, { kind: "merge", tabId: "tN" }) && !ws.tryDrop({ kind: "tab", tabId: "tB" }, { kind: "merge", tabId: "tX" }));
+  ws.commitDrop(ws.tryDrop({ kind: "tab", tabId: "tB" }, { kind: "merge", tabId: "tA" }));
+  check(`merge B onto A: B just after A, linked; its pane gone: ${tabsOf()}`, tabsOf() === "tA+tB,tN | tC | tX");
+  check(`  told: ${calls.join("; ")}`, calls.join("; ") === "changed A+B in:A,B out:");
+  check("  B focused; the complex shows A's body", ws.root.children[0].active === 1 && shownIndex(ws.root.children[0]) === 0);
+  check("merge B onto A again: nothing (already merged)", !ws.tryDrop({ kind: "tab", tabId: "tB" }, { kind: "merge", tabId: "tA" }));
+  calls.length = 0;
+  ws.commitDrop(ws.tryDrop({ kind: "tab", tabId: "tC" }, { kind: "merge", tabId: "tA" }));
+  check(`C onto A: between A and B: ${tabsOf()} (${calls.join("; ")})`, tabsOf() === "tA+tC+tB,tN | tX" && calls.join("; ") === "changed A+C+B in:C out:");
+  calls.length = 0;
+  const link = () => ws.root.children[0].tabs[0].link;
+  check("a plain tab between two members: refused (it would break the complex)", !ws.tryDrop({ kind: "tab", tabId: "tN" }, { kind: "tab", paneId: ws.root.children[0].id, index: 1 }) && !ws.tryDrop({ kind: "tab", tabId: "tA" }, { kind: "tab", paneId: ws.root.children[0].id, index: 2 }));
+  check("joining a complex it can't merge with: refused", !ws.tryDrop({ kind: "tab", tabId: "tN" }, { kind: "tab", paneId: ws.root.children[0].id, index: 1, join: link() }));
+  calls.length = 0; // (the refused drops above were computed: their previews told the type too)
+  ws.commitDrop(ws.tryDrop({ kind: "tab", tabId: "tA" }, { kind: "tab", paneId: ws.root.children[0].id, index: 2, join: link() }));
+  check(`reorder within the complex (A after C, joining it there): still merged: ${tabsOf()} (${calls.join("; ")})`, tabsOf() === "tC+tA+tB,tN | tX" && calls.join("; ") === "changed C+A+B in: out:");
+  calls.length = 0;
+  ws.commitDrop(ws.tryDrop({ kind: "tab", tabId: "tB" }, { kind: "tab", paneId: ws.root.children[0].id, index: 0, join: link() }));
+  check(`B to the complex's start, joining it there: ${tabsOf()}`, tabsOf() === "tB+tC+tA,tN | tX");
+  ws.commitDrop(ws.tryDrop({ kind: "tab", tabId: "tA" }, { kind: "tab", paneId: ws.root.children[0].id, index: 3 }));
+  check(`A as a plain tab right after the complex: out of it, in the same pane: ${tabsOf()}`, tabsOf() === "tB+tC,tA,tN | tX");
+  ws.undo();
+  ws.undo();
+  check(`(undone twice: ${tabsOf()})`, tabsOf() === "tC+tA+tB,tN | tX");
+  calls.length = 0;
+  ws.commitDrop(ws.tryDrop({ kind: "tab", tabId: "tA" }, { kind: "side", targetId: ws.root.children[1].id, side: "right" }));
+  check(`drag A out: it leaves: ${tabsOf()} (${calls.join("; ")})`, tabsOf() === "tC+tB,tN | tX | tA" && calls.join("; ") === "changed C+B in: out:A");
+  calls.length = 0;
+  ws.commitDrop(ws.tryDrop({ kind: "tab", tabId: "tA" }, { kind: "merge", tabId: "tB" }));
+  await ws.closeTab("tC");
+  check(`close C (of C+B+A): told first, it leaves, then closes: ${tabsOf()} (${calls.join("; ")})`, tabsOf() === "tB+tA,tN | tX" && calls.join("; ") === "changed C+B+A in:A out:; closing C of C+B+A; changed B+A in: out:C");
+  calls.length = 0;
+  ws.commitDrop(ws.tryDrop({ kind: "tab", tabId: "tA" }, { kind: "tab", paneId: ws.root.children[0].id, index: 3 }));
+  check(`A to the end, past N: the complex dissolves, B alone again: ${tabsOf()} (${calls.join("; ")})`, tabsOf() === "tB,tN,tA | tX" && calls.join("; ") === "changed B in: out:A" && !ws.root.children[0].tabs.some((t) => t.link));
+  ws.undo();
+  check("undo: merged again", tabsOf() === "tB+tA,tN | tX");
+}
+// Dragging a whole complex (by its link icon): a block of tabs, staying merged
+{
+  const { shape } = await server.ssrLoadModule("/src/model.ts");
+  const kt = (title, key = "t") => ({ id: "t" + title, title, key });
+  const ws = new Workspace(row([pane([kt("A"), kt("B"), kt("N", null)]), pane([kt("C"), kt("D")]), pane([kt("E")])]));
+  const tabsOf = () => [ws.root, ...ws.floating.map((w) => w.root)].map((t) => shape(t).replace(/\[|\]|row|\(|\)/g, "")).join(" ; ");
+  const merge = (a, b) => ws.commitDrop(ws.tryDrop({ kind: "tab", tabId: "t" + a }, { kind: "merge", tabId: "t" + b }));
+  merge("B", "A");
+  merge("D", "C");
+  const P = () => panes(ws.root);
+  const linkOf = (title) => P().flatMap((p) => p.tabs).find((t) => t.title === title).link;
+  const cx = { kind: "complex", link: linkOf("A") };
+  check(`two complexes: ${tabsOf()}`, tabsOf() === "tA+tB,tN tC+tD tE");
+  check("a complex swaps with nothing; nor goes into itself", !ws.tryDrop(cx, { kind: "swap", paneId: P()[2].id }) && !ws.tryDrop(cx, { kind: "tab", paneId: P()[0].id, index: 1 }));
+  ws.commitDrop(ws.tryDrop(cx, { kind: "side", targetId: P()[2].id, side: "right" }));
+  check(`A+B beside E: a new pane, still merged; N stays: ${tabsOf()}`, tabsOf() === "tN tC+tD tE tA+tB");
+  ws.undo();
+  ws.commitDrop(ws.tryDrop(cx, { kind: "tab", paneId: P()[2].id, index: 1 }));
+  check(`A+B into E's tabs, after E: still merged: ${tabsOf()}`, tabsOf() === "tN tC+tD tE,tA+tB");
+  ws.undo();
+  ws.commitDrop(ws.tryDrop(cx, { kind: "tab", paneId: P()[1].id, index: 2, join: linkOf("C") }));
+  check(`A+B joining C+D at its end: one complex: ${tabsOf()}`, tabsOf() === "tN tC+tD+tA+tB tE");
+  ws.undo();
+  ws.commitDrop(ws.tryDrop(cx, { kind: "merge", tabId: "tC" }));
+  check(`A+B merged onto C: just after it: ${tabsOf()}`, tabsOf() === "tN tC+tA+tB+tD tE" && P()[1].tabs[P()[1].active].title === "B");
+  ws.undo();
+  ws.commitDrop(ws.tryDrop(cx, { kind: "float", paneId: P()[0].id }), undefined, { x: 10, y: 10, w: 200, h: 100 });
+  check(`A+B floated (over its own pane): still merged: ${tabsOf()}`, tabsOf() === "tN tC+tD tE ; tA+tB");
+}
+// Next/previous tab from a lone tab in a group: up to the first pane with several tabs
+{
+  const { groupPane } = await server.ssrLoadModule("/src/model.ts");
+  const inner = groupPane("G", column([pane(["x"]), pane(["y"])]), 1);
+  inner.tabs.push({ id: "tH", title: "H", group: { type: "slot", id: "sH", weight: 1, children: [pane(["h1"])] } }, { id: "tT", title: "T" });
+  const ws = new Workspace(row([inner, pane(["other"])]));
+  const P = ws.root.children[0];
+  const byTitle = (t) => panes(ws.root).find((p) => p.tabs.some((x) => x.title === t));
+  ws.select({ id: byTitle("x").id });
+  ws.run("nextTab");
+  check(`from x (alone in its pane, in group G): the holder's next tab, H, and the focus into it (${ws.node(ws.selection.id)?.tabs?.[0].title})`, P.tabs[P.active].title === "H" && ws.selection.id === byTitle("h1").id);
+  ws.run("nextTab");
+  check("again (from h1): T, a content tab: the holder is focused", P.tabs[P.active].title === "T" && ws.selection.id === P.id);
+  ws.run("prevTab");
+  check("back (from the holder itself, which has several tabs): H, focus unchanged", P.tabs[P.active].title === "H" && ws.selection.id === P.id);
+  ws.select({ id: byTitle("other").id });
+  ws.run("nextTab");
+  check("a lone tab outside any group: nothing", ws.selection.id === byTitle("other").id && P.tabs[P.active].title === "H");
+}
+// Tab complexes: merging prompt-columns
+{
+  const { groupPane } = await server.ssrLoadModule("/src/model.ts");
+  // Two prompt-columns with known orders: a1 (1), a2 (3) | b1 (2).
+  const cellP = (t, order) => ({ p: pane([t]), order });
+  const col = (title, cells) => {
+    const c = promptColumn(cells.map((x) => x.p));
+    c.cells = Object.fromEntries(cells.map((x) => [x.p.id, { order: x.order }]));
+    return groupPane(title, c, 1);
+  };
+  let ws = new Workspace(row([col("Ann", [cellP("a1", 1), cellP("a2", 3)]), col("Bob", [cellP("b1", 2)])]));
+  const tabId = (title) => panes(ws.root).flatMap((p) => p.tabs).find((t) => t.title === title).id;
+  const colOf = (title) => panes(ws.root).flatMap((p) => p.tabs).find((t) => t.title === title).group.children[0];
+  const cellsOf = (title) => colOf(title).children.filter((c) => c.type !== "prompt").map((c) => c.tabs[0].title).join(",");
+  const promptOf = (title) => colOf(title).children.at(-1).id;
+  ws.commitDrop(ws.tryDrop({ kind: "tab", tabId: tabId("Bob") }, { kind: "merge", tabId: tabId("Ann") }));
+  check(`merged: all the cells in the first's column, interleaved: Ann: ${cellsOf("Ann")} | Bob: ${cellsOf("Bob")}`, cellsOf("Ann") === "a1,b1,a2" && cellsOf("Bob") === "");
+  // Bob is the complex's active member: what he types comes from him.
+  configurePrompts(ws, { submit: (text) => ({ id: "t" + text, title: text }) });
+  submitPrompt(ws, promptOf("Ann"), "b2");
+  check(`typing as Bob (active): ${cellsOf("Ann")}`, cellsOf("Ann") === "a1,b1,a2,b2" && colOf("Ann").cells[panes(ws.root).find((p) => p.tabs[0].title === "b2").id].origin === tabId("Bob"));
+  // Reorder by hand: b2 to the top; it keeps that place.
+  const b2 = panes(ws.root).find((p) => p.tabs[0].title === "b2").id;
+  ws.commitDrop(ws.tryDrop({ kind: "pane", paneId: b2 }, { kind: "between", splitId: colOf("Ann").id, index: 0 }));
+  check(`b2 moved to the top by hand: ${cellsOf("Ann")}`, cellsOf("Ann") === "b2,a1,b1,a2");
+  // Bob leaves: his cells go back with him, in their order.
+  ws.commitDrop(ws.tryDrop({ kind: "tab", tabId: tabId("Bob") }, { kind: "side", targetId: ws.root.id, side: "right" }));
+  check(`Bob dragged out: Ann: ${cellsOf("Ann")} | Bob: ${cellsOf("Bob")}`, cellsOf("Ann") === "a1,a2" && cellsOf("Bob") === "b2,b1");
+  // Merged again (the other way): into Bob's column.
+  ws.commitDrop(ws.tryDrop({ kind: "tab", tabId: tabId("Ann") }, { kind: "merge", tabId: tabId("Bob") }));
+  check(`Ann onto Bob: Bob's column first: Bob: ${cellsOf("Bob")} | Ann: ${cellsOf("Ann")}`, cellsOf("Bob") === "b2,a1,b1,a2" && cellsOf("Ann") === "");
+  // Reordered: Ann first, so her column shows them all.
+  const pair = panes(ws.root).find((p) => p.tabs.length === 2);
+  ws.commitDrop(ws.tryDrop({ kind: "tab", tabId: tabId("Ann") }, { kind: "tab", paneId: pair.id, index: 0, join: pair.tabs[0].link }));
+  check(`Ann moved first in the complex: Ann: ${cellsOf("Ann")} | Bob: ${cellsOf("Bob")}`, cellsOf("Ann") === "b2,a1,b1,a2" && cellsOf("Bob") === "");
+  // Closing Bob (transfer, the default): his cells stay, as Ann's.
+  await ws.closeTab(tabId("Bob"));
+  check(`Bob closed: his cells stay with Ann: ${cellsOf("Ann")}`, cellsOf("Ann") === "b2,a1,b1,a2" && !panes(ws.root).some((p) => p.tabs.some((t) => t.title === "Bob")) && !panes(ws.root).some((p) => p.tabs.some((t) => t.link)));
+  // mergedClose: "close": the cells go with their tab.
+  ws = new Workspace(row([col("Ann", [cellP("a1", 1)]), col("Bob", [cellP("b1", 2)])]));
+  configurePrompts(ws, { mergedClose: "close" });
+  ws.commitDrop(ws.tryDrop({ kind: "tab", tabId: tabId("Bob") }, { kind: "merge", tabId: tabId("Ann") }));
+  await ws.closeTab(tabId("Ann"));
+  check(`mergedClose "close": Ann closed (the first, holding everything), her cells with her: Bob: ${cellsOf("Bob")}`, cellsOf("Bob") === "b1" && !panes(ws.root).some((p) => p.tabs.some((t) => t.title === "a1")));
+}
 await server.close();
 process.exit(fails ? 1 : 0);

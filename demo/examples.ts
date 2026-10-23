@@ -1,5 +1,15 @@
-import { column, genId, LayoutNode, pane, row, scrollColumn, scrollRow, Tab } from "../src/model";
-import { promptColumn } from "../src/prompt";
+import { column, genId, groupPane, LayoutNode, pane, PaneNode, row, scrollColumn, scrollRow, Tab } from "../src/model";
+import { promptColumn, PromptColumnNode } from "../src/prompt";
+import { plot } from "./plots";
+
+/** A prompt-column in a group tab, its cells inserted that many minutes ago (for merging). */
+function timedColumn(title: string, cells: [Tab, number][]): PaneNode {
+  const now = Date.now();
+  const panes = cells.map(([tab]) => pane([tab]));
+  const col = promptColumn(panes) as PromptColumnNode;
+  col.cells = Object.fromEntries(panes.map((p, i) => [p.id, { order: now - cells[i][1] * 60000 }]));
+  return groupPane(title, col, 1);
+}
 
 const LOREM =
   "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.";
@@ -271,6 +281,33 @@ export const examples: Example[] = [
           ],
           3,
         ),
+      ]),
+  },
+  {
+    name: "Merging prompts",
+    description:
+      "Drag Bob's tab onto Ann's (the link icon over it): their cells merge, interleaved by time. Click either tab of the pair to type as it. Drag a tab out of the pair to unmerge: it takes its cells back. Closing one hands its cells over.",
+    build: () =>
+      row([
+        timedColumn("Ann", [
+          [cell("ls", SHELL, "$ ls", "oklch(0.75 0.12 160)", "done", "src/  demo/  tests/"), 50],
+          [cell("Plan", PROMPT, "What should we merge?", "oklch(0.72 0.13 300)", undefined, "Tabs with the same key."), 30],
+          [cell("make", SHELL, "$ make", "oklch(0.75 0.12 160)", "done", "ok"), 10],
+        ]),
+        timedColumn("Bob", [
+          [cell("pwd", SHELL, "$ pwd", "oklch(0.75 0.12 160)", "done", "/home/bob"), 40],
+          [cell("Ask", PROMPT, "Is it interleaved?", "oklch(0.72 0.13 300)", undefined, "By insertion time."), 20],
+        ]),
+      ]),
+  },
+  {
+    name: "Plots",
+    description:
+      "Drag a plot's tab onto another plot's tab (the link icon), or onto its pane's link icon: the plots share one area. Click a member to highlight it; reorder members, or drag one out to split it off again.",
+    build: () =>
+      row([
+        column([pane([plot("Sine", "sine", "oklch(0.62 0.17 250)")]), pane([plot("Cosine", "cosine", "oklch(0.65 0.17 25)")])]),
+        column([pane([plot("Damped", "damped", "oklch(0.62 0.15 150)")]), pane([plot("Square", "square", "oklch(0.65 0.15 300)"), plot("Ramp", "ramp", "oklch(0.7 0.14 80)")])]),
       ]),
   },
   {

@@ -82,6 +82,14 @@ export interface NodeKind {
   alwaysSticky?: boolean;
   /** Title of the group tab holding it, if it must live in one (scroll splits). */
   groupTitle?: string;
+  /** The merge key of a group tab whose layout's root is of this kind (see `mergeKey`). */
+  mergeKey?: string;
+  /**
+   * Clicking the group tab whose layout's root it is: the child that takes the focus (the
+   * selection, and the keyboard focus through its renderer's `commitFocus`). Default: none
+   * (the tab's pane is selected).
+   */
+  focusChild?(n: LayoutNode): LayoutNode | null;
   /**
    * Normalize its children (already normalized themselves), returning the new list. Default:
    * pinned children go (they only stay where their parent's kind keeps them).
@@ -234,9 +242,30 @@ export function isSticky(n: LayoutNode): boolean {
 // ---------------------------------------------------------------------------
 // Panes
 
-/** The active group tab's slot, if a pane is showing a group. */
+/**
+ * The index of the tab whose body a pane shows: its active tab's; but in a tab complex (a run
+ * of linked tabs, see complex.ts), the complex's first tab's, whichever member is active.
+ */
+export function shownIndex(p: PaneNode): number {
+  let i = p.active;
+  const link = p.tabs[i]?.link;
+  if (link) while (i > 0 && p.tabs[i - 1].link === link) i--;
+  return i;
+}
+
+/** The shown group tab's slot, if a pane is showing a group (see `shownIndex`). */
 export function activeGroup(p: PaneNode): SplitNode | null {
-  return p.tabs[p.active]?.group ?? null;
+  return p.tabs[shownIndex(p)]?.group ?? null;
+}
+
+/**
+ * What a tab can merge with: tabs with the same key (null: nothing). Its own `key` if set;
+ * for a group tab, its layout root's kind's `mergeKey`.
+ */
+export function mergeKey(t: Tab): string | null {
+  if (t.key !== undefined) return t.key;
+  const root = t.group?.children[0];
+  return (root && kind(root).mergeKey) ?? null;
 }
 
 /**

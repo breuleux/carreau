@@ -15,9 +15,12 @@ import {
   SIDES,
   Side,
   SplitNode,
+  Tab,
   across,
   along,
+  canMerge,
   edge,
+  linkedRuns,
   findTab,
   inRect,
   intersect,
@@ -85,13 +88,24 @@ interface TabDot {
   choice: Choice | null;
   x: number;
   y: number;
+  /** Into a complex there (rather than as a plain tab): drawn differently. */
+  join?: boolean;
+}
+
+/** A tab the dragged tab can merge with: a link icon over it, hit over its middle. */
+interface TabLink {
+  choice: Choice;
+  x: number;
+  y: number;
+  /** the hit area: [from, to] along the tab bar */
+  hit: [number, number];
 }
 
 /** The hovered pane's own zones: its edge thirds, and icons in its center. */
 interface Zones {
   rect: Rect;
   sides: Partial<Record<Side, Choice>>;
-  centers: { kind: "swap" | "float" | "tab"; choice: Choice; cx: number; cy: number; r: number }[];
+  centers: { kind: "swap" | "float" | "tab" | "link"; choice: Choice; cx: number; cy: number; r: number }[];
 }
 
 export interface DragState {
@@ -102,7 +116,7 @@ export interface DragState {
   win?: FloatingWindow;
   hoverPane: string | null;
   lines: SideLine[];
-  tabBar: { rect: Rect; dots: TabDot[] } | null;
+  tabBar: { rect: Rect; dots: TabDot[]; links: TabLink[] } | null;
   zones: Zones | null;
   inCenter: boolean;
   near: SideLine | null;
@@ -118,8 +132,14 @@ const DASH_GAP = 1;
 const HALF_GAP = 1;
 /** How far outward a scroll split's start/end separator can be hit. */
 const EDGE_REACH = 5;
-/** Center icons' radius. */
+/** At a complex's edge: how far inside it its join dot is, from the gap's plain dot. */
+const JOIN_OFFSET = 7;
+/** Center icons' radius; tab link icons' radius. */
 const ICON_R = 22;
+const LINK_R = 9;
+
+/** Two chain links, in a 16×16 box (also the view's link icon, between merged tabs). */
+export const LINK_PATHS = ["M6.5 9.5l3-3", "M7 4.5l1.2-1.2a2.6 2.6 0 0 1 3.7 3.7L10.7 8.2", "M9 11.5l-1.2 1.2a2.6 2.6 0 0 1-3.7-3.7L5.3 7.8"];
 /** After Esc cancels a drag, no drag may restart for this long (ms). */
 const ESC_COOLDOWN = 500;
 
@@ -250,8 +270,10 @@ export class DragDrop {
       d.near = onLines[0] ?? null;
       if (d.near) d.active = dashAt(d.near, along(d.near.side, px, py));
       else if (d.tabBar && inRect(d.tabBar.rect, px, py)) {
+        // Over the middle of a tab it can merge with: merge; elsewhere, the nearest gap.
+        const link = d.tabBar.links.find((l) => px >= l.hit[0] && px <= l.hit[1]);
         const nearest = d.tabBar.dots.reduce<TabDot | null>((a, b) => (!a || Math.abs(b.x - px) < Math.abs(a.x - px) ? b : a), null);
-        d.active = nearest?.choice ?? null; // nothing if the nearest gap is a no-op
+        d.active = link?.choice ?? nearest?.choice ?? null; // nothing if the nearest gap is a no-op
       } else if (d.zones && inRect(d.zones.rect, px, py)) {
         const Z = d.zones;
         const fx = (px - Z.rect.x) / Z.rect.w;
@@ -285,19 +307,56 @@ export class DragDrop {
     const rect = visible && intersect({ x: br.left - b.left, y: br.top - b.top, w: br.width, h: br.height }, visible);
     if (!rect) return null; // hidden or scrolled out
     const rs = [...bar.querySelectorAll<HTMLElement>(".carreau-tab")].map((t) => t.getBoundingClientRect());
-    const xs = rs.length ? [rs[0].left, ...rs.map((r) => r.right)] : [br.left + 24];
+    // Gaps: before the first tab, between tabs (mid-way: merged tabs have a link icon between
+    // them), after the last.
+    const n = rs.length;
+    const xs = n ? Array.from({ length: n + 1 }, (_, i) => (i === 0 ? rs[0].left : i === n ? rs[n - 1].right : (rs[i - 1].right + rs[i].left) / 2)) : [br.left + 24];
     const sr = bar.querySelector<HTMLElement>(".carreau-tabs")!.getBoundingClientRect();
     const lo = Math.max(sr.left, rect.x + b.left) + 3;
     const hi = Math.min(sr.right, rect.x + rect.w + b.left) - 3;
+    const pane = this.ws.node(paneId) as PaneNode;
+    const dragged = this.draggedTabs();
     const dots: TabDot[] = [];
     xs.forEach((x, index) => {
       const cx = index === 0 ? Math.max(x, lo) : index === xs.length - 1 ? Math.min(x, hi) : x;
       if (cx < lo - 4 || cx > hi + 4) return; // scrolled out
-      const target: DropTarget = { kind: "tab", paneId, index };
-      const result = this.tryDrop(target);
-      dots.push({ choice: result && { target, result, span: [cx, cx] }, x: cx - b.left, y: br.top + br.height / 2 - b.top });
+      // Between two merged tabs: into their complex (reordering, or joining it). Elsewhere: a
+      // plain tab there (out of any complex), and next to a complex, a dot just inside it, to
+      // be at its edge, in it.
+      const [before, after] = [pane.tabs[index - 1], pane.tabs[index]];
+      const inside = before?.link && before.link === after?.link;
+      const variants: [string | undefined, number][] = inside
+        ? [[before.link, cx]]
+        : [[undefined, cx], ...(before?.link ? [[before.link, cx - JOIN_OFFSET] as [string, number]] : []), ...(after?.link ? [[after.link, cx + JOIN_OFFSET] as [string, number]] : [])];
+      for (const [join, vx] of variants) {
+        const target: DropTarget = { kind: "tab", paneId, index, ...(join ? { join } : {}) };
+        const result = this.tryDrop(target);
+        dots.push({ choice: result && { target, result, span: [vx, vx] }, x: vx - b.left, y: br.top + br.height / 2 - b.top, join: !!join });
+      }
     });
-    return { rect, dots };
+    const links: TabLink[] = [];
+    if (dragged)
+      rs.forEach((r, i) => {
+        const cx = (r.left + r.right) / 2;
+        if (cx < lo || cx > hi || !dragged.tabs.every((t) => canMerge(pane, i, t))) return;
+        const target: DropTarget = { kind: "merge", tabId: pane.tabs[i].id };
+        const result = this.tryDrop(target);
+        const quarter = (r.right - r.left) / 4;
+        if (result) links.push({ choice: { target, result, span: [cx, cx] }, x: cx - b.left, y: br.top + br.height / 2 - b.top, hit: [cx - quarter - b.left, cx + quarter - b.left] });
+      });
+    return { rect, dots, links };
+  }
+
+  /** The dragged tabs, and their pane: a tab, or a complex's tabs. */
+  private draggedTabs(): { pane: PaneNode; tabs: Tab[] } | null {
+    const s = this.state!.subject;
+    if (s.kind === "tab") {
+      const ft = this.ws.trees().map((t) => findTab(t, s.tabId)).find(Boolean);
+      return ft ? { pane: ft.pane, tabs: [ft.pane.tabs[ft.index]] } : null;
+    }
+    if (s.kind !== "complex") return null;
+    for (const p of this.ws.trees().flatMap((t) => panes(t))) for (const run of linkedRuns(p)) if (run.id === s.link) return { pane: p, tabs: run.tabs };
+    return null;
   }
 
   /** The pane's own zones: edge thirds (insert beside it), and center icons. */
@@ -315,12 +374,15 @@ export class DragDrop {
     // Center icons. Over its own pane: float the dragged thing. Elsewhere: swap, plus a tab
     // icon for a pane whose tab bar is hidden (no dots to drop on).
     const s = this.state!.subject;
-    const own = (s.kind === "pane" && s.paneId === paneId) || (s.kind === "tab" && findTab(pane, s.tabId)?.pane === pane);
+    const st = this.draggedTabs();
+    const own = (s.kind === "pane" && s.paneId === paneId) || st?.pane === pane;
     const wanted: [Zones["centers"][number]["kind"], DropTarget][] = own
       ? [["float", { kind: "float", paneId }]]
       : [
           ["swap", { kind: "swap", paneId }],
           ...(paneDisplay(pane, e.ctx).showTabBar ? [] : [["tab", { kind: "tab", paneId, index: pane.tabs.length }] as [Zones["centers"][number]["kind"], DropTarget]]),
+          // Merge with its active tab, if the dragged tab can.
+          ...(st && st.tabs.every((t) => canMerge(pane, pane.active, t)) ? [["link", { kind: "merge", tabId: pane.tabs[pane.active].id }] as [Zones["centers"][number]["kind"], DropTarget]] : []),
         ];
     const valid = wanted.flatMap(([k, t]) => {
       const c = choice(t);
@@ -494,6 +556,11 @@ export class DragDrop {
       return e;
     };
     const defs = mk("defs", {});
+    // The chain links icon, `size` pixels wide, centered.
+    const chain = (g: Element, cx: number, cy: number, size: number) => {
+      const icon = mk("g", { transform: `translate(${cx - size / 2} ${cy - size / 2}) scale(${size / 16})` }, g);
+      for (const path of LINK_PATHS) mk("path", { d: path, stroke: "#111", "stroke-width": 2, fill: "none", "stroke-linecap": "round" }, icon);
+    };
     const outline = (r: Rect | null) =>
       r && mk("rect", { x: r.x + 3, y: r.y + 3, width: Math.max(0, r.w - 6), height: Math.max(0, r.h - 6), rx: 6, class: "carreau-preview" });
 
@@ -513,6 +580,10 @@ export class DragDrop {
         const s = d.subject;
         const src = s.kind === "pane" ? s.paneId : s.kind === "tab" ? this.ws.trees().map((tr) => findTab(tr, s.tabId)).find(Boolean)?.pane.id : undefined;
         for (const id of [t.paneId, src]) if (id) outline(host.visRect(id));
+      } else if (t.kind === "merge") {
+        // The pane the merged tab joins.
+        const ft = this.ws.trees().map((tr) => findTab(tr, t.tabId)).find(Boolean);
+        if (ft) outline(host.visRect(ft.pane.id));
       } else if (t.kind === "tab") {
         // Into a tab bar: the highlighted dot is the preview; into a pane with no tab bar
         // (the center tab icon): outline the pane.
@@ -535,6 +606,8 @@ export class DragDrop {
         // A cloud: overlapping circles over a flat base.
         for (const [x, y, rr] of [[-6, 2, 5.5], [1, -3, 7.5], [8, 2, 5.5]] as const) mk("circle", { cx: cx + x, cy: cy + y, r: rr, fill: "#111" }, g);
         mk("rect", { x: cx - 6, y: cy + 2, width: 14, height: 5.5, fill: "#111" }, g);
+      } else if (k === "link") {
+        chain(g, cx, cy, 24);
       } else if (k === "tab") {
         // A tab: a raised tab over a body.
         mk("path", { d: `M ${cx - 10} ${cy + 8} V ${cy - 4} H ${cx - 6} V ${cy - 8} H ${cx + 2} V ${cy - 4} H ${cx + 10} V ${cy + 8} Z`, stroke: "#111", "stroke-width": 2.2, fill: "none", "stroke-linejoin": "round" }, g);
@@ -551,7 +624,17 @@ export class DragDrop {
     for (const dot of d.tabBar?.dots ?? []) {
       if (!dot.choice) continue;
       const active = d.active === dot.choice;
-      mk("circle", { cx: dot.x, cy: dot.y, r: active ? 5.5 : 3.5, fill: grey(active ? 0.92 : 0.7, active ? 1 : 0.8), stroke: "#0008", "stroke-width": 1, class: "carreau-indicator carreau-dot" + (active ? " active" : "") });
+      // Into a complex: a ring (like a link), rather than a plain dot.
+      if (dot.join) mk("circle", { cx: dot.x, cy: dot.y, r: active ? 5 : 3.5, fill: grey(0.98, active ? 1 : 0.85), stroke: "#000c", "stroke-width": active ? 2.5 : 2, class: "carreau-indicator carreau-dot join" + (active ? " active" : "") });
+      else mk("circle", { cx: dot.x, cy: dot.y, r: active ? 5.5 : 3.5, fill: grey(active ? 0.92 : 0.7, active ? 1 : 0.8), stroke: "#0008", "stroke-width": 1, class: "carreau-indicator carreau-dot" + (active ? " active" : "") });
+    }
+
+    // Tabs it can merge with: a link icon over each.
+    for (const link of d.tabBar?.links ?? []) {
+      const active = d.active === link.choice;
+      const g = mk("g", { class: "carreau-indicator carreau-link" + (active ? " active" : "") });
+      mk("circle", { cx: link.x, cy: link.y, r: active ? LINK_R + 2 : LINK_R, fill: grey(active ? 0.92 : 0.72, active ? 1 : 0.85), stroke: "#0008", "stroke-width": 1 }, g);
+      chain(g, link.x, link.y, active ? 13 : 11);
     }
 
     // The line along the nearest border, plus the same border seen from the other side.
@@ -601,8 +684,9 @@ export class DragDrop {
 }
 
 function targetIdOf(t: DropTarget): string {
-  return t.kind === "side" ? t.targetId : t.kind === "between" ? t.splitId : t.paneId;
+  return t.kind === "side" ? t.targetId : t.kind === "between" ? t.splitId : t.kind === "merge" ? t.tabId : t.paneId;
 }
+
 
 /** A band of a line, inward from its edge, along a given stretch. */
 function bandAt(line: SideLine, from: number, to: number, alongSpan: [number, number]): Rect {

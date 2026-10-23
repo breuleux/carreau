@@ -20,3 +20,8 @@ kbd { background: light-dark(#fff, #3c3f4b); box-shadow: light-dark(inset 0 0 0 
 .demo-content .meta { margin: 0; color: light-dark(#888, #777); font-size: 11px; font-family: ui-monospace, monospace; }
 .demo-content .text { margin: 8px 0 0; white-space: pre-wrap; color: light-dark(#444, #bbb); line-height: 1.45; }
 .carreau-natural-row .demo-content .text { white-space: pre; }
+/* plots (demo/plots.ts) */
+.demo-plot { display: flex; flex-direction: column; height: 100%; min-height: 120px; }
+.demo-plot svg { flex: 1; width: 100%; min-height: 0; }
+.demo-plot .axis { stroke: light-dark(#c9ccd4, #3a3d48); stroke-width: 1; }
+.demo-plot .legend { font: 12px system-ui; display: flex; gap: 12px; flex-wrap: wrap; padding-top: 6px; }

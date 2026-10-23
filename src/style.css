@@ -75,7 +75,15 @@
 .carreau-tab.closing .carreau-tab-short, .carreau-tab.closing .carreau-tab-icon { opacity: 0.55; }
 .carreau-long .carreau-closing { position: absolute; right: 6px; top: 50%; margin-top: -8px; }
 .carreau-tab.active { box-shadow: inset 0 2px 0 light-dark(#a3a6af, #6f727c); }
-.carreau-pane.selected > .carreau-tabbar .carreau-tab.active { color: light-dark(#1d1e22, #eee); box-shadow: inset 0 2px 0 var(--tab-accent); }
+/* (also the groups' holders, when the selection is inside them) */
+.carreau-pane.selected > .carreau-tabbar .carreau-tab.active, .carreau-pane.focus-path > .carreau-tabbar .carreau-tab.active { color: light-dark(#1d1e22, #eee); box-shadow: inset 0 2px 0 var(--tab-accent); }
+/* merged tabs (a tab complex): a shared tint, and a link icon between them */
+.carreau-tab.linked { background: light-dark(#e9ebf0, #23252c); }
+.carreau-tab-link {
+  flex: none; display: flex; align-items: center; padding: 0 1px; color: light-dark(#8a8d98, #7a7d87);
+  background: light-dark(#e9ebf0, #23252c); cursor: grab;
+}
+.carreau-tab-link:hover { color: light-dark(#1d1e22, #eee); }
 .carreau-body { flex: 1; padding: 10px; overflow: auto; }
 
 /* maximization: CSS only */

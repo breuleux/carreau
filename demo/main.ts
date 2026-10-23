@@ -5,6 +5,7 @@ import "../src/prompt.css";
 import "./demo.css";
 import { examples } from "./examples";
 import { commitCellFocus, promptCell, spawnCell } from "./cellclasses";
+import { plotElement } from "./plots";
 import { deserialize, serialize } from "../src/model";
 import { hasMoveBefore, View } from "../src/view";
 import { Workspace } from "../src/workspace";
@@ -162,6 +163,7 @@ const view = new View(ws, document.querySelector("#host")!, {
       f.style.flex = typeof data.height === "number" ? "none" : "1";
       return f;
     }
+    if (typeof data.plot === "string") return plotElement(); // drawn by the "plot" complex type
     const d = document.createElement("div");
     d.className = "demo-content";
     d.innerHTML = `<h2></h2><p class="meta"></p>`;

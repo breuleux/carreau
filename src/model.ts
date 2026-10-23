@@ -2,14 +2,16 @@
 // Data types are in types.ts; per-kind behaviour in kinds.ts; queries in tree.ts.
 
 import { sideAxis, sideIsStart } from "./geometry";
-import { canCollapse, isScroll, isSplit, kind, kindOf } from "./kinds";
+import { canCollapse, isScroll, isSplit, kind, kindOf, mergeKey } from "./kinds";
 import { find, findTab, panes, pathTo } from "./tree";
+import { canMerge, linkedRuns, newLink, normalizeLinks, trackComplexes } from "./complex";
 import { LayoutNode, PaneNode, Side, SplitNode, Tab, WorkspaceData, FloatingWindow } from "./types";
 
 export * from "./types";
 export * from "./geometry";
 export * from "./kinds";
 export * from "./tree";
+export * from "./complex";
 
 // ---------------------------------------------------------------------------
 // Construction
@@ -85,7 +87,11 @@ function validate(n: any): void {
   if (n.type === "pane") {
     if (!Array.isArray(n.tabs)) throw new Error("Pane without tabs");
     n.active = Math.max(0, Math.min(n.active ?? 0, n.tabs.length - 1));
-    for (const t of n.tabs) if (t.group) validate(t.group);
+    for (const t of n.tabs) {
+      if (t.group) validate(t.group);
+      if (t.link !== undefined && typeof t.link !== "string") throw new Error("A tab's link is a string");
+      if (t.key !== undefined && t.key !== null && typeof t.key !== "string") throw new Error("A tab's key is a string or null");
+    }
   } else if (!k.leaf) {
     if (!Array.isArray(n.children)) throw new Error("Split without children");
     if (n.type === "slot" && n.children.length !== 1) throw new Error("A slot holds one node");
@@ -99,14 +105,15 @@ export function clone<T>(x: T): T {
 }
 
 /**
- * Structure of a layout, ignoring ids: nesting, types, tabs in each pane; and, with
+ * Structure of a layout, ignoring ids: nesting, types, tabs in each pane (merged ones joined
+ * by "+"); and, with
  * `withWeights`, the (normalized) weights too.
  */
 export function shape(node: LayoutNode, withWeights = false): string {
   const w = withWeights ? `:${node.weight.toFixed(4)}` : "";
   const sub = (n: LayoutNode) => shape(n, withWeights);
   if (node.type === "pane")
-    return `[${node.tabs.map((t) => (t.group ? `${t.id}{${t.group.children.map(sub).join(" ")}}` : t.id)).join(",")}]${w}`;
+    return `[${node.tabs.map((t, i) => (i === 0 ? "" : t.link && t.link === node.tabs[i - 1].link ? "+" : ",") + (t.group ? `${t.id}{${t.group.children.map(sub).join(" ")}}` : t.id)).join("")}]${w}`;
   if (!isSplit(node)) return `${(node as LayoutNode).type}${w}`; // (other leaf types, if any)
   return `${node.type}(${node.children.map(sub).join(" ")})${w}`;
 }
@@ -136,6 +143,7 @@ export function normalize(node: LayoutNode): LayoutNode | null {
       return false;
     });
     if (node.tabs.length === 0) return null;
+    normalizeLinks(node);
     node.active = Math.max(0, Math.min(node.active, node.tabs.length - 1));
     return node;
   }
@@ -191,7 +199,8 @@ function scrollTitle(n: LayoutNode): string {
  */
 export function inForest<R>(trees: LayoutNode[], fn: (forest: SplitNode) => R): { trees: (LayoutNode | null)[]; value: R } {
   const forest: SplitNode = { type: "forest", id: "__forest__", weight: 1, children: trees.map(slot) };
-  const value = fn(forest);
+  // (Complex types follow what happens to their complexes: see complex.ts.)
+  const value = trackComplexes(forest, () => fn(forest));
   const out = (forest.children as SplitNode[]).map((s) => (s.children[0] ? normalizeTree(s.children[0]) : null));
   return { trees: out, value };
 }
@@ -268,16 +277,25 @@ export function collapseGroup(root: LayoutNode, paneId: string): LayoutNode | nu
 
 export type DropTarget =
   | { kind: "side"; targetId: string; side: Side }
-  | { kind: "tab"; paneId: string; index: number }
+  /**
+   * Into a pane's tabs, at `index`. `join`: the link of a complex next to that position, which
+   * a dragged tab joins there (it must be able to merge with it). Otherwise it lands there as a
+   * plain tab, out of any complex (so not between two members of one). See complex.ts.
+   */
+  | { kind: "tab"; paneId: string; index: number; join?: string }
   /** Insert as child `index` of split `splitId`, sized to 1/N of the split. */
   | { kind: "between"; splitId: string; index: number }
   /** Exchange contents with a pane: a tab trades places with its active tab; a pane, all tabs. */
   | { kind: "swap"; paneId: string }
   /** Pull the dragged thing out into a floating window (only over its own pane). */
-  | { kind: "float"; paneId: string };
+  | { kind: "float"; paneId: string }
+  /** Merge the dragged tab with a tab: it joins that tab's complex, just after it (see complex.ts). */
+  | { kind: "merge"; tabId: string };
 
 export type DragSubject =
   | { kind: "tab"; tabId: string }
+  /** A tab complex, as a block of tabs (by its link): it stays merged wherever it goes. */
+  | { kind: "complex"; link: string }
   | { kind: "pane"; paneId: string }
   /** A node in none of the trees (a floating window's tree being docked). */
   | { kind: "external"; node: LayoutNode };
@@ -312,24 +330,66 @@ export function applyDropForest(trees: LayoutNode[], subject: DragSubject, targe
 
 /** Ids of the nodes a drop target refers to. */
 function targetIds(t: DropTarget): string[] {
-  return t.kind === "side" ? [t.targetId] : t.kind === "between" ? [t.splitId] : [t.paneId];
+  return t.kind === "side" ? [t.targetId] : t.kind === "between" ? [t.splitId] : t.kind === "merge" ? [] : [t.paneId];
 }
 
 /** Whether the target lies in a group carried by the dragged tab, or by the dragged pane. */
 function wouldNestInItself(root: LayoutNode, subject: DragSubject, target: DropTarget): boolean {
   let groups: SplitNode[] = [];
-  if (subject.kind === "tab") {
-    const ft = findTab(root, subject.tabId);
-    const g = ft?.pane.tabs[ft.index].group;
-    if (g) groups = [g];
+  if (subject.kind === "tab" || subject.kind === "complex") {
+    groups = (draggedTabs(root, subject)?.tabs ?? []).flatMap((t) => (t.group ? [t.group] : []));
   } else if (subject.kind === "pane") {
     const p = find(root, subject.paneId)?.node;
     if (p?.type === "pane") groups = p.tabs.flatMap((t) => (t.group ? [t.group] : []));
   }
-  return groups.some((g) => targetIds(target).some((id) => find(g, id)));
+  return groups.some((g) => (target.kind === "merge" ? !!findTab(g, target.tabId) : targetIds(target).some((id) => find(g, id))));
 }
 
 const TOMB = "__tombstone__";
+
+/**
+ * Dragged tabs just inserted at `i` in a pane's tabs (a tab, or a complex's): they join the
+ * complex `join` there (they must be next to it, and able to merge with it); or, without
+ * `join`, a lone tab is a plain tab, and a complex stays itself. Either way, not between two
+ * members of a complex. Returns whether that's possible.
+ */
+function placeTabs(p: PaneNode, i: number, tabs: Tab[], join?: string): boolean {
+  const [l, r] = [p.tabs[i - 1], p.tabs[i + tabs.length]];
+  if (join) {
+    const member = l?.link === join ? l : r?.link === join ? r : undefined;
+    const key = member && mergeKey(member);
+    if (!key || !tabs.every((t) => mergeKey(t) === key)) return false;
+    for (const t of tabs) t.link = join;
+    return true;
+  }
+  if (tabs.length === 1) delete tabs[0].link;
+  return !(l?.link && l.link === r?.link);
+}
+
+/** The tabs a tab or complex subject drags, where they are (a complex: its members' run). */
+function draggedTabs(root: LayoutNode, subject: DragSubject): { pane: PaneNode; index: number; tabs: Tab[] } | null {
+  if (subject.kind === "tab") {
+    const ft = findTab(root, subject.tabId);
+    return ft && { pane: ft.pane, index: ft.index, tabs: [ft.pane.tabs[ft.index]] };
+  }
+  if (subject.kind !== "complex") return null;
+  for (const p of panes(root)) for (const run of linkedRuns(p)) if (run.id === subject.link && run.tabs.length > 1) return { pane: p, index: run.start, tabs: run.tabs };
+  return null;
+}
+
+/**
+ * Take dragged tabs out of their pane, which keeps an active tab (the next one, if it was
+ * theirs). Returns the index, among them, of the one that was active (else 0).
+ */
+function detachTabs(d: { pane: PaneNode; index: number; tabs: Tab[] }): number {
+  const { pane, index, tabs } = d;
+  const a = pane.active;
+  const wasActive = Math.max(0, tabs.indexOf(pane.tabs[a]));
+  pane.tabs.splice(index, tabs.length);
+  if (a >= index + tabs.length) pane.active = a - tabs.length;
+  else if (a >= index) pane.active = Math.max(0, Math.min(index, pane.tabs.length - 1));
+  return wasActive;
+}
 
 /** Works on the forest in place. Returns where the dragged thing went, or null. */
 function applyDropRaw(root: SplitNode, subject: DragSubject, target: DropTarget): { paneId: string; floated?: PaneNode } | null {
@@ -342,20 +402,35 @@ function applyDropRaw(root: SplitNode, subject: DragSubject, target: DropTarget)
       target = { kind: "between", splitId: t.id, index: sideIsStart[target.side] ? 0 : t.children.length };
   }
 
+  if (target.kind === "merge") {
+    // A tab (or a complex's tabs), onto a tab they can merge with: just after it, linked to it.
+    const d = draggedTabs(root, subject);
+    const dt = findTab(root, target.tabId);
+    if (!d || !dt || !d.tabs.every((t) => canMerge(dt.pane, dt.index, t))) return null;
+    const onto = dt.pane.tabs[dt.index];
+    const wasActive = detachTabs(d);
+    const dest = dt.pane;
+    onto.link ??= newLink();
+    for (const t of d.tabs) t.link = onto.link;
+    const at = dest.tabs.indexOf(onto) + 1;
+    dest.tabs.splice(at, 0, ...d.tabs);
+    dest.active = at + wasActive;
+    return { paneId: dest.id };
+  }
+
   if (target.kind === "float") {
     if (subject.kind === "external") return null;
     const p = find(root, target.paneId)?.node;
     if (p?.type !== "pane") return null;
-    if (subject.kind === "pane" || (p.tabs.length === 1 && p.tabs[0].id === subject.tabId)) {
+    const d = draggedTabs(root, subject);
+    if (subject.kind === "pane" || (d && d.pane === p && d.tabs.length === p.tabs.length)) {
       if (subject.kind === "pane" && subject.paneId !== p.id) return null;
       removeNode(root, p.id);
       return { paneId: p.id, floated: p };
     }
-    const i = p.tabs.findIndex((t) => t.id === subject.tabId);
-    if (i < 0) return null; // only over its own pane
-    const [tab] = p.tabs.splice(i, 1);
-    if (i < p.active || p.active >= p.tabs.length) p.active = Math.max(0, p.active - 1);
-    const floated: PaneNode = { type: "pane", id: genId("p"), weight: 1, tabs: [tab], active: 0 };
+    if (!d || d.pane !== p) return null; // only over its own pane
+    const active = detachTabs(d);
+    const floated: PaneNode = { type: "pane", id: genId("p"), weight: 1, tabs: d.tabs, active };
     return { paneId: floated.id, floated };
   }
 
@@ -369,6 +444,7 @@ function applyDropRaw(root: SplitNode, subject: DragSubject, target: DropTarget)
       [src.tabs, dest.tabs] = [dest.tabs, src.tabs];
       [src.active, dest.active] = [dest.active, src.active];
     } else {
+      if (subject.kind === "complex") return null; // (a tab trades places with one tab)
       const ft = findTab(root, subject.tabId);
       if (!ft || ft.pane === dest) return null;
       [dest.tabs[dest.active], ft.pane.tabs[ft.index]] = [ft.pane.tabs[ft.index], dest.tabs[dest.active]];
@@ -386,26 +462,34 @@ function applyDropRaw(root: SplitNode, subject: DragSubject, target: DropTarget)
     moving = p;
     replaceNode(root, p.id, { type: "pane", id: TOMB, weight: p.weight, tabs: [], active: 0 });
   } else {
-    const ft = findTab(root, subject.tabId);
-    if (!ft) return null;
-    const [tab] = ft.pane.tabs.splice(ft.index, 1);
-    if (ft.index < ft.pane.active || ft.pane.active >= ft.pane.tabs.length) ft.pane.active = Math.max(0, ft.pane.active - 1);
+    // A tab, or a complex's tabs: a block.
+    const d = draggedTabs(root, subject);
+    if (!d) return null;
+    const n = d.tabs.length;
     if (target.kind === "tab") {
       const dest = find(root, target.paneId)?.node;
       if (dest?.type !== "pane") return null;
-      const idx = dest === ft.pane && ft.index < target.index ? target.index - 1 : target.index;
-      dest.tabs.splice(idx, 0, tab);
-      dest.active = idx;
+      const own = dest === d.pane;
+      if (own && target.index > d.index && target.index < d.index + n) return null; // into itself
+      const wasActive = detachTabs(d);
+      const idx = own && d.index < target.index ? target.index - n : target.index;
+      dest.tabs.splice(idx, 0, ...d.tabs);
+      if (!placeTabs(dest, idx, d.tabs, target.join)) return null;
+      dest.active = idx + wasActive;
       return { paneId: dest.id };
     }
-    if (ft.pane.tabs.length === 0 && target.kind === "side" && target.targetId === ft.pane.id) return null;
-    moving = { type: "pane", id: genId("p"), weight: 1, tabs: [tab], active: 0 };
+    const active = detachTabs(d);
+    if (d.pane.tabs.length === 0 && target.kind === "side" && target.targetId === d.pane.id) return null;
+    moving = { type: "pane", id: genId("p"), weight: 1, tabs: d.tabs, active };
   }
 
   // 2. Insert.
   if (target.kind === "tab") {
     const dest = find(root, target.paneId)?.node;
     if (moving.type !== "pane" || dest?.type !== "pane") return null; // only a pane's tabs join
+    // Not into a complex (a pane's tabs don't join one), nor between two of its members.
+    const [l, r] = [dest.tabs[target.index - 1], dest.tabs[target.index]];
+    if (target.join || (l?.link && l.link === r?.link)) return null;
     dest.tabs.splice(target.index, 0, ...moving.tabs);
     dest.active = target.index + moving.active;
     removeNode(root, TOMB);

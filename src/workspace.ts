@@ -19,6 +19,8 @@ import {
   activeGroup,
   applyDropForest,
   closeTabWith,
+  complexAt,
+  complexType,
   instantLifecycle,
   Lifecycle,
   canCollapse,
@@ -541,9 +543,31 @@ export class Workspace {
    * then removed. If closing is refused (rejected), the tab stays. Resolves to whether it closed.
    */
   closeTab(tabId: string): Promise<boolean> {
-    const ft = this.findTab(tabId);
-    if (!ft || !this.canCloseTab(tabId) || this.closing.has(tabId)) return Promise.resolve(false);
+    if (!this.findTab(tabId) || !this.canCloseTab(tabId) || this.closing.has(tabId)) return Promise.resolve(false);
+    this.leaveComplex(tabId);
+    const ft = this.findTab(tabId)!;
     return this.runClose({ kind: "tab", id: tabId, tabIds: [tabId] }, closeTabWith(ft.pane.tabs[ft.index], this.lifecycle));
+  }
+
+  /**
+   * A merged tab about to close: its complex's type has a say first (`closing`), then it
+   * leaves the complex (unlinked, just after it), and only then do its contents close. (Its own
+   * undo step: if the close is refused, the tab stays, out of the complex.)
+   */
+  private leaveComplex(tabId: string): void {
+    const ft = this.findTab(tabId);
+    if (!ft || complexAt(ft.pane, ft.index).tabs.length < 2) return;
+    this.change((forest) => {
+      const f = findTab(forest, tabId)!;
+      const c = complexAt(f.pane, f.index);
+      const tab = f.pane.tabs[f.index];
+      const active = f.pane.tabs[f.pane.active];
+      complexType(c.key)?.closing?.(forest, c, tab, this);
+      f.pane.tabs.splice(f.index, 1);
+      delete tab.link;
+      f.pane.tabs.splice(c.start + c.tabs.length - 1, 0, tab);
+      f.pane.active = f.pane.tabs.indexOf(active);
+    });
   }
 
   /** Close a pane and all its tabs, like `closeTab`. */
@@ -558,6 +582,7 @@ export class Workspace {
    * the forceful close without waiting for it, and remove it.
    */
   forceClose(tabId: string): boolean {
+    if (!this.closing.has(tabId)) this.leaveComplex(tabId);
     const op = this.closing.get(tabId) ?? { kind: "tab" as const, id: tabId, tabIds: [tabId] };
     const n = op.kind === "pane" ? this.node(op.id) : null;
     const ft = op.kind === "tab" ? this.findTab(op.id) : null;
@@ -929,10 +954,17 @@ export class Workspace {
     }
   }
 
+  /**
+   * Next or previous tab, in the innermost pane around the selection that has several (up
+   * through the groups' holders: a group with a single tab has nothing to cycle). If that pane
+   * isn't the selection, the focus moves into its newly shown tab.
+   */
   private cycleTab(delta: number): void {
-    const n = this.node(this.selection.id);
-    if (n?.type !== "pane" || n.tabs.length < 2) return;
+    const path = pathTo(this.tree(), this.selection.id) ?? [];
+    const n = [...path].reverse().find((x): x is PaneNode => x.type === "pane" && x.tabs.length > 1);
+    if (!n) return;
     n.active = (n.active + delta + n.tabs.length) % n.tabs.length;
+    if (n.id !== this.selection.id) this.select({ id: this.descend(n) }, false);
     this.emit();
   }
 
@@ -1046,7 +1078,7 @@ export class Workspace {
     const center = horizontal ? S.y + S.h / 2 : S.x + S.w / 2;
     let best: { id: string; score: number } | null = null;
     for (const { node: p } of walk(tree)) {
-      if (!isCell(p) || (p.type === "pane" ? !!p.tabs[p.active]?.group : only === "panes")) continue;
+      if (!isCell(p) || (p.type === "pane" ? !!activeGroup(p) : only === "panes")) continue;
       const r = rects.get(p.id);
       if (!r || !adjacent(r)) continue;
       const ov = overlap(r);

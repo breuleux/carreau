@@ -3,7 +3,7 @@
 // selection & maximization. Drag & drop is in dnd.ts.
 
 import { cellAccent } from "./colors";
-import { DndHost, DragDrop } from "./dnd";
+import { DndHost, DragDrop, LINK_PATHS } from "./dnd";
 import {
   Ctx,
   FloatingWindow,
@@ -13,6 +13,8 @@ import {
   SplitNode,
   activeGroup,
   clamp,
+  complexAt,
+  complexType,
   find,
   intersect,
   isCell,
@@ -23,6 +25,7 @@ import {
   paneDisplay,
   pathTo,
   rootCtx,
+  shownIndex,
   union,
 } from "./model";
 import { Workspace } from "./workspace";
@@ -314,7 +317,7 @@ export class View implements DndHost {
     const tabKey = cur?.type === "pane" ? `${cur.id}:${cur.active}` : "";
     if (tabKey && tabKey !== this.lastTab) {
       const scroller = this.elOf(cur!.id)?.querySelector<HTMLElement>(".carreau-tabs");
-      const tab = scroller?.children[(cur as PaneNode).active] as HTMLElement | undefined;
+      const tab = scroller?.querySelectorAll<HTMLElement>(":scope > .carreau-tab")[(cur as PaneNode).active];
       if (scroller && tab) {
         if (tab.offsetLeft < scroller.scrollLeft) scroller.scrollLeft = tab.offsetLeft;
         else if (tab.offsetLeft + tab.offsetWidth > scroller.scrollLeft + scroller.clientWidth)
@@ -359,7 +362,10 @@ export class View implements DndHost {
     }
   }
 
-  /** Put every content tab's element into its pane's body; only the active one shows. */
+  /**
+   * Put every content tab's element into its pane's body; only the shown one shows (the active
+   * tab's, or its complex's first one's: see `shownIndex`), updated by its complex type's `show`.
+   */
   private placeContents(trees: HTMLElement[]): void {
     // The old elements are still attached: look panes up in the new ones only.
     const paneEls = new Map<string, HTMLElement>();
@@ -367,6 +373,7 @@ export class View implements DndHost {
     for (const p of this.ws.trees().flatMap((t) => panes(t))) {
       const body = paneEls.get(p.id)?.querySelector<HTMLElement>(":scope > .carreau-body");
       if (!body) continue;
+      const shown = shownIndex(p);
       p.tabs.forEach((tab, i) => {
         if (tab.group) return; // group tabs show a layout, rendered with the pane
         const el = this.contents.place(tab.id, body, () => {
@@ -378,7 +385,11 @@ export class View implements DndHost {
           else el.append(c);
           return el;
         });
-        el.hidden = i !== p.active;
+        el.hidden = i !== shown;
+        if (i === shown) {
+          const c = complexAt(p, i);
+          complexType(c.key)?.show?.(c, el);
+        }
       });
     }
     this.contents.sweep();
@@ -463,7 +474,7 @@ export class View implements DndHost {
     node.tabs.forEach((t, i) => {
       const inner = t.group?.children[0];
       if (!inner) return;
-      const g = Object.assign(document.createElement("div"), { className: "carreau-group", hidden: i !== node.active });
+      const g = Object.assign(document.createElement("div"), { className: "carreau-group", hidden: i !== shownIndex(node) });
       g.dataset.groupTab = t.id;
       g.classList.toggle("natural-row", ctx.natural.row);
       g.classList.toggle("natural-column", ctx.natural.column);
@@ -500,7 +511,16 @@ export class View implements DndHost {
     );
     wrap.append(scroller);
     bar.append(wrap);
-    node.tabs.forEach((t, i) => scroller.append(this.renderTab(node, t, i, ctx)));
+    node.tabs.forEach((t, i) => {
+      // Merged tabs (a complex): a link icon between them, which drags the whole complex.
+      if (i > 0 && t.link && t.link === node.tabs[i - 1].link) {
+        const link = linkIcon();
+        const members = complexAt(node, i).tabs;
+        link.addEventListener("pointerdown", (e) => this.dnd.arm(e, { kind: "complex", link: t.link! }, members.map((m) => m.title).join(" + "), link));
+        scroller.append(link);
+      }
+      scroller.append(this.renderTab(node, t, i, ctx));
+    });
     // The empty part of the header moves the pane.
     const space = Object.assign(document.createElement("div"), { className: "carreau-tabspace", title: "Drag to move this pane" });
     space.addEventListener("pointerdown", (e) => this.dnd.arm(e, { kind: "pane", paneId: node.id }, node.tabs[node.active]?.title ?? "pane", bar.parentElement!));
@@ -526,6 +546,7 @@ export class View implements DndHost {
     else short.textContent = t.title;
     tab.append(short);
     if (t.group) tab.classList.add("is-group");
+    if (t.link && complexAt(node, i).tabs.length > 1) tab.classList.add("linked");
     if (t.status) tab.classList.add(`status-${t.status}`);
     tab.style.setProperty("--tab-accent", cellAccent(t));
     if (this.ws.isClosing(t.id)) {
@@ -542,7 +563,10 @@ export class View implements DndHost {
     }
     tab.addEventListener("auxclick", (e) => e.button === 1 && this.ws.closeTab(t.id)); // middle click
     tab.addEventListener("mousedown", (e) => e.button === 1 && e.preventDefault()); // no autoscroll
-    tab.addEventListener("click", () => this.ws.activateTab(node.id, i));
+    tab.addEventListener("click", () => {
+      this.ws.activateTab(node.id, i);
+      this.focusShownGroup(node.id);
+    });
     tab.addEventListener("pointerdown", (e) => this.dnd.arm(e, { kind: "tab", tabId: t.id }, t.title, tab));
     if (!ctx.floating)
       // Double click: maximize the pane (or restore it if it already is).
@@ -610,8 +634,8 @@ export class View implements DndHost {
   /** Apply selection & maximization. Pure CSS: the DOM structure is untouched. */
   decorate(): void {
     for (const sc of this.el.querySelectorAll<HTMLElement>(".carreau-tabs")) updateTabShadows(sc);
-    for (const el of this.el.querySelectorAll(".max-hidden, .max-path, .max-through, .selected, .secondary"))
-      el.classList.remove("max-hidden", "max-path", "max-through", "selected", "secondary");
+    for (const el of this.el.querySelectorAll(".max-hidden, .max-path, .max-through, .selected, .secondary, .focus-path"))
+      el.classList.remove("max-hidden", "max-path", "max-through", "selected", "secondary", "focus-path");
     const max = this.ws.maximized;
     this.el.classList.toggle("is-maximized", !!max);
     if (max) {
@@ -645,6 +669,9 @@ export class View implements DndHost {
     this.selBox.dataset.kind = kindName;
     this.selBox.classList.toggle("in-float", !find(this.ws.root, sel.id));
     for (const n of nodes) this.elOf(n.id)?.classList.add("selected");
+    // The panes holding the groups the selection is in: their tabs show the focus too.
+    const tree = this.ws.treeOf(sel.id);
+    for (const n of (tree && pathTo(tree, sel.id)?.slice(0, -1)) ?? []) if (n.type === "pane") this.elOf(n.id)?.classList.add("focus-path");
     // What cell operations act on, if not the selection (see `Workspace.operand`): shown in
     // navigation mode, as a secondary focus.
     const op = this.ws.operand();
@@ -751,7 +778,21 @@ export class View implements DndHost {
     if (n && n.type !== "pane") return RENDERERS[n.type]?.commitFocus?.(n, this);
     if (n?.type !== "pane") return;
     const tab = n.tabs[n.active];
-    if (tab) this.ws.lifecycle.commitFocus?.(tab, this.contents.get(tab.id) ?? null);
+    const shown = n.tabs[shownIndex(n)];
+    if (tab) this.ws.lifecycle.commitFocus?.(tab, (shown && this.contents.get(shown.id)) ?? null);
+  }
+
+  /**
+   * A tab was clicked: if the pane now shows a group whose root has a focus child (e.g. a
+   * prompt-column's prompt), select it, and (out of navigation mode) give it the keyboard focus.
+   */
+  private focusShownGroup(paneId: string): void {
+    const p = this.ws.node(paneId);
+    const root = p?.type === "pane" ? activeGroup(p)?.children[0] : undefined;
+    const target = root && kind(root).focusChild?.(root);
+    if (!target) return;
+    this.ws.select({ id: target.id });
+    if (this.navMode === "off") this.commitFocus();
   }
 
   /** Enter or leave navigation mode (see keyboard.ts). */
@@ -961,6 +1002,13 @@ function atEnd(el: HTMLElement): boolean {
 function toEnd(el: HTMLElement): void {
   if (el.classList.contains("carreau-scroll-row")) el.scrollLeft = el.scrollWidth;
   else el.scrollTop = el.scrollHeight;
+}
+
+/** The link icon between merged tabs. */
+function linkIcon(): HTMLElement {
+  const el = Object.assign(document.createElement("span"), { className: "carreau-tab-link", title: "Merged: drag to move them together" });
+  el.innerHTML = `<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">${LINK_PATHS.map((d) => `<path d="${d}"/>`).join("")}</svg>`;
+  return el;
 }
 
 /** Show a shadow at either end of a tab scroller when there is more to see that way. */

@@ -17,6 +17,7 @@ The prototype consists of:
   * `types.ts`: the serializable data types.
   * `geometry.ts`: rects and sides (`edge`, `span`, `band`, `intersect`, `union`, `sideAxis`, …).
   * `kinds.ts`: the **node kinds registry**. Each node type knows its children, axis, whether it scrolls, whether things can be inserted beside it, whether it is a navigation step, and the context it gives its children. Panes decide their own display from that context (see [Node kinds and contexts](#node-kinds-and-contexts)).
+  * `complex.ts`: **tab complexes** (merged tabs): finding them, their types' registry, and following what happens to them during structural changes (see [Tab complexes](#tab-complexes-merging)).
   * `tree.ts`: generic walks (`walk`, `find`, `pathTo`, `panes`, `findTab`), all through `kind(n).children`; `computeRects`; and `LayoutIndex`, a one-pass index of parents, roots, holders and contexts.
   * `model.ts`: re-exports the above, plus constructors, (de)serialization, normalization, insertion, swapping, and drop logic across several trees.
 * `cells.ts`: handles for hosts: `Cell` (a node, with `cellAt`) and `Placer` (see [Relative addressing and placement](#relative-addressing-and-placement)).
@@ -61,6 +62,7 @@ type Tab = {                       // a "cell", shown as a tab
   accent?: string;                 // CSS color; default: derived from the id
   status?: "done" | "error" | "unresponsive" | string;
   content?: string; data?: Record<string, unknown>; group?: Slot;
+  key?: string | null; link?: string;   // merging: see "Tab complexes"
 };
 type Pane = { type: "pane"; id: string; weight: number; tabs: Tab[]; active: number };
 type Split = { type: "row" | "column" | "scroll-row" | "scroll-column" | "slot" | "forest"; id: string; weight: number; children: Node[];
@@ -120,6 +122,8 @@ interface NodeKind {
   alwaysSticky?: boolean;             // a scroll split that always sticks to its end (`isSticky(n)`)
   groupTitle?: string;                // the title of the group tab it lives in (scroll splits)
   normalizeChildren?(n, kids): Node[];  // default: drop pinned children
+  mergeKey?: string;                  // a group tab whose root is of this kind merges with that key
+  focusChild?(n): Node | null;        // clicking the group tab whose root it is focuses that child
   childContext(n, ctx): Ctx;
   replaceChild(n, i, child); removeChild(n, i);   // a pane: set / remove tab i's group
   close(n, life): Promise<void>;      // close everything in it (see "Closing")
@@ -209,6 +213,7 @@ The set of node types is open, so that a feature like prompt columns lives in a 
   * The demo's stateful iframe page declares `color-scheme: light dark` itself (an iframe's document doesn't inherit styles).
 * **Each tab has an accent color**, from a hash of its id into a small palette of oklch hues (L 0.74, C 0.13 in dark mode; L 0.62, C 0.15 in light mode). Duplicates are fine.
   * The accent appears **only** on the line of the active tab of the focused pane. That line is the focus indicator for panes.
+  * When the focus is inside a group, the panes holding it (along the path from the tree's root: `.focus-path`) show their active tab the same way, so that the whole chain of tabs leading to the focus is lit.
 * **Selection outline**: a selected row, column or range gets a dim grey dashed outline over the union of the selected nodes' (visible) DOM rects, with a very faint fill. A selected *pane* gets no outline; its tab line shows it. The outline is hidden while dragging. When the selection is inside a floating window, draw it above the window layer.
 
 ### Pane menu
@@ -317,7 +322,7 @@ Memory kept by the workspace:
 
 Commands:
 
-* **nextTab / prevTab**: cycle the active tab of the selected pane.
+* **nextTab / prevTab**: cycle the active tab of the innermost pane around the selection that has several: the selected pane, or, up through the groups' holders, the first with more than one tab (a lone tab in a group has nothing to cycle). If that is a holder, the focus moves into its newly shown tab (`descend`).
 * **parent**: the parent of the selected node. From a range, the split itself.
 * **root**: the root of the tree holding the selection (the main tree, or a floating window's). For the main tree, this clears the maximization (top-level rule). Since last-child memory is kept, **child** then walks back down the same path.
 * **child**: the most recently focused child of the selected container, restricted to the range if one is selected. Falls back to the first child.
@@ -395,9 +400,11 @@ type DropTarget =
   | { kind: "between"; splitId; index }    // between two siblings of a split
   | { kind: "tab"; paneId; index }         // into a pane's tab list at a position
   | { kind: "swap"; paneId }               // exchange contents with a pane
-  | { kind: "float"; paneId };             // pull the dragged thing out into a floating window
+  | { kind: "float"; paneId }              // pull the dragged thing out into a floating window
+  | { kind: "merge"; tabId };              // merge the dragged tab with a tab (see "Tab complexes")
 type DragSubject =
   | { kind: "tab"; tabId }
+  | { kind: "complex"; link }             // a tab complex, as a block of tabs (see "Tab complexes")
   | { kind: "pane"; paneId }
   | { kind: "external"; node };            // a tree in none of the trees: a window being docked
 ```
@@ -671,6 +678,7 @@ It is an **optional module**, entirely outside the core, which only knows it thr
   * Constructors: `promptColumn(children, weight?)`, `promptNode()`.
 * **Rendering**: the column is a split with a fixed last child, so the view renders it as a frame: the cells scroll in an inner element, and the prompt sits below it, outside. So the prompt stays visible while the cells scroll, and it doesn't take part in the overscroll bounce (a `position: sticky` prompt inside the scroller would).
   * The prompt's renderer fills its element (`.carreau-prompt`), and places its `<input>` as a **persistent element** (`view.persist`), so what's typed, and the focus, survive re-renders. (Moving it re-focuses it: see the pitfalls.)
+* **Clicking its column's tab** (the group tab holding it, or a member of a merged pair) **focuses the prompt**: selected, and, out of navigation mode, its field gets the keyboard focus (the prompt-column kind's `focusChild`; the view's `focusShownGroup`).
 * **Typing**: pressing in the prompt or focusing its field selects it. (A press that bubbles to the group holder's pane doesn't select the holder: a pane only selects itself on a press whose innermost cell, `.carreau-cell`, is it.) **Enter submits**: `submitPrompt(ws, promptId, text)` asks the host what it becomes and inserts it as a new cell just above the prompt (a drop, undoable; `commitDrop(…, focus = false)` keeps the selection on the prompt, in a single render). The field clears and keeps the focus.
   * The host configures prompts per workspace: `configurePrompts(ws, { submit(text): Tab | null, placeholder })`. Default: a text tab.
 * **Leaving navigation mode on the prompt focuses its field** (its renderer's `commitFocus`). Alt+Q from the field enters navigation mode and takes the focus from it.
@@ -682,7 +690,36 @@ It is an **optional module**, entirely outside the core, which only knows it thr
   * **Maximize** (M) maximizes it, and **the focus goes there**: `ws.maximize()` maximizes the operand, and moves the selection to it when it isn't the selection (a maximized prompt alone would show nothing). M again, from it, restores.
   * With no cells, there is no secondary focus (a null operand): those operations do nothing.
   * Closing the secondary doesn't move the focus (it isn't in the closed cell): it stays on the prompt, and the next cell up becomes the secondary.
+* **Merging** (tab complexes of the group tabs holding prompt-columns: merge key `"prompt-column"`):
+  * Each column knows its cells (`cells`, by child id): an **insertion order** and an **origin** (the tab holding the column the cell came from). Normalization keeps the orders increasing along the column: the most cells keep theirs (a longest increasing subsequence), the others (new, or **moved by hand**) get one between their new neighbours' (at the end: the insertion time). So the order follows the column, manual moves included.
+  * One rule, applied whenever a complex changes (its type's `changed`): **every cell goes to its origin's complex's first member's column**, and each column is sorted by order (`reconcile`). So, merged, all the cells are in the first member's column (the one shown), **interleaved by insertion order**; a member that leaves takes its cells back, in their order; reordering the members moves them all to the new first one. A cell without an origin belongs to the tab holding its column.
+  * **Typing** in a merged column: the cell comes from the complex's active member (`speakerOf`), which the placeholder says ("(as Bob)").
+  * **Closing a member** (`closing`): its cells are handed over to the first other member (re-tagged), so they stay (`mergedClose: "transfer"`, the default); with `mergedClose: "close"` (`configurePrompts`), they go back to its column, and close with it.
+  * Demo: the "Merging prompts" example (cells with staggered insertion times).
 * Demo: the "Prompt column" example. "$ cmd" becomes a shell cell (canned output for the commands it knows, an error otherwise), anything else a prompt cell with a fake answer (`promptCell` in `demo/cellclasses.ts`, given to `configurePrompts` in `demo/main.ts`).
+
+## Tab complexes (merging)
+
+Tabs can be **merged** into a **tab complex**: in the tab bar, its member tabs with a link icon between them; in the body, one shared view. What merging means depends on the tabs: a **complex type**, chosen by the members' **merge key**.
+
+* **Merge keys**: only tabs with the same key merge; a null key, nothing (`mergeKey(tab)`). A tab's own `key`, or for a group tab, its layout root's kind's `mergeKey` (prompt-columns: `"prompt-column"`). Default: null.
+* **Representation**: members are **adjacent tabs of a pane with the same `link`** (an id), otherwise plain tabs. So every tab operation works on them as usual: dragging one out, reordering, activating, closing. Being a member is just being next to the others with their link: dropped anywhere else, a tab has left.
+  * Normalization keeps links consistent (`normalizeLinks`): a lone linked tab is unlinked (**a complex of one is replaced by that tab**); a link used by two runs (members that left together) is renamed.
+  * `shape()` joins merged tabs with `+` (`[a+b,c]`): merging changes the shape, so it isn't a no-op drop.
+* **Display**: a complex shows its **first member's body**, whichever member is active (`shownIndex(pane)`; `activeGroup` follows it, so rects and navigation do too). The active member is still the pane's active tab: it's what the type acts on (the plot to highlight, who types in a prompt).
+* **Tab drops and complexes** (`{kind: "tab", paneId, index, join?}`): a tab dropped into a tab bar lands there as a **plain tab, out of any complex** (so a member can leave its complex and stay in the same pane); with `join` (a complex's link), it **joins that complex** there (it must be next to it, and able to merge with it): that's how members are reordered, and how a mergeable tab joins at a given position. A plain tab can't go between two members (it would break the complex); a pane's tabs never join one.
+  * The drop UI offers it all with dots: a gap between two members has one dot (joining: reordering, for a member); any other gap has a plain dot, plus, next to a complex, a **join dot just inside it** (a ring rather than a dot), to be at its edge, in it.
+* **Dragging a complex** (`{kind: "complex", link}`): its **link icons are drag handles** for the whole complex. It moves as a **block of tabs** and **stays merged**: into a tab bar (as a block: never between two members of another complex; with `join`, its members join that complex), beside a node (a new pane holding it), floated (over its own pane), or merged onto a tab (all its members join that tab's complex, just after it). Not swapped. The model treats a dragged tab as a block of one: the same code (`draggedTabs`, `detachTabs`, `placeTabs`).
+  * Its members don't change, so its type isn't told (`changed`): what it shows moves with it.
+* **Merging by dragging** (`{kind: "merge", tabId}`, tab and complex subjects): the dragged tab goes **just after the target tab**, linked to it (joining its complex, if it has one), and becomes active. The drop UI offers it as a **link icon over each mergeable tab** of the hovered tab bar (hit over the tab's middle half; the gaps keep their insertion dots), and as a link icon among the pane's center icons (merging with its active tab: for panes without a tab bar).
+* **Complex types** (`registerComplex(key, type)`), all hooks optional:
+  * `changed(forest, complex, {entered, left})`: the members changed (entered, left, reordered, or one is left: it dissolves). It runs **within the structural change**, on its forest, before normalization (`trackComplexes`, called by `inForest`, so by drops and `ws.change` alike): the type can rearrange the layout in the same, undoable, step. **Drop previews run it too** (every candidate drop is computed): it must only change the forest it's given, nothing else.
+  * `closing(forest, complex, tab, ws)`: a member is about to close. The workspace calls it, then **takes the tab out of the complex** (unlinked, just after it: `changed` sees it leave), and only then closes its contents. That is its own undo step; if the close is refused, the tab stays, out of the complex.
+  * `show(complex, content)`: the view shows a complex (or a lone tab of the key) with the first member's persistent content element: update it. Called on every render.
+  * There is no focus hook: changing the focus between members changes the complex's `active`, which the types read when they act (`show` is called again; a prompt reads it when submitting).
+* `Complex`: `{id, key, pane, start, tabs, active}` (`complexAt(pane, i)`, `linkedRuns(pane)`, `canMerge(pane, i, tab)`).
+* **Prompt columns** merge (see [Prompt columns](#prompt-columns)): their cells gather in the first member's column, interleaved.
+* Demo: the "Plots" example. Plot tabs (`key: "plot"`, demo/plots.ts) merge into one plot area: the "plot" complex type only has `show`, which draws every member's curve in the first member's area, the active one highlighted.
 
 ## Closing
 

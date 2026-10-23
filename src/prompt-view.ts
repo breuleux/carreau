@@ -2,7 +2,7 @@
 // The column itself is rendered by the view, as a split with a fixed last child: the prompt
 // sits below the scrolling cells. Here: the prompt, with its persistent input field.
 
-import { PromptNode, promptOptions, submitPrompt } from "./prompt";
+import { PromptNode, promptOptions, speakerOf, submitPrompt } from "./prompt";
 import { View, registerRenderer } from "./view";
 
 const fieldKey = (id: string) => `prompt:${id}`;
@@ -12,9 +12,13 @@ registerRenderer("prompt", {
     el.classList.add("carreau-prompt");
     el.addEventListener("pointerdown", () => view.ws.selection.id !== node.id && view.ws.select({ id: node.id }));
   },
-  // The field persists across renders: what's typed, and the focus, survive.
+  // The field persists across renders: what's typed, and the focus, survive. Merged, it says
+  // who types (the complex's active member: the cells come from it).
   attached(el, node, view) {
-    view.persist(fieldKey(node.id), el, () => makeField(view, node as PromptNode));
+    const field = view.persist(fieldKey(node.id), el, () => makeField(view, node as PromptNode));
+    const speaker = speakerOf(view.ws, node.id);
+    const base = promptOptions(view.ws).placeholder ?? "Type, then Enter";
+    field.placeholder = speaker?.link ? `${base} (as ${speaker.title})` : base;
   },
   // Leaving navigation mode on the prompt: into its field, at the end.
   commitFocus(node, view) {
@@ -29,7 +33,6 @@ function makeField(view: View, node: PromptNode): HTMLInputElement {
   const ws = view.ws;
   const field = Object.assign(document.createElement("input"), {
     className: "carreau-prompt-input",
-    placeholder: promptOptions(ws).placeholder ?? "Type, then Enter",
     spellcheck: false,
   });
   // Enter submits; the field clears and keeps the focus.

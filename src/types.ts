@@ -43,6 +43,13 @@ export interface Tab {
   data?: Record<string, unknown>;
   /** A group tab holds a whole layout instead of content: a slot holding the layout's root. */
   group?: SplitNode;
+  /**
+   * What it can merge with: tabs with the same key (null: nothing). Default: for a group tab,
+   * its layout root's kind decides (`NodeKind.mergeKey`); otherwise, null. See complex.ts.
+   */
+  key?: string | null;
+  /** Merged tabs: adjacent tabs of a pane with the same link form a tab complex (complex.ts). */
+  link?: string;
 }
 
 export interface PaneNode {
