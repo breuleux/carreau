@@ -6,7 +6,7 @@
 // While in navigation mode, plain keys (with the activation modifier held or not) run
 // actions. Nothing is hard-coded: the activation chord and all bindings come from the config.
 
-import { PaneNode, Side } from "./model";
+import { LayoutNode, PaneNode, Side } from "./model";
 import { View } from "./view";
 import { Command, Direction, Workspace } from "./workspace";
 
@@ -396,6 +396,20 @@ export class KeyboardNav {
     return op && !op.range ? this.ws.node(op.id) : null;
   }
 
+  /**
+   * The pane the selection is in: a selected pane, else the pane holding it (a prompt: its
+   * column's). Naming acts on it, not on the operand: what's named is what's selected, even
+   * where cell operations are redirected (a prompt's go to the cell above it).
+   */
+  private selectedPane(): PaneNode | null {
+    const sel = this.ws.selection;
+    if (sel.range) return null;
+    const idx = this.ws.index();
+    let n: LayoutNode | null = idx.node(sel.id);
+    while (n && n.type !== "pane") n = idx.parent(n.id);
+    return n;
+  }
+
   /** Leave navigation mode (for commands that end it). `commit`: the focused cell takes the focus. */
   leave(commit = true): void {
     this.setMode("off", commit);
@@ -420,11 +434,9 @@ export class KeyboardNav {
         this.view.groupAndName();
         return;
       case "renameTab": {
-        const n = this.operand();
-        if (n?.type === "pane") {
-          const tab = (n as PaneNode).tabs[(n as PaneNode).active];
-          if (tab) this.view.editTabTitle(tab.id);
-        }
+        const p = this.selectedPane();
+        const tab = p?.tabs[p.active];
+        if (tab) this.view.editTabTitle(tab.id);
         return;
       }
       case "collapse":
@@ -462,8 +474,8 @@ export class KeyboardNav {
         ws.moveMarked();
         return;
       case "namePane": {
-        const n = this.operand();
-        if (n?.type === "pane") this.view.editPaneName(n.id);
+        const p = this.selectedPane();
+        if (p) this.view.editPaneName(p.id);
         return;
       }
       case "clear":
