@@ -158,7 +158,9 @@ export class View implements DndHost {
   /** Keeps sticky (reverse) scroll splits at their end while their content grows. */
   private sticky = new ResizeObserver((entries) => {
     for (const e of entries) {
-      const sc = e.target.parentElement;
+      // (The scroller itself, when its viewport changes size, or one of its children.)
+      const t = e.target as HTMLElement;
+      const sc = t.classList.contains("carreau-reverse") ? t : t.parentElement;
       if (sc && this.stuck(sc)) toEnd(sc);
     }
   });
@@ -396,7 +398,16 @@ export class View implements DndHost {
 
   private rememberScroll(el: HTMLElement): void {
     const key = this.scrollKey(el);
-    if (key) this.scrollPos.set(key, { left: el.scrollLeft, top: el.scrollTop, atEnd: atEnd(el) });
+    if (!key) return;
+    const prev = this.scrollPos.get(key);
+    const pos = { left: el.scrollLeft, top: el.scrollTop };
+    // Once at its end, a scroller stays there until scrolled back. Content growing below doesn't
+    // unstick it, even if this is measured before the sticky observer catches up: `toEnd`'s
+    // scroll event comes a frame later, and a render can measure in between, both possibly
+    // after more content arrived (a terminal printing away at the bottom).
+    const row = el.classList.contains("carreau-scroll-row");
+    const held = !!prev?.atEnd && (row ? pos.left >= prev.left : pos.top >= prev.top);
+    this.scrollPos.set(key, { ...pos, atEnd: held || atEnd(el) });
   }
 
   /** A sticky scroll split that should be at its end: it was (or it was never scrolled). */
@@ -409,7 +420,7 @@ export class View implements DndHost {
     this.sticky.disconnect();
     this.fader.disconnect();
     for (const el of this.el.querySelectorAll<HTMLElement>(".carreau-scroll, .carreau-tabs")) {
-      if (el.classList.contains("carreau-reverse")) for (const c of el.children) this.sticky.observe(c);
+      if (el.classList.contains("carreau-reverse")) for (const c of [el, ...el.children]) this.sticky.observe(c);
       const pos = this.scrollPos.get(this.scrollKey(el) ?? "");
       if (this.stuck(el)) toEnd(el);
       else if (pos && el.getClientRects().length) [el.scrollLeft, el.scrollTop] = [pos.left, pos.top];
