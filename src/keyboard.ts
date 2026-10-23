@@ -29,6 +29,22 @@ export type NavAction =
   /** the focused tab, moved into the tabs of the cell on that side (or where it would be) */
   | `moveInto${Dir}`;
 
+/**
+ * What a key does in navigation mode: a built-in action (by name), or the host's own command, a
+ * function given the workspace, the view and the controller. (Its `name` labels it, e.g. in
+ * a legend.)
+ */
+export type NavBinding = NavAction | ((ctx: NavContext) => void);
+
+/** A shortcut: what it does, and whether it also works while typing in a text field. */
+export type Shortcut = NavBinding | { run: NavBinding; inFields?: boolean };
+
+export interface NavContext {
+  ws: Workspace;
+  view: View;
+  nav: KeyboardNav;
+}
+
 const DIRS: Record<Dir, { side: Side; dir: Direction }> = {
   Left: { side: "left", dir: "left" },
   Right: { side: "right", dir: "right" },
@@ -50,14 +66,22 @@ export interface NavConfig {
    * `Shift+`, `Alt+`, `Ctrl+`, `Meta+` prefixes (in that order), *not* counting the activation
    * modifier, which may or may not be held. E.g. "ArrowLeft", "Shift+ArrowLeft", "KeyM".
    */
-  bindings: Record<string, NavAction>;
+  bindings: Record<string, NavBinding>;
   /**
    * Prefix keys: after a prefix key (same chord syntax), the next key is looked up in its own
    * table. Holding the prefix key down keeps it active for every key pressed meanwhile.
    * E.g. `{ KeyS: { ArrowLeft: "swapLeft", … } }` makes S then ← swap left. Modifiers that
    * are part of the prefix's chord are ignored on the next key (e.g. Shift+X, then Shift+← = ←).
    */
-  prefixes?: Record<string, Record<string, NavAction>>;
+  prefixes?: Record<string, Record<string, NavBinding>>;
+  /**
+   * Shortcuts: keys that work without entering navigation mode (and in it, for keys it doesn't
+   * bind), e.g. `{ "Ctrl+Tab": "nextTab", "Meta+ArrowLeft": "prevTab" }`. Keys are full chords:
+   * every modifier counts, the activation one included (in any order; "Control", "Cmd",
+   * "Option" are understood too). Not while typing in a text field (Cmd+← moves the caret
+   * there), unless the shortcut says so: `{ run, inFields: true }`.
+   */
+  shortcuts?: Record<string, Shortcut>;
 }
 
 export type NavMode = "off" | "held" | "sticky";
@@ -86,6 +110,8 @@ export function bridgeFrameKeys(frame: HTMLIFrameElement): void {
         (e) => {
           const { key, code, altKey, ctrlKey, metaKey, shiftKey, repeat, location } = e;
           const copy = new KeyboardEvent(type, { key, code, altKey, ctrlKey, metaKey, shiftKey, repeat, location, bubbles: true, cancelable: true });
+          // (Its target is the window: say whether it was typed in a text field, for shortcuts.)
+          (copy as KeyboardEvent & { carreauInField?: boolean }).carreauInField = isTextField(e.target);
           host.dispatchEvent(copy);
           if (copy.defaultPrevented) {
             e.preventDefault();
@@ -97,6 +123,35 @@ export function bridgeFrameKeys(frame: HTMLIFrameElement): void {
   };
   frame.addEventListener("load", install);
   install();
+}
+
+/** Whether keys typed in this element are text (a field, or an editable element). */
+function isTextField(t: EventTarget | null): boolean {
+  return t instanceof HTMLElement && (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName));
+}
+
+/** A key event's chord, every modifier included (Shift, Alt, Ctrl, Meta, in that order). */
+function fullChord(e: KeyboardEvent): string {
+  return [e.shiftKey && "Shift", e.altKey && "Alt", e.ctrlKey && "Ctrl", e.metaKey && "Meta", e.code].filter(Boolean).join("+");
+}
+
+const MOD_ORDER = ["Shift", "Alt", "Ctrl", "Meta"];
+const MOD_ALIASES: Record<string, string> = { Control: "Ctrl", Cmd: "Meta", Command: "Meta", Option: "Alt" };
+
+/** A chord as written in a config, in the canonical form (modifiers in order, aliases resolved). */
+function canonical(chord: string): string {
+  const parts = chord.split("+");
+  const code = parts.pop()!;
+  const mods = parts.map((m) => MOD_ALIASES[m] ?? m).sort((a, b) => MOD_ORDER.indexOf(a) - MOD_ORDER.indexOf(b));
+  return [...mods, code].join("+");
+}
+
+/** Look a chord up in a config table, whichever way its keys are written. */
+function lookup<T>(table: Record<string, T> | undefined, chord: string): T | undefined {
+  if (!table) return undefined;
+  if (chord in table) return table[chord];
+  for (const [k, v] of Object.entries(table)) if (canonical(k) === chord) return v;
+  return undefined;
 }
 
 const MOD_FLAG: Record<Modifier, "ctrlKey" | "altKey" | "metaKey" | "shiftKey"> = {
@@ -199,10 +254,12 @@ export class KeyboardNav {
     if (/^(Alt|Control|Meta|Shift)(Left|Right)$/.test(e.code)) this.heldMods.add(e.code);
     // Typing in a text field is not navigation. But in the workspace's own fields (e.g. a
     // title being edited), the activation chord still works: that's the way out of them.
+    // (Shortcuts that say so work there too.)
     const t = e.target as HTMLElement | null;
-    if (t && (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName))) {
+    const inField = isTextField(t) || !!(e as KeyboardEvent & { carreauInField?: boolean }).carreauInField;
+    if (isTextField(t)) {
       const chord = this.mode === "off" && e.code === activation.code && this.modifierHeld(e);
-      if (!chord || !this.view.el.contains(t)) return;
+      if (!chord || !this.view.el.contains(t!)) return this.shortcut(e, true);
     }
     if (e.key === activation.modifier) return; // the modifier itself (incl. autorepeat)
 
@@ -210,8 +267,9 @@ export class KeyboardNav {
       if (e.code === activation.code && this.modifierHeld(e) && !e.repeat) {
         e.preventDefault();
         this.setMode("held");
+        return;
       }
-      return;
+      return this.shortcut(e, inField);
     }
 
     if (e.code === activation.code) {
@@ -239,10 +297,10 @@ export class KeyboardNav {
         return;
       }
       // Modifiers of the prefix's own chord may still be held (Shift+X, then Shift+←): ignore them.
-      const table = this.config.prefixes?.[this.prefix];
+      const table = lookup(this.config.prefixes, this.prefix);
       const prefixMods = this.prefix.split("+").slice(0, -1);
       const bare = chord.split("+").filter((p) => !prefixMods.includes(p)).join("+");
-      const action = table?.[chord] ?? table?.[bare];
+      const action = lookup(table, chord) ?? lookup(table, bare);
       e.preventDefault();
       e.stopPropagation();
       if (action) {
@@ -255,7 +313,7 @@ export class KeyboardNav {
       }
       return;
     }
-    if (this.config.prefixes?.[chord]) {
+    if (lookup(this.config.prefixes, chord)) {
       e.preventDefault();
       e.stopPropagation();
       this.prefix = chord;
@@ -265,11 +323,23 @@ export class KeyboardNav {
       return;
     }
 
-    const action = this.config.bindings[chord];
-    if (!action) return;
+    const action = lookup(this.config.bindings, chord);
+    if (!action) return this.shortcut(e, inField);
     e.preventDefault();
     e.stopPropagation();
     this.run(action);
+  }
+
+  /** A shortcut for this key, if any (see `NavConfig.shortcuts`): run it. */
+  private shortcut(e: KeyboardEvent, inField: boolean): void {
+    if (/^(Alt|Control|Meta|Shift)(Left|Right)$/.test(e.code)) return;
+    const found = lookup(this.config.shortcuts, fullChord(e));
+    if (!found) return;
+    const s = typeof found === "object" ? found : { run: found };
+    if (inField && !s.inFields) return;
+    e.preventDefault();
+    e.stopPropagation();
+    this.run(s.run);
   }
 
   private clearPrefix(): void {
@@ -305,7 +375,13 @@ export class KeyboardNav {
     return op && !op.range ? this.ws.node(op.id) : null;
   }
 
-  run(action: NavAction): void {
+  /** Leave navigation mode (for commands that end it). `commit`: the focused cell takes the focus. */
+  leave(commit = true): void {
+    this.setMode("off", commit);
+  }
+
+  run(action: NavBinding): void {
+    if (typeof action === "function") return action({ ws: this.ws, view: this.view, nav: this });
     const ws = this.ws;
     switch (action) {
       case "toggleMaximize":
