@@ -1,11 +1,59 @@
 {
   "name": "carreau",
-  "version": "0.0.1",
-  "private": true,
+  "version": "0.1.0",
+  "description": "A draggable, keyboard-navigable tiling workspace (panes, tabs, groups, prompts) for the web. No dependencies, no framework.",
   "type": "module",
+  "license": "MIT",
+  "author": "Olivier Breuleux",
+  "keywords": [
+    "tiling",
+    "workspace",
+    "layout",
+    "panes",
+    "tabs",
+    "drag and drop",
+    "keyboard navigation",
+    "dom"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/breuleux/carreau.git"
+  },
+  "homepage": "https://github.com/breuleux/carreau#readme",
+  "bugs": {
+    "url": "https://github.com/breuleux/carreau/issues"
+  },
+  "files": [
+    "src",
+    "dist",
+    "types"
+  ],
+  "module": "./dist/index.js",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./src/index.ts",
+      "import": "./dist/index.js"
+    },
+    "./prompt-view": {
+      "source": "./src/prompt-view.ts",
+      "types": "./src/prompt-view.ts",
+      "import": "./dist/prompt-view.js"
+    },
+    "./style.css": "./src/style.css",
+    "./prompt.css": "./src/prompt.css",
+    "./package.json": "./package.json"
+  },
+  "sideEffects": [
+    "*.css",
+    "./src/prompt-view.ts",
+    "./dist/prompt-view.js"
+  ],
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && vite build && tsc -p tsconfig.build.json",
+    "prepare": "vite build && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "node tests/test-ws.mjs && node tests/test-drop.mjs",
     "serve:test": "vite --port 5317 --strictPort"
@@ -14,5 +62,8 @@
     "playwright": "1.57",
     "typescript": "^7.0.2",
     "vite": "^8.3.4"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

@@ -3,5 +3,9 @@ junkyard
 coverage
 _
 :*
-dist/
+.bsync-snap-*
 todo.md
+# dist/ and types/ are build products for bundler-less consumers (`npm run build`).
+# The git tag carries source only: hosts compile it through the "source" export condition.
+dist/
+types/
