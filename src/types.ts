@@ -84,6 +84,11 @@ export interface SplitNode {
    * (it applies again back in a scroll-column).
    */
   size?: number;
+  /**
+   * Stays when emptied (like a named pane), instead of disappearing: e.g. a stream made to be
+   * filled later.
+   */
+  keep?: boolean;
 }
 
 /**

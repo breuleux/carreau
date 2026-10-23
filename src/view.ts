@@ -36,6 +36,11 @@ export { cellAccent } from "./colors";
 export interface ViewOptions {
   /** Content of a tab body. */
   renderTab?: (tab: PaneNode["tabs"][number], pane: PaneNode) => HTMLElement | string;
+  /**
+   * Content of an empty pane's body (a named one stays, empty), instead of the hint; null: the
+   * hint. Made once per pane and kept while it stays empty (like a tab's content).
+   */
+  renderEmpty?: (pane: PaneNode) => HTMLElement | null;
 }
 
 /** A menu's item: an action, or a "Send to" submenu (for a tab or a pane, by id). */
@@ -131,7 +136,7 @@ export class View implements DndHost {
   readonly floatLayer: HTMLElement;
   readonly overlay: SVGSVGElement;
   private selBox: HTMLElement;
-  private opts: Required<ViewOptions>;
+  private opts: Required<Pick<ViewOptions, "renderTab">> & ViewOptions;
   readonly dnd: DragDrop;
   /** Navigation mode (driven by the keyboard controller). */
   private navMode: "off" | "held" | "sticky" = "off";
@@ -198,7 +203,7 @@ export class View implements DndHost {
     host: HTMLElement,
     opts: ViewOptions = {},
   ) {
-    this.opts = { renderTab: opts.renderTab ?? ((t) => t.content ?? t.title) };
+    this.opts = { ...opts, renderTab: opts.renderTab ?? ((t) => t.content ?? t.title) };
     const div = (cls: string) => Object.assign(document.createElement("div"), { className: cls });
     this.el = div("carreau");
     this.rootEl = div("carreau-root");
@@ -549,7 +554,11 @@ export class View implements DndHost {
     });
     body.classList.toggle("shows-group", !!activeGroup(node));
     // An empty pane (a named one stays, empty): a hint.
-    if (!node.tabs.length) body.append(Object.assign(document.createElement("div"), { className: "carreau-empty", textContent: "Empty: drop tabs here, or send them here" }));
+    if (!node.tabs.length) {
+      const own = this.opts.renderEmpty;
+      if (own) this.persist(`empty:${node.id}`, body, () => own(node) ?? hint());
+      else body.append(hint());
+    }
     el.append(body);
     el.addEventListener("pointerdown", (e) => {
       // Primary button only (selecting re-renders, which would break a middle click), and
@@ -569,7 +578,7 @@ export class View implements DndHost {
    * screen. Double-click: back to its natural height.
    */
   private decorateScrollCell(el: HTMLElement, node: PaneNode, cell: ScrollCell): void {
-    el.classList.add("carreau-scrollcell");
+    el.classList.add("carreau-scrollcell", `carreau-scrollcell-${cell.axis}`);
     const status = node.tabs[node.active]?.status;
     if (status) el.dataset.status = status;
     const gutter = Object.assign(document.createElement("div"), { className: "carreau-gutter" });
@@ -1290,6 +1299,11 @@ function move(parent: HTMLElement, node: HTMLElement): void {
       sel?.addRange(r);
     }
   }
+}
+
+/** What an empty pane shows, by default. */
+function hint(): HTMLElement {
+  return Object.assign(document.createElement("div"), { className: "carreau-empty", textContent: "Empty: drop tabs here, or send them here" });
 }
 
 function moveRaw(parent: HTMLElement, node: HTMLElement): void {

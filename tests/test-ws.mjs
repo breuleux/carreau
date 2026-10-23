@@ -222,6 +222,16 @@ for (const [a, b] of [["swapUp", "swapDown"], ["swapLeft", "swapRight"], ["swapR
   ws.run("undo");
   check(`undo reverts the swap only: ${titles()}`, titles() === "y,A,B+x");
 }
+// kept splits stay when emptied
+{
+  const sc = scrollColumn([pane(["x"])]);
+  sc.keep = true;
+  const ws = new Workspace(row([pane(["A"]), groupPane("logs", sc, 1)]));
+  const x = panes(ws.root).find((p) => p.tabs[0]?.title === "x");
+  await ws.closeTab(x.tabs[0].id);
+  const logs = panes(ws.root).find((p) => p.tabs[0]?.title === "logs");
+  check("an emptied kept scroll column stays, in its tab", !!logs && logs.tabs[0].group.children[0].children.length === 0);
+}
 // non-undoable closes
 {
   const ws = new Workspace(row([pane(["A", "A2"]), pane(["B"]), pane(["C"])]));

@@ -466,17 +466,17 @@ export class Workspace {
   /** Pull a pane of the main tree out into a floating window (not the last pane). */
   float(paneId: string, rect: Rect): boolean {
     if (!this.inMain(paneId) || this.node(paneId)?.type !== "pane") return false;
-    let pane: LayoutNode | null = null;
+    // In one step (one render): the pane is never in no tree at all, so its contents (an
+    // iframe's state, say) are moved along, never dropped and made again.
     return this.record(() => {
-      const ok = this.change((forest) => {
+      let pane: LayoutNode | null = null;
+      const { trees } = inForest(structuredClone(this.trees()), (forest) => {
         pane = find(forest, paneId)!.node;
         removeNode(forest, paneId);
       });
-      if (ok && pane) {
-        this.floating.push({ root: pane, rect });
-        this.setTrees(this.trees());
-      }
-      return ok;
+      if (!trees[0] || !pane) return false;
+      this.setTrees([...trees, pane], [...this.floating, { root: pane, rect }]);
+      return true;
     });
   }
 

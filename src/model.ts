@@ -128,7 +128,7 @@ export function shape(node: LayoutNode, withWeights = false): string {
  * Clean up a node, returning what replaces it (null: nothing left).
  *  - panes: group tabs whose layout is gone disappear; a pane with no tabs disappears (unless
  *    it's named: it stays, empty, until closed)
- *  - splits: drop empty children; flatten same-type children (and plain same-axis children of
+ *  - splits: drop empty children (an empty split goes too, unless it's `keep`); flatten same-type children (and plain same-axis children of
  *    a scroll split); rescale weights to average 1; collapse a single child (not scroll
  *    splits: they could not be recreated by dragging)
  *  - scroll splits always live in a group tab: any that isn't a slot's child gets wrapped
@@ -171,7 +171,7 @@ export function normalize(node: LayoutNode): LayoutNode | null {
   }
   kids = k.normalizeChildren ? k.normalizeChildren(node, kids) : kids.filter((x) => !kind(x).pinned);
   node.children = kids;
-  if (kids.length === 0) return null;
+  if (kids.length === 0) return node.keep ? node : null; // (a kept split stays, empty)
   // Weights are flex-grow factors: summing to less than 1, they'd leave part of the parent
   // empty (after a few half-splitting moves). Rescale to average 1, same ratios.
   const total = kids.reduce((s, x) => s + x.weight, 0);

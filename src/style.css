@@ -298,6 +298,12 @@
 }
 /* the long strip reaches behind the bar's circle (the body's padding is 10px, the bar 16px) */
 .carreau-scrollcell .carreau-long { margin-left: -26px; padding-left: 26px; border-radius: 3px 3px 0 0; padding-right: 28px; }
+/* In a scroll-column: no card (no border, no background: the cells sit on the column's panel),
+   and less padding (the long strip follows it: still reaching behind the bar's circle). */
+.carreau-scrollcell-column::before { display: none; }
+.carreau-scrollcell-column > .carreau-tabbar { background: transparent; }
+.carreau-scrollcell-column > .carreau-body:not(.shows-group) { padding: 4px 6px; }
+.carreau-scrollcell-column .carreau-long { margin: -4px -6px 4px -22px; padding-left: 22px; }
 /* navigation mode: the selection outline (and the dotted secondary one) over everything in
    the cell, its long strip included */
 .carreau.nav-mode .carreau-pane.carreau-scrollcell.selected, .carreau.nav-mode .carreau-pane.carreau-scrollcell.secondary { outline: none; }
@@ -307,7 +313,12 @@
 }
 .carreau.nav-mode .carreau-scrollcell.secondary:not(.selected)::after { border: 1px dotted light-dark(#8a8d98, #80838d); }
 /* a cell with a height of its own: its panes scroll their content */
-.carreau-pane.carreau-cell-sized > .carreau-body, .carreau-cell-sized .carreau-pane > .carreau-body { overflow: auto; }
+/* (Their contents scroll, not their bodies: the long strip reaches out of the body, behind
+   the bar's circle, and a scrolling body would clip it.) */
+.carreau-pane.carreau-cell-sized > .carreau-body, .carreau-cell-sized .carreau-pane > .carreau-body { overflow: visible; min-height: 0; }
+.carreau-pane.carreau-cell-sized > .carreau-body > :not(.carreau-long), .carreau-cell-sized .carreau-pane > .carreau-body > :not(.carreau-long) {
+  flex: 1 1 auto; min-height: 0; overflow: auto;
+}
 .carreau-gutter { position: absolute; left: 0; top: 0; bottom: 0; width: 16px; z-index: 2; touch-action: none; }
 .carreau-gutter.resizes { cursor: ns-resize; }
 .carreau-gutter::before {
