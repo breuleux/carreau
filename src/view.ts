@@ -64,19 +64,24 @@ export function registerRenderer(type: LayoutNode["type"], r: NodeRenderer): voi
  */
 class Persistent {
   private els = new Map<string, HTMLElement>();
+  private disposers = new Map<string, () => void>();
   private seen = new Set<string>();
 
   get(key: string): HTMLElement | undefined {
     return this.els.get(key);
   }
 
-  /** The element for `key` (made by `create` the first time), put into `parent`. */
-  place<E extends HTMLElement>(key: string, parent: HTMLElement, create: () => E): E {
+  /**
+   * The element for `key` (made by `create` the first time), put into `parent`. `dispose`: run
+   * when it goes away.
+   */
+  place<E extends HTMLElement>(key: string, parent: HTMLElement, create: () => E, dispose?: () => void): E {
     this.seen.add(key);
     let el = this.els.get(key) as E | undefined;
     if (!el) {
       el = create();
       this.els.set(key, el);
+      if (dispose) this.disposers.set(key, dispose);
     }
     if (el.parentElement !== parent) move(parent, el);
     return el;
@@ -88,6 +93,8 @@ class Persistent {
       if (!this.seen.has(key)) {
         el.remove();
         this.els.delete(key);
+        this.disposers.get(key)?.();
+        this.disposers.delete(key);
       }
     this.seen.clear();
   }
@@ -98,6 +105,16 @@ const HOLD_TO_DOCK = 1000;
 const HOLD_TOLERANCE = 4;
 /** When the progress ring appears while holding still (ms). */
 const HOLD_RING_DELAY = 150;
+/** A cell of a scroll split (its direct child), and its element. */
+interface ScrollCell {
+  node: PaneNode | SplitNode;
+  el: HTMLElement;
+  /** the scroll split's axis */
+  axis: "row" | "column";
+}
+
+/** A resized scroll-column cell's minimum height. */
+const MIN_CELL = 40;
 /** Minimum size of a floating window. */
 const FLOAT_MIN_W = 160;
 const FLOAT_MIN_H = 100;
@@ -130,6 +147,13 @@ export class View implements DndHost {
       if (sc && this.stuck(sc)) toEnd(sc);
     }
   });
+  /** Keeps scroll splits' edge fades in line with what's scrolled off (content resizing). */
+  private fader = new ResizeObserver((entries) => {
+    for (const e of entries) {
+      const el = e.target as HTMLElement;
+      updateFade(el.classList.contains("carreau-scroll") ? el : el.parentElement!);
+    }
+  });
   private lastSelection = "";
   private lastTab = "";
 
@@ -146,9 +170,12 @@ export class View implements DndHost {
     return this.renderingNow;
   }
 
-  /** For renderers (in `attached`): a persistent element by key, put into `parent`. */
-  persist<E extends HTMLElement>(key: string, parent: HTMLElement, create: () => E): E {
-    return this.extras.place(key, parent, create);
+  /**
+   * For renderers (in `attached`): a persistent element by key, put into `parent`. `dispose`:
+   * run when it goes away (a render that doesn't place it).
+   */
+  persist<E extends HTMLElement>(key: string, parent: HTMLElement, create: () => E, dispose?: () => void): E {
+    return this.extras.place(key, parent, create, dispose);
   }
 
   /** A renderer's persistent element, if it exists. */
@@ -181,7 +208,7 @@ export class View implements DndHost {
       (e) => {
         if (this.navMode === "off" || e.button !== 0) return;
         const t = e.target as HTMLElement;
-        if (t.closest(".carreau-tabbar, .carreau-float-resize")) return;
+        if (t.closest(".carreau-tabbar, .carreau-float-resize, .carreau-gutter, .carreau-cell-close")) return;
         const floatEl = t.closest<HTMLElement>(".carreau-float");
         if (floatEl) {
           const win = this.ws.floating[[...this.floatLayer.children].indexOf(floatEl)];
@@ -235,6 +262,7 @@ export class View implements DndHost {
       "scroll",
       (e) => {
         this.rememberScroll(e.target as HTMLElement);
+        updateFade(e.target as HTMLElement);
         this.decorate();
         this.dnd.refresh();
       },
@@ -354,11 +382,16 @@ export class View implements DndHost {
 
   private restoreScroll(): void {
     this.sticky.disconnect();
+    this.fader.disconnect();
     for (const el of this.el.querySelectorAll<HTMLElement>(".carreau-scroll, .carreau-tabs")) {
       if (el.classList.contains("carreau-reverse")) for (const c of el.children) this.sticky.observe(c);
       const pos = this.scrollPos.get(this.scrollKey(el) ?? "");
       if (this.stuck(el)) toEnd(el);
       else if (pos && el.getClientRects().length) [el.scrollLeft, el.scrollTop] = [pos.left, pos.top];
+      if (el.classList.contains("carreau-scroll")) {
+        for (const x of [el, ...el.children]) this.fader.observe(x);
+        updateFade(el);
+      }
     }
   }
 
@@ -395,15 +428,27 @@ export class View implements DndHost {
     this.contents.sweep();
   }
 
-  /** Render a node, given the context its parent gave it (see kinds.ts). */
-  private renderNode(node: LayoutNode, ctx: Ctx): HTMLElement {
+  /**
+   * Render a node, given the context its parent gave it (see kinds.ts). `cell`: the scroll
+   * split's cell it is in (through splits), if any: see `decorateScrollCell`.
+   */
+  private renderNode(node: LayoutNode, ctx: Ctx, cell?: ScrollCell): HTMLElement {
     const el = document.createElement("div");
     el.dataset.id = node.id;
     el.style.flex = ctx.sizedAlong ? "none" : `${node.weight} 1 0`;
     if (ctx.sizedAlong) el.classList.add(`carreau-natural-${ctx.sizedAlong}`);
     if (isCell(node)) el.classList.add("carreau-cell");
-    if (node.type === "pane") this.fillPane(el, node, ctx);
-    else if (isSplit(node)) this.fillSplit(el, node, ctx);
+    // A direct child of a scroll split is one of its cells (a pane, or a split of panes). In a
+    // scroll-column, its height can be set (`size`): by any of its panes' bars.
+    if (ctx.cellOf && (node.type === "pane" || isSplit(node))) {
+      cell = { node, el, axis: ctx.cellOf };
+      if (ctx.cellOf === "column" && node.size) {
+        el.style.height = `${node.size}px`;
+        el.classList.add("carreau-cell-sized");
+      }
+    }
+    if (node.type === "pane") this.fillPane(el, node, ctx, cell);
+    else if (isSplit(node)) this.fillSplit(el, node, ctx, cell);
     else {
       const r = RENDERERS[(node as LayoutNode).type];
       if (!r) throw new Error(`No renderer for ${(node as LayoutNode).type} (see registerRenderer)`);
@@ -413,18 +458,18 @@ export class View implements DndHost {
     return el;
   }
 
-  private fillSplit(el: HTMLElement, node: SplitNode, ctx: Ctx): void {
+  private fillSplit(el: HTMLElement, node: SplitNode, ctx: Ctx, cell?: ScrollCell): void {
     const k = kind(node);
     el.classList.add("carreau-split", `carreau-${k.axis}`);
     const childCtx = k.childContext(node, ctx);
-    // A fixed last child: the split's element is a frame that doesn't scroll, the other
-    // children scroll in an inner element, and the fixed one sits below it, outside, so that it
-    // stays put (overscroll bounce included). The inner element keeps the scroll position, by
-    // the split's id (`data-scroll`).
+    // A scroll split is a frame that doesn't scroll (with the panel's look), holding an inner
+    // element that scrolls (its edges fade where there's more: see `updateFade`). The inner
+    // element keeps the scroll position, by the split's id (`data-scroll`). A fixed last child
+    // sits below the inner element, outside, so that it stays put (overscroll bounce included).
     const fixed = k.lastFixed ? node.children[node.children.length - 1] : undefined;
     const kids = fixed ? node.children.slice(0, -1) : node.children;
     let scroller = el;
-    if (fixed) {
+    if (k.scroll || fixed) {
       el.classList.add("carreau-framed");
       scroller = Object.assign(document.createElement("div"), { className: `carreau-split carreau-${k.axis} carreau-frame-inner` });
       scroller.dataset.scroll = node.id;
@@ -435,17 +480,18 @@ export class View implements DndHost {
     kids.forEach((c, i) => {
       // Children sized by their content get a fixed gap; others, a splitter.
       if (i > 0) scroller.append(childCtx.sizedAlong ? Object.assign(document.createElement("div"), { className: "carreau-gap" }) : this.renderSplitter(node, i));
-      scroller.append(this.renderNode(c, childCtx));
+      scroller.append(this.renderNode(c, childCtx, cell));
     });
     if (fixed) el.append(this.renderNode(fixed, childCtx));
   }
 
   /** A pane: its tab bar (at the bottom) and body. It decides its display from its context. */
-  private fillPane(el: HTMLElement, node: PaneNode, ctx: Ctx): void {
+  private fillPane(el: HTMLElement, node: PaneNode, ctx: Ctx, cell?: ScrollCell): void {
     el.classList.add("carreau-pane");
     const display = paneDisplay(node, ctx);
     const activeTab = node.tabs[node.active];
     if (activeTab) el.style.setProperty("--focus-accent", cellAccent(activeTab));
+    if (cell) this.decorateScrollCell(el, node, cell);
     const bar = this.renderTabBar(node, ctx);
     if (!display.showTabBar) {
       bar.hidden = true;
@@ -490,6 +536,87 @@ export class View implements DndHost {
       if (e.button !== 0 || (e.target as HTMLElement).closest(".carreau-cell") !== el) return;
       if (this.ws.selection.id !== node.id) this.ws.select({ id: node.id });
     });
+  }
+
+  /**
+   * A pane in a cell of a scroll split (the cell itself, or in a split that is the cell): an
+   * accent bar on the left, with its status on top (like buche's echo-box), and a close button
+   * at the top right. In a scroll-column, the bar resizes the cell (all the bars of a split
+   * cell resize the same cell, so they stay in sync): dragging outward (up from its top half,
+   * down from its bottom half) grows it, inward shrinks it, and the dragged edge stays put on
+   * screen. Double-click: back to its natural height.
+   */
+  private decorateScrollCell(el: HTMLElement, node: PaneNode, cell: ScrollCell): void {
+    el.classList.add("carreau-scrollcell");
+    const status = node.tabs[node.active]?.status;
+    if (status) el.dataset.status = status;
+    const gutter = Object.assign(document.createElement("div"), { className: "carreau-gutter" });
+    gutter.append(Object.assign(document.createElement("div"), { className: "carreau-gutter-status" }));
+    el.append(gutter);
+    if (cell.axis === "column") {
+      gutter.classList.add("resizes");
+      gutter.title = "Drag to resize; double-click: natural height";
+      gutter.addEventListener("pointerdown", (e) => this.resizeCell(e, cell, gutter));
+      gutter.addEventListener("dblclick", () => {
+        if (cell.node.size === undefined) return;
+        const token = this.ws.beginResize(`cell:${cell.node.id}`);
+        delete cell.node.size;
+        this.ws.endResize(token);
+        this.ws.emit();
+      });
+    }
+    if (this.ws.canClosePane(node.id) && !node.tabs.some((t) => this.ws.isClosing(t.id))) {
+      const close = Object.assign(document.createElement("span"), { className: "carreau-cell-close", title: "Close" });
+      close.addEventListener("pointerdown", (e) => e.stopPropagation()); // not a drag, nor a selection
+      close.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.ws.closePane(node.id);
+      });
+      el.append(close);
+    }
+  }
+
+  /** Drag a bar in a scroll-column's cell: resize the cell (see `decorateScrollCell`). */
+  private resizeCell(e: PointerEvent, cell: ScrollCell, gutter: HTMLElement): void {
+    const { el, node } = cell;
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    gutter.setPointerCapture(e.pointerId);
+    const startY = e.clientY;
+    const rect = el.getBoundingClientRect();
+    const startHeight = node.size ?? rect.height;
+    // From the top half, up is outward; from the bottom half, down is.
+    const topHalf = startY < rect.top + rect.height / 2;
+    const sign = topHalf ? 1 : -1;
+    // The dragged half stays put: measure the anchored edge, and scroll away its drift.
+    const scroller = el.closest<HTMLElement>(".carreau-scroll");
+    const anchorEdge = () => (topHalf ? el.getBoundingClientRect().bottom : el.getBoundingClientRect().top);
+    let anchor = anchorEdge();
+    const token = this.ws.beginResize(`cell:${node.id}`);
+    this.el.classList.add("is-resizing");
+    gutter.classList.add("resizing");
+    const move = (ev: PointerEvent) => {
+      const h = Math.max(MIN_CELL, Math.round(startHeight + (startY - ev.clientY) * sign));
+      node.size = h;
+      el.style.height = `${h}px`;
+      el.classList.add("carreau-cell-sized");
+      if (scroller && scroller.scrollHeight > scroller.clientHeight) scroller.scrollTop += anchorEdge() - anchor;
+      else anchor = anchorEdge(); // (not scrollable: the browser holds the view)
+      this.decorate();
+    };
+    const up = () => {
+      gutter.removeEventListener("pointermove", move);
+      gutter.removeEventListener("pointerup", up);
+      gutter.removeEventListener("pointercancel", up);
+      gutter.classList.remove("resizing");
+      this.el.classList.remove("is-resizing");
+      this.ws.endResize(token);
+      this.ws.emit();
+    };
+    gutter.addEventListener("pointermove", move);
+    gutter.addEventListener("pointerup", up);
+    gutter.addEventListener("pointercancel", up);
   }
 
   private renderTabBar(node: PaneNode, ctx: Ctx): HTMLElement {
@@ -962,10 +1089,15 @@ export class View implements DndHost {
 /** Move a node, preserving its state (iframes, focus, ...) where `moveBefore` exists. */
 function move(parent: HTMLElement, node: HTMLElement): void {
   // A focused text field moved by moveBefore keeps the focus but stops taking text (Chrome):
-  // focus it again afterwards, caret included.
+  // focus it again afterwards, caret included. (Fields, and editable elements: e.g. a
+  // CodeMirror editor's.)
   const a = document.activeElement;
-  const field = (a instanceof HTMLInputElement || a instanceof HTMLTextAreaElement) && node.contains(a) ? a : null;
+  const inside = a instanceof HTMLElement && node.contains(a);
+  const field = inside && (a instanceof HTMLInputElement || a instanceof HTMLTextAreaElement) ? a : null;
+  const editable = inside && !field && (a as HTMLElement).isContentEditable ? (a as HTMLElement) : null;
   const caret = field && ([field.selectionStart, field.selectionEnd] as const);
+  const sel = document.getSelection();
+  const ranges = editable && sel ? Array.from({ length: sel.rangeCount }, (_, i) => sel.getRangeAt(i)) : [];
   moveRaw(parent, node);
   if (field && caret) {
     field.blur();
@@ -975,6 +1107,11 @@ function move(parent: HTMLElement, node: HTMLElement): void {
     } catch {
       // (fields without a caret, e.g. type="number")
     }
+  } else if (editable) {
+    editable.blur();
+    editable.focus({ preventScroll: true });
+    sel?.removeAllRanges();
+    for (const r of ranges) sel?.addRange(r);
   }
 }
 
@@ -991,6 +1128,19 @@ function moveRaw(parent: HTMLElement, node: HTMLElement): void {
 }
 
 export const hasMoveBefore = typeof (Element.prototype as { moveBefore?: unknown }).moveBefore === "function";
+
+/**
+ * A scroll split's edges fade where there's more to see that way (like buche's scroll-fader):
+ * `fade-start` while content is scrolled off before, `fade-end` while there's more after.
+ */
+function updateFade(el: HTMLElement): void {
+  if (!el?.classList?.contains("carreau-scroll")) return;
+  const row = el.classList.contains("carreau-scroll-row");
+  const pos = row ? el.scrollLeft : el.scrollTop;
+  const max = row ? el.scrollWidth - el.clientWidth : el.scrollHeight - el.clientHeight;
+  el.classList.toggle("fade-start", pos > 1);
+  el.classList.toggle("fade-end", pos < max - 1);
+}
 
 /** Whether a scroll split is scrolled to its end, along its axis (1px tolerance). */
 function atEnd(el: HTMLElement): boolean {

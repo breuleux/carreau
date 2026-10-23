@@ -17,7 +17,7 @@ await page.screenshot({ path: "/tmp/sticky.png" });
 // grow the sticky column: add cells (a re-render, like a new command)
 const add = (n) => page.evaluate((n) => {
   const sc = [...document.querySelectorAll(".carreau-scroll-column.carreau-reverse")][0];
-  const node = window.ws.index().node(sc.dataset.id);
+  const node = window.ws.index().node(sc.dataset.scroll ?? sc.dataset.id);
   for (let i = 0; i < n; i++) { const id = Math.random().toString(36).slice(2, 8); node.children.push({ type: "pane", id: "p" + id, weight: 1, active: 0, tabs: [{ id: "t" + id, title: "cmd " + id, content: "line\n".repeat(6) }] }); }
   window.ws.emit();
 }, n);
@@ -33,7 +33,7 @@ await page.waitForTimeout(100);
 await add(1); await page.waitForTimeout(200);
 console.log("scrolled up, then added 1:\n ", await info());
 // menu toggle on the sticky column's holder
-const holder = page.locator(".carreau-pane", { has: page.locator(":scope > .carreau-body > .carreau-group > .carreau-scroll-column.carreau-reverse") });
+const holder = page.locator(".carreau-pane", { has: page.locator(":scope > .carreau-body > .carreau-group > .carreau-framed > .carreau-scroll-column.carreau-reverse") });
 await holder.locator(":scope > .carreau-tabbar .carreau-more").click();
 const items = await page.locator(".carreau-menu button").allTextContents();
 console.log("menu:", items);

@@ -86,6 +86,7 @@ function validate(n: any): void {
   if (!k) throw new Error(`Unknown node type ${n.type}`);
   if (n.type === "pane") {
     if (!Array.isArray(n.tabs)) throw new Error("Pane without tabs");
+    if (n.size !== undefined && !(typeof n.size === "number" && n.size > 0)) throw new Error("A pane's size is a positive number");
     n.active = Math.max(0, Math.min(n.active ?? 0, n.tabs.length - 1));
     for (const t of n.tabs) {
       if (t.group) validate(t.group);
@@ -96,6 +97,7 @@ function validate(n: any): void {
     if (!Array.isArray(n.children)) throw new Error("Split without children");
     if (n.type === "slot" && n.children.length !== 1) throw new Error("A slot holds one node");
     if (n.reverse !== undefined && (typeof n.reverse !== "boolean" || !k.scroll)) throw new Error("Only scroll splits reverse");
+    if (n.size !== undefined && !(typeof n.size === "number" && n.size > 0)) throw new Error("A split's size is a positive number");
     n.children.forEach(validate);
   }
 }

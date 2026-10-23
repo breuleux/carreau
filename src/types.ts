@@ -58,6 +58,8 @@ export interface PaneNode {
   weight: number;
   tabs: Tab[];
   active: number;
+  /** See `SplitNode.size`. */
+  size?: number;
 }
 
 export interface SplitNode {
@@ -71,6 +73,12 @@ export interface SplitNode {
    * content grows. The order of the children is unchanged.
    */
   reverse?: boolean;
+  /**
+   * A cell of a scroll-column (a pane, or a split: its direct child): its height in pixels,
+   * set by dragging a bar of the cell (default: its natural height). Kept elsewhere, unused
+   * (it applies again back in a scroll-column).
+   */
+  size?: number;
 }
 
 /**

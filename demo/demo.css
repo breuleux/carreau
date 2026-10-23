@@ -25,3 +25,11 @@ kbd { background: light-dark(#fff, #3c3f4b); box-shadow: light-dark(inset 0 0 0 
 .demo-plot svg { flex: 1; width: 100%; min-height: 0; }
 .demo-plot .axis { stroke: light-dark(#c9ccd4, #3a3d48); stroke-width: 1; }
 .demo-plot .legend { font: 12px system-ui; display: flex; gap: 12px; flex-wrap: wrap; padding-top: 6px; }
+/* the "Custom prompt" example's editor (demo/prompteditor.ts) */
+.demo-prompt { flex: 1; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.demo-prompt-header { font: 11px system-ui; color: light-dark(#7a7d87, #8a8d96); padding-left: 2px; }
+.demo-prompt-area {
+  font: 13px system-ui; resize: none; padding: 7px 10px; border-radius: 6px; outline: none; overflow-y: auto;
+  color: light-dark(#1d1e22, #e6e7ea); background: var(--carreau-pane-bg); border: 1px solid light-dark(#c9ccd4, #33353f);
+}
+.demo-prompt.selected .demo-prompt-area, .demo-prompt-area:focus { border-color: light-dark(#7d808b, #8a8d96); }

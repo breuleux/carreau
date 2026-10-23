@@ -6,6 +6,7 @@ import "./demo.css";
 import { examples } from "./examples";
 import { commitCellFocus, promptCell, spawnCell } from "./cellclasses";
 import { plotElement } from "./plots";
+import { headedEditor } from "./prompteditor";
 import { deserialize, serialize } from "../src/model";
 import { hasMoveBefore, View } from "../src/view";
 import { Workspace } from "../src/workspace";
@@ -143,6 +144,8 @@ ws.lifecycle = {
 };
 // What's typed in a prompt (Enter) becomes a cell above it.
 configurePrompts(ws, { submit: promptCell, placeholder: "Type a prompt, or $ a command — Enter" });
+// The "Custom prompt" example: the host's own prompt editor.
+if (example.name === "Custom prompt") configurePrompts(ws, { editor: headedEditor });
 const view = new View(ws, document.querySelector("#host")!, {
   renderTab: (tab) => {
     const data = tab.data ?? {};

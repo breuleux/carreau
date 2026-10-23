@@ -117,9 +117,9 @@
 /* scroll splits: children take their natural size along the axis */
 .carreau-scroll-column { overflow-y: auto; overflow-x: hidden; }
 .carreau-scroll-row { overflow-x: auto; overflow-y: hidden; }
-/* A scroll split always occupies its whole allocation: give it a panel of its own, so that
-   the space left after short content reads as part of it (padding), not as a gap. */
-.carreau-scroll { background: light-dark(#eef0f4, #141519); border-radius: 4px; box-shadow: inset 0 0 0 1px light-dark(#d3d6de, #2c2e38); }
+/* A scroll split always occupies its whole allocation: give it a panel of its own (on its
+   frame, which doesn't scroll), so that the space left after short content reads as part of
+   it (padding), not as a gap. */
 .carreau-gap { flex: 0 0 4px; }
 /* Sticky scroll splits: short content sits at the end. (An auto margin, not justify-content:
    flex-end, which would make overflowing content unreachable at the start.) */
@@ -239,11 +239,63 @@
 .carreau-group.natural-column { flex-direction: column; }
 .carreau-group.natural-column > * { flex: none !important; }
 .carreau-tabbar[hidden] { display: none; }
-/* splits with a fixed last child: a frame (with the scroll split's panel look) holding the
-   other children's scroller and, after it, the fixed child, which doesn't scroll (nor bounce) */
-.carreau-framed { background: light-dark(#eef0f4, #141519); border-radius: 4px; box-shadow: inset 0 0 0 1px light-dark(#d3d6de, #2c2e38); }
-.carreau-framed > .carreau-frame-inner { flex: 1 1 auto; min-width: 0; min-height: 0; background: none; box-shadow: none; }
-.carreau-framed > :last-child { flex: none !important; }
+/* scroll splits: a frame (the panel) holding the scroller and, after it, a fixed last child if
+   any, which doesn't scroll (nor bounce) */
+.carreau-framed { --carreau-scroll-bg: light-dark(#eef0f4, #141519); background: var(--carreau-scroll-bg); border-radius: 4px; box-shadow: inset 0 0 0 1px light-dark(#d3d6de, #2c2e38); }
+.carreau-framed > .carreau-frame-inner { flex: 1 1 auto; min-width: 0; min-height: 0; }
+.carreau-framed > :not(.carreau-frame-inner) { flex: none !important; }
+/* Their edges fade out where there's more to see that way (like buche's scroll-fader): a mask
+   on the scroller (only its content fades), sized while it's scrolled off before (fade-start)
+   or there's more after (fade-end). Scrolling something into view keeps it clear of the fade. */
+@property --carreau-fade-start { syntax: "<length>"; inherits: false; initial-value: 0px; }
+@property --carreau-fade-end { syntax: "<length>"; inherits: false; initial-value: 0px; }
+.carreau-scroll {
+  --carreau-fade: 40px; --carreau-fade-start: 0px; --carreau-fade-end: 0px;
+  transition: --carreau-fade-start 0.2s, --carreau-fade-end 0.2s;
+  --carreau-fade-mask: linear-gradient(var(--carreau-fade-dir), transparent 0, #000 var(--carreau-fade-start), #000 calc(100% - var(--carreau-fade-end)), transparent 100%);
+  -webkit-mask-image: var(--carreau-fade-mask); mask-image: var(--carreau-fade-mask);
+  scrollbar-width: none;
+}
+.carreau-scroll::-webkit-scrollbar { display: none; }
+.carreau-scroll-column { --carreau-fade-dir: to bottom; scroll-padding-block: var(--carreau-fade); }
+.carreau-scroll-row { --carreau-fade-dir: to right; scroll-padding-inline: var(--carreau-fade); }
+.carreau-scroll.fade-start { --carreau-fade-start: var(--carreau-fade); }
+.carreau-scroll.fade-end { --carreau-fade-end: var(--carreau-fade); }
+/* Cells of scroll splits (like buche's echo-box): an accent bar on the left, with the status
+   on top, and a close button at the top right. The card (background, border) is drawn behind,
+   right of the bar, which sits on the scroll split's panel. In a scroll-column, the bar
+   resizes the cell (a cell with a size of its own scrolls its content). */
+.carreau-pane.carreau-scrollcell { position: relative; isolation: isolate; padding-left: 16px; background: none; border: 0; border-radius: 0; }
+.carreau-scrollcell::before {
+  content: ""; position: absolute; inset: 0 0 0 16px; z-index: -1; pointer-events: none;
+  background: var(--carreau-pane-bg); border: 1px solid light-dark(#d3d6de, #2c2e38); border-radius: 4px;
+}
+.carreau-pane.no-tabbar.carreau-scrollcell.selected::before { border-color: color-mix(in oklch, var(--focus-accent, #8a8d96) 70%, transparent); }
+.carreau-scrollcell .carreau-long { border-radius: 3px 3px 0 0; padding-right: 28px; }
+/* a cell with a height of its own: its panes scroll their content */
+.carreau-pane.carreau-cell-sized > .carreau-body, .carreau-cell-sized .carreau-pane > .carreau-body { overflow: auto; }
+.carreau-gutter { position: absolute; left: 0; top: 0; bottom: 0; width: 16px; touch-action: none; }
+.carreau-gutter.resizes { cursor: ns-resize; }
+.carreau-gutter::before {
+  content: ""; position: absolute; left: 50%; transform: translateX(-50%); top: 12px; bottom: 6px; width: 2px; border-radius: 1px;
+  background: var(--focus-accent, #8a8d96); transition: width 0.1s;
+}
+.carreau-gutter-status {
+  position: absolute; left: 50%; top: 7px; transform: translateX(-50%); width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box;
+  border: 2px solid var(--focus-accent, #8a8d96); background: var(--carreau-scroll-bg, #eef0f4);
+}
+.carreau-scrollcell[data-status="done"] .carreau-gutter-status { background: var(--focus-accent, #8a8d96); }
+.carreau-scrollcell[data-status="error"] .carreau-gutter-status { border-color: #e5484d; background: #e5484d; }
+.carreau-scrollcell[data-status="error"] .carreau-gutter::before { background: #e5484d; }
+.carreau-scrollcell[data-status="unresponsive"] .carreau-gutter-status { animation: carreau-unresponsive 1.1s steps(1, end) infinite; }
+.carreau-scrollcell.selected > .carreau-gutter::before, .carreau-scrollcell.focus-path > .carreau-gutter::before, .carreau-gutter.resizing::before, .carreau-gutter.resizes:hover::before { width: 4px; }
+.carreau-cell-close {
+  position: absolute; top: 4px; right: 5px; z-index: 1; width: 18px; height: 18px; border-radius: 3px;
+  display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: 15px; line-height: 1;
+  color: light-dark(#8a8d98, #6c6f78);
+}
+.carreau-cell-close::before { content: "×"; }
+.carreau-cell-close:hover { color: light-dark(#1d1e22, #eee); background: light-dark(#e3e5ea, #3a3d48); }
 /* a secondary focus: what cell operations act on, when not the selection (Workspace.operand) */
 .carreau.nav-mode .carreau-pane.secondary { outline: 1px dotted light-dark(#8a8d98, #80838d); outline-offset: -2px; }
 .carreau-long.empty { padding: 0; height: 7px; }

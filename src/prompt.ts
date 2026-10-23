@@ -1,7 +1,8 @@
 // Prompt columns: a column of cells sticking to its bottom, with an input field (the prompt)
 // below them, like a terminal or a chat. Self-contained: it plugs into the core through its
-// extension points (node types and kinds, operand redirection, tab complexes). No DOM here:
-// rendering is in prompt-view.ts, styles in prompt.css. See "Prompt columns" in design.md.
+// extension points (node types and kinds, operand redirection, tab complexes). No DOM here at
+// run time (DOM types only, for editors): rendering is in prompt-view.ts, styles in
+// prompt.css. See "Prompt columns" in design.md.
 
 import { complexAt, registerComplex } from "./complex";
 import { kind, leafKind, registerKind, splitKind } from "./kinds";
@@ -108,7 +109,12 @@ registerOperand("prompt", (ws, n) => {
 export interface PromptOptions {
   /** What submitted text becomes: a new cell above the prompt (null: none). Default: a text tab. */
   submit?(text: string): Tab | null;
-  /** The field's placeholder. */
+  /**
+   * What a prompt shows: makes each prompt's editor (once per prompt: it's kept across
+   * renders). Default: `inputEditor()` (prompt-view.ts), a one-line field.
+   */
+  editor?: PromptEditorFactory;
+  /** The default editor's placeholder. */
   placeholder?: string;
   /**
    * When a merged prompt-column's tab closes, its cells: go to the complex's first tab
@@ -116,6 +122,46 @@ export interface PromptOptions {
    */
   mergedClose?: "transfer" | "close";
 }
+
+/**
+ * A prompt's editor: whatever the host wants in the prompt (a field, a CodeMirror or Monaco
+ * editor, with a header above it…). Made once per prompt (`PromptEditorFactory`), and kept
+ * across renders: its element is moved, never recreated, so what's typed (and the focus) stay.
+ */
+export interface PromptEditor {
+  /** Its element, put into the prompt. */
+  el: HTMLElement;
+  /** Take the keyboard focus (leaving navigation mode on the prompt, clicking its column's tab). */
+  focus(): void;
+  /** On every render: what it may show (e.g. who types, in a header). */
+  update?(state: PromptState): void;
+  /** The prompt is gone: release what the editor holds (e.g. Monaco's `dispose()`). */
+  destroy?(): void;
+}
+
+export interface PromptState {
+  /** Who types: the tab holding the column; merged, the complex's active member. */
+  speaker: Tab | null;
+  /** The column is merged with others (see "Merging"). */
+  merged: boolean;
+  /** The prompt is selected. */
+  selected: boolean;
+}
+
+/** What an editor can do with its prompt. */
+export interface PromptEditorContext {
+  ws: Workspace;
+  promptId: string;
+  /** Submit text: it becomes a cell above the prompt (`submitPrompt`). */
+  submit(text: string): void;
+  /**
+   * Call when the editor takes the keyboard focus (e.g. on its `focus` event): the prompt gets
+   * selected. (Ignored during renders, which re-focus moved fields.)
+   */
+  focused(): void;
+}
+
+export type PromptEditorFactory = (ctx: PromptEditorContext) => PromptEditor;
 
 const OPTIONS = new WeakMap<Workspace, PromptOptions>();
 

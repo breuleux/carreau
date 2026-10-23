@@ -602,6 +602,20 @@ for (const [a, b] of [["swapUp", "swapDown"], ["swapLeft", "swapRight"], ["swapR
   ws.commitDrop(ws.tryDrop(cx, { kind: "float", paneId: P()[0].id }), undefined, { x: 10, y: 10, w: 200, h: 100 });
   check(`A+B floated (over its own pane): still merged: ${tabsOf()}`, tabsOf() === "tN tC+tD tE ; tA+tB");
 }
+// A scroll-column cell's size (set by dragging its bar, in the view): layout data
+{
+  const { deserialize, serialize } = await server.ssrLoadModule("/src/model.ts");
+  const c = pane(["c"]);
+  c.size = 180;
+  const back = deserialize(serialize(scrollColumn([c, pane(["d"])])));
+  check("a cell's size survives serialization", back.root.children[0].size === 180);
+  const r = row([pane(["e"]), pane(["f"])]);
+  r.size = 120;
+  check("so does a split cell's", deserialize(serialize(scrollColumn([r, pane(["g"])]))).root.children[0].size === 120);
+  let refused = false;
+  try { deserialize(JSON.stringify({ type: "pane", id: "p", weight: 1, active: 0, tabs: [], size: -3 })); } catch { refused = true; }
+  check("a bad size is refused on load", refused);
+}
 // Next/previous tab from a lone tab in a group: up to the first pane with several tabs
 {
   const { groupPane } = await server.ssrLoadModule("/src/model.ts");

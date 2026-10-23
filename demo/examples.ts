@@ -284,6 +284,20 @@ export const examples: Example[] = [
       ]),
   },
   {
+    name: "Custom prompt",
+    description:
+      "The prompt's editor is the host's: here, a header above a field that grows with its text (Enter sends, Shift+Enter starts a new line). See demo/prompteditor.ts: any editor would do the same way.",
+    build: () =>
+      row([
+        pane([t("Notes", 1)], 1),
+        groupPane(
+          "Chat",
+          promptColumn([pane([cell("Hello", PROMPT, "Hello!", "oklch(0.72 0.13 300)", undefined, "Hi! Ask me anything.")])]),
+          2,
+        ),
+      ]),
+  },
+  {
     name: "Merging prompts",
     description:
       "Drag Bob's tab onto Ann's (the link icon over it): their cells merge, interleaved by time. Click either tab of the pair to type as it. Drag a tab out of the pair to unmerge: it takes its cells back. Closing one hands its cells over.",
