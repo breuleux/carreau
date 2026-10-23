@@ -8,7 +8,7 @@
 
 import { LayoutNode, PaneNode, Side } from "./model";
 import { View } from "./view";
-import { Command, Direction, Workspace } from "./workspace";
+import { Command, Direction, Selection, Workspace } from "./workspace";
 
 type Dir = "Left" | "Right" | "Up" | "Down";
 export type NavAction =
@@ -396,6 +396,14 @@ export class KeyboardNav {
     return op && !op.range ? this.ws.node(op.id) : null;
   }
 
+  /** If a prompt is selected, a selection of its column. */
+  private promptColumnSelection(): Selection | null {
+    const sel = this.ws.selection;
+    if (sel.range || this.ws.node(sel.id)?.type !== "prompt") return null;
+    const col = this.ws.index().parent(sel.id);
+    return col ? { id: col.id } : null;
+  }
+
   /**
    * The pane the selection is in: a selected pane, else the pane holding it (a prompt: its
    * column's). Naming acts on it, not on the operand: what's named is what's selected, even
@@ -430,8 +438,9 @@ export class KeyboardNav {
       }
       case "group":
         // Group now, then edit the new tab's title in place (keys typed in the field are
-        // ignored by this controller).
-        this.view.groupAndName();
+        // ignored by this controller). From a prompt, it groups the prompt's column, not the
+        // operand.
+        this.view.groupAndName(this.promptColumnSelection() ?? undefined);
         return;
       case "renameTab": {
         const p = this.selectedPane();
@@ -446,7 +455,9 @@ export class KeyboardNav {
         const n = this.operand();
         if (n?.type === "pane") {
           const tab = (n as PaneNode).tabs[(n as PaneNode).active];
+          // (A pane with no tabs, which stays when emptied (named, kept): the pane itself.)
           if (tab) ws.closeTab(tab.id);
+          else ws.closePane(n.id);
         }
         return;
       }

@@ -77,11 +77,9 @@
 .carreau-tab.active { box-shadow: inset 0 2px 0 light-dark(#a3a6af, #6f727c); }
 /* (also the groups' holders, when the selection is inside them) */
 .carreau-pane.selected > .carreau-tabbar .carreau-tab.active, .carreau-pane.focus-path > .carreau-tabbar .carreau-tab.active { color: light-dark(#1d1e22, #eee); box-shadow: inset 0 2px 0 var(--tab-accent); }
-/* merged tabs (a tab complex): a shared tint, and a link icon between them */
-.carreau-tab.linked { background: light-dark(#e9ebf0, #23252c); }
+/* merged tabs (a tab complex): styled like any tab, with a link icon between them */
 .carreau-tab-link {
-  flex: none; display: flex; align-items: center; padding: 0 1px; color: light-dark(#8a8d98, #7a7d87);
-  background: light-dark(#e9ebf0, #23252c); cursor: grab;
+  flex: none; display: flex; align-items: center; padding: 0 1px; color: light-dark(#8a8d98, #7a7d87); cursor: grab;
 }
 .carreau-tab-link:hover { color: light-dark(#1d1e22, #eee); }
 .carreau-body { flex: 1; padding: 10px; overflow: auto; }
@@ -221,6 +219,11 @@
 }
 .carreau-float-bar:hover { background: linear-gradient(light-dark(#d8dbe2, #4a4e5a), light-dark(#c4c7cf, #2c2e37)); }
 .carreau-selection.in-float { z-index: 8; }
+/* bare windows: no chrome at all (see FloatingWindow.bare) */
+.carreau-float-bare .carreau-tabbar { display: none; }
+/* fit windows: as tall as their content (see FloatingWindow.fit) */
+.carreau-float-fit { overflow: hidden; }
+.carreau-float-fit .carreau-pane, .carreau-float-fit .carreau-body, .carreau-float-fit .carreau-content { flex: 0 1 auto; min-height: 0; }
 
 /* navigation mode: the selected pane gets a brighter thin outline; panes can be dragged
    from anywhere (iframes must not swallow the press) */

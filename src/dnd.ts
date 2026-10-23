@@ -149,6 +149,8 @@ const LINE = 5;
 const LINE_HIT = 8;
 /** Mini lines (a line's other choices, popped out next to the cursor after a moment). */
 const MINI_DELAY = 250;
+/** How long the cursor rests on a tab, still, during a drag before the tab gets the focus. */
+const TAB_FOCUS_DELAY = 250;
 const MINI_LEN = 44;
 const MINI_T = 6;
 const MINI_GAP = 3;
@@ -174,6 +176,8 @@ export class DragDrop {
   /** The line the mini lines are about to pop out of (after `MINI_DELAY`; by key), and the timer. */
   private miniLine: string | null = null;
   private miniTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The wait before a tab the cursor rests on (during a drag) gets the focus; null: none. */
+  private dwellTimer: ReturnType<typeof setTimeout> | null = null;
   /** The layout's index, during a drag (it doesn't change meanwhile). */
   private index: LayoutIndex | null = null;
   /** No drag may start before this time. */
@@ -246,6 +250,8 @@ export class DragDrop {
     this.state = null;
     this.index = null;
     this.waitForMinis(null);
+    if (this.dwellTimer) clearTimeout(this.dwellTimer);
+    this.dwellTimer = null;
     d.ghost.remove();
     d.sourceEl.classList.remove("carreau-drag-source");
     this.host.el.classList.remove("is-dragging");
@@ -368,6 +374,7 @@ export class DragDrop {
     // leaves the line (and them).
     if (!d.near || (d.minis && d.minis.line.key !== d.near.key)) d.minis = null;
     this.waitForMinis(d.near && d.near.levels.length + d.near.far.length > 1 ? d.near.key : null);
+    this.tabDwell(ev);
     this.draw();
   }
 
@@ -378,6 +385,30 @@ export class DragDrop {
     this.miniTimer = null;
     this.miniLine = line;
     if (line) this.miniTimer = setTimeout(() => this.popMinis(), MINI_DELAY);
+  }
+
+  /**
+   * Tab dwell: the cursor resting, still, on a tab during a drag gives it the focus, so what
+   * it shows is visible while deciding where the drag goes. Any motion restarts the wait.
+   */
+  private tabDwell(ev: PointerEvent): void {
+    if (this.dwellTimer) clearTimeout(this.dwellTimer);
+    const tab = (document.elementFromPoint(ev.clientX, ev.clientY) as HTMLElement | null)?.closest?.(".carreau-tab") as HTMLElement | null;
+    const tabId = tab?.dataset.tab;
+    this.dwellTimer = tabId ? setTimeout(() => this.focusTab(tabId), TAB_FOCUS_DELAY) : null;
+  }
+
+  /** Give the focus to the tab rested on (it may meanwhile be gone; already shown: nothing). */
+  private focusTab(tabId: string): void {
+    this.dwellTimer = null;
+    const d = this.state;
+    if (!d) return;
+    const ft = this.ws.trees().map((t) => findTab(t, tabId)).find(Boolean);
+    if (!ft || ft.pane.active === ft.index) return;
+    this.ws.activateTab(ft.pane.id, ft.index);
+    // (Its rendering: the bar's dots sit between tabs, and tabs change widths.)
+    d.tabBar = d.hoverPane ? this.tabBar(d.hoverPane) : null;
+    this.draw();
   }
 
   /**

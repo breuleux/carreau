@@ -1016,5 +1016,21 @@ for (const [a, b] of [["swapUp", "swapDown"], ["swapLeft", "swapRight"], ["swapR
   await ws.closeTab(tabId("Ann"));
   check(`mergedClose "close": Ann closed (the first, holding everything), her cells with her: Bob: ${cellsOf("Bob")}`, cellsOf("Bob") === "b1" && !panes(ws.root).some((p) => p.tabs.some((t) => t.title === "a1")));
 }
+// A kept empty pane (buche's "New pane"): stays empty, unnamed, and takes what's put into it.
+{
+  const ep = { type: "pane", id: "pe", weight: 1, active: 0, tabs: [], keep: true };
+  const ws = new Workspace(row([ep, pane(["S"])]));
+  check("a kept empty pane stays in the layout", ws.node("pe")?.type === "pane" && panes(ws.root).length === 2);
+  const holder = { type: "pane", id: "gh", weight: 1, active: 0, tabs: [{ id: "gt", title: "G", group: { type: "slot", id: "gs", weight: 1, children: [{ ...structuredClone(ep), id: "pe2" }] } }] };
+  const ws2 = new Workspace(row([holder, pane(["S"])]));
+  const t = ws2.absorbTarget(holder.id);
+  check("a pane showing a kept empty pane absorbs into its tabs", !!t && t.kind === "tab" && t.paneId === "pe2" && t.index === 0);
+  const src = panes(ws2.root).find((p) => p.tabs[0]?.title === "S");
+  const r = ws2.tryDrop({ kind: "pane", paneId: src.id }, t);
+  check("the drop is valid", !!r);
+  if (r) ws2.commitDrop(r);
+  const kept = ws2.node("pe2");
+  check("dropped there, the pane's tabs fill the kept pane", !!kept && kept.tabs.map((x) => x.title).join() === "S" && ws2.root.type === "pane" && ws2.root.tabs[0].title === "G");
+}
 await server.close();
 process.exit(fails ? 1 : 0);

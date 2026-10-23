@@ -123,7 +123,7 @@ function rebase(s: Snapshot, fn: HostFn): boolean {
   const { trees, value } = inForest(structuredClone(snapshotTrees(s)), fn);
   if (value === false || !trees[0]) return false;
   s.root = trees[0];
-  s.floating = s.floating.flatMap((w, i) => (trees[i + 1] ? [{ root: trees[i + 1]!, rect: w.rect }] : []));
+  s.floating = s.floating.flatMap((w, i) => (trees[i + 1] ? [{ ...w, root: trees[i + 1]! }] : []));
   return true;
 }
 
@@ -307,7 +307,7 @@ export class Workspace {
     this.root = (trees[0] && normalizeTree(trees[0])) ?? this.root;
     this.floating = windows.flatMap((w, i) => {
       const t = trees[i + 1] && normalizeTree(trees[i + 1]!);
-      return t ? [{ root: t, rect: w.rect }] : [];
+      return t ? [{ ...w, root: t }] : [];
     });
     if (select) this.selection = { id: select };
     this.validate(this.selection);
@@ -591,6 +591,23 @@ export class Workspace {
       paneId ??= r.paneId;
     });
     return ok ? paneId : null;
+  }
+
+  /**
+   * A new floating window holding `root` (at `rect`; `options`: see FloatingWindow), as a host
+   * change: not an undo step, and never undone (every undo and redo snapshot gets it too). The
+   * selection stays. Returns whether the window was made (not if `root` normalizes to nothing).
+   */
+  hostFloat(root: LayoutNode, rect: Rect, options: Pick<FloatingWindow, "bare" | "fit"> = {}): boolean {
+    const tree = normalizeTree(structuredClone(root));
+    if (!tree) return false;
+    const add = (s: { floating: FloatingWindow[] }) => {
+      s.floating = [...s.floating, { ...options, root: structuredClone(tree), rect: { ...rect } }];
+    };
+    for (const stack of [this.undoStack, this.redoStack]) for (const s of stack) add(s);
+    for (const t of this.resizing) add(t.before);
+    this.setTrees([...this.trees(), tree], [...this.floating, { ...options, root: tree, rect }]);
+    return true;
   }
 
   /** The drop `place` makes (computed, not committed). */

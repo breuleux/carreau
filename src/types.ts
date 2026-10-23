@@ -65,6 +65,11 @@ export interface PaneNode {
    * `Workspace.sendTo` ("Send to"). Unique (ignoring case), and not a reserved name.
    */
   name?: string;
+  /**
+   * Stays when it has no tabs (like a named pane, and like a split's `keep`), instead of
+   * disappearing: e.g. an empty pane made to be filled later. No name, so no zone.
+   */
+  keep?: boolean;
 }
 
 export interface SplitNode {
@@ -115,6 +120,13 @@ export interface FloatingWindow {
   root: LayoutNode;
   /** position and size in pixels, relative to the workspace */
   rect: Rect;
+  /** No chrome: no title bar (it can't be moved), no tab bars, no resize handles. */
+  bare?: boolean;
+  /**
+   * Its height is its content's (up to `rect.h`), its bottom staying where `rect` puts it (at
+   * `rect.y + rect.h`): it grows upwards.
+   */
+  fit?: boolean;
 }
 
 /** Everything that is serialized: the tree, plus floating windows. */

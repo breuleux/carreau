@@ -277,10 +277,10 @@ export function isScroll(n: LayoutNode): n is SplitNode {
 
 /**
  * Whether a pane stays when it has no tabs (normalization keeps it, a drop doesn't count on its
- * leaving): a named pane, until it's closed. The one place deciding it.
+ * leaving): a named or kept pane, until it's closed. The one place deciding it.
  */
 export function staysEmpty(p: PaneNode): boolean {
-  return !!p.name;
+  return !!p.name || !!p.keep;
 }
 
 /** A pane that has no tabs left and goes (see `staysEmpty`). */

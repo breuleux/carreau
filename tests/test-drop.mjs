@@ -126,4 +126,14 @@ await server.close();
   check(`left of 1: 5 and 1 share 1's half (${ws(half)})`, ws(half) === "0.75 0.75 1.50");
   check(`left of the row: thirds (${ws(third)})`, ws(third) === "1.00 1.00 1.00");
 }
+{
+  // A kept empty pane: it stays, and a tab dropped into its tabs lands there (buche's "New pane").
+  const ep = { type: "pane", id: "pe", weight: 1, active: 0, tabs: [], keep: true };
+  const src = pane(["S"]);
+  const spir = row([ep, src]);
+  const into = applyDrop(spir, { kind: "tab", tabId: src.tabs[0].id }, { kind: "tab", paneId: "pe", index: 0 });
+  const kept = into && find(into.root, "pe").node;
+  check("tab dropped into a kept empty pane: it lands in its tabs", !!into && kept.tabs.length === 1 && kept.tabs[0].title === "S");
+  check("…and the tree normalized: the emptied pane is gone", !!into && into.root.type === "pane" && into.root.tabs[0].title === "S");
+}
 process.exit(fails ? 1 : 0);

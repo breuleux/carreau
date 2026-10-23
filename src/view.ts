@@ -30,7 +30,7 @@ import {
   union,
   walk,
 } from "./model";
-import { Workspace } from "./workspace";
+import { Selection, Workspace } from "./workspace";
 
 export { cellAccent } from "./colors";
 
@@ -1005,8 +1005,8 @@ export class View implements DndHost {
   }
 
   /** Group the selection under a random name, then edit the new tab's title in place. */
-  groupAndName(): void {
-    if (!this.ws.group(randomWord())) return;
+  groupAndName(selection?: Selection): void {
+    if (!this.ws.group(randomWord(), selection)) return;
     const holder = this.ws.node(this.ws.selection.id);
     // Naming is part of grouping: Escape, or an empty name, cancels the grouping itself.
     if (holder?.type === "pane") this.editTabTitle(holder.tabs[holder.active].id, () => this.ws.discardLastStep());
@@ -1103,15 +1103,20 @@ export class View implements DndHost {
 
   private renderFloat(win: FloatingWindow): HTMLElement {
     const el = Object.assign(document.createElement("div"), { className: "carreau-float" });
+    el.classList.toggle("carreau-float-bare", !!win.bare);
+    el.classList.toggle("carreau-float-fit", !!win.fit);
     this.placeFloat(el, win);
     // Title bar: moves the window; holding it still for a second docks the whole window.
-    const bar = Object.assign(document.createElement("div"), { className: "carreau-float-bar", title: "Drag to move; hold still for a second to dock" });
-    bar.addEventListener("pointerdown", (e) => this.armFloatMove(e, win));
-    el.append(bar);
+    if (!win.bare) {
+      const bar = Object.assign(document.createElement("div"), { className: "carreau-float-bar", title: "Drag to move; hold still for a second to dock" });
+      bar.addEventListener("pointerdown", (e) => this.armFloatMove(e, win));
+      el.append(bar);
+    }
     const content = this.renderNode(win.root, rootCtx(true));
-    content.style.flex = "1 1 0";
+    content.style.flex = win.fit ? "0 1 auto" : "1 1 0";
     el.append(content);
     el.addEventListener("pointerdown", () => this.raiseFloat(win, el), { capture: true });
+    if (win.bare) return el;
     // Resize from any corner or edge; the window never leaves the workspace.
     for (const dir of ["n", "s", "e", "w", "ne", "nw", "se", "sw"]) {
       const handle = Object.assign(document.createElement("div"), { className: `carreau-float-resize carreau-resize-${dir}` });
@@ -1157,7 +1162,10 @@ export class View implements DndHost {
       r.x = clamp(r.x, 0, W - r.w);
       r.y = clamp(r.y, 0, H - r.h);
     }
-    Object.assign(el.style, { left: `${r.x}px`, top: `${r.y}px`, width: `${r.w}px`, height: `${r.h}px` });
+    // (Fit: its content's height, up to r.h, growing upwards from the bottom of r.)
+    if (win.fit)
+      Object.assign(el.style, { left: `${r.x}px`, top: "", bottom: `${(H || r.y + r.h) - r.y - r.h}px`, width: `${r.w}px`, height: "", maxHeight: `${r.h}px` });
+    else Object.assign(el.style, { left: `${r.x}px`, top: `${r.y}px`, bottom: "", width: `${r.w}px`, height: `${r.h}px`, maxHeight: "" });
   }
 
   /** Bring a window to the front without re-rendering (which would interrupt the click). */
