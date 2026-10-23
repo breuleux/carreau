@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Carreau prototype</title>
+  </head>
+  <body>
+    <header>
+      <strong>Carreau</strong>
+      <select id="example"></select>
+      <span id="description"></span>
+      <span id="status"></span>
+      <select id="theme" title="Theme">
+        <option value="light dark">Auto</option>
+        <option value="light">Light</option>
+        <option value="dark">Dark</option>
+      </select>
+    </header>
+    <main>
+      <div id="host"></div>
+      <aside>
+        <h3>Keyboard (demo config)</h3>
+        <ul id="keys"></ul>
+        <p class="hint">Drag a tab, or a pane by the empty part of its header (or anywhere inside it in navigation mode). Drag splitters to resize. Esc cancels a drag.</p>
+        <h3>Serialized layout</h3>
+        <textarea id="json" spellcheck="false"></textarea>
+        <button id="load">Load JSON</button>
+      </aside>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

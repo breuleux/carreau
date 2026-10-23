@@ -51,12 +51,12 @@
     "./dist/prompt-view.js"
   ],
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --config vite.config.ts demo",
     "build": "tsc --noEmit && vite build && tsc -p tsconfig.build.json",
     "prepare": "vite build && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "node tests/test-ws.mjs && node tests/test-drop.mjs",
-    "serve:test": "vite --port 5317 --strictPort"
+    "serve:test": "vite --config vite.config.ts demo --port 5317 --strictPort"
   },
   "devDependencies": {
     "playwright": "1.57",

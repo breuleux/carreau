@@ -1,7 +1,7 @@
 // Standalone bundle: dist/ + types/ for bundler-less consumers (and a future publish).
 // Hosts that bundle — buche — compile the sources through the "source" export condition
-// instead; the git tag carries sources only. The demo (index.html, demo/) runs through
-// `npm run dev`, which ignores the lib settings below.
+// instead; the git tag carries sources only. The demo (demo/index.html, served by
+// `npm run dev` with demo/ as the vite root) ignores the lib settings below.
 
 import { copyFileSync, readFileSync } from "node:fs";
 import { defineConfig, type Plugin } from "vite";
