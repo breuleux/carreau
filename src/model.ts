@@ -2,7 +2,7 @@
 // Data types are in types.ts; per-kind behaviour in kinds.ts; queries in tree.ts.
 
 import { sideAxis, sideIsStart } from "./geometry";
-import { canCollapse, isScroll, isSplit, kind, kindOf, mergeKey } from "./kinds";
+import { canCollapse, isScroll, isSplit, kind, kindOf, mergeKey, vanishes } from "./kinds";
 import { find, findTab, panes, pathTo } from "./tree";
 import { canMerge, linkedRuns, newLink, normalizeLinks, trackComplexes } from "./complex";
 import { LayoutNode, PaneNode, Side, SplitNode, Tab, WorkspaceData, FloatingWindow } from "./types";
@@ -146,7 +146,7 @@ export function normalize(node: LayoutNode): LayoutNode | null {
       if (i < node.active) node.active--;
       return false;
     });
-    if (node.tabs.length === 0 && !node.name) return null; // (a named pane stays, empty)
+    if (vanishes(node)) return null;
     normalizeLinks(node);
     node.active = Math.max(0, Math.min(node.active, node.tabs.length - 1));
     return node;
@@ -382,17 +382,21 @@ function draggedTabs(root: LayoutNode, subject: DragSubject): { pane: PaneNode; 
 }
 
 /**
- * Take dragged tabs out of their pane, which keeps an active tab (the next one, if it was
- * theirs). Returns the index, among them, of the one that was active (else 0).
+ * Take `count` tabs out of a pane, from `index`; it keeps an active tab (the next one, if it
+ * was one of them). Returns the index, among them, of the one that was active (else 0).
  */
-function detachTabs(d: { pane: PaneNode; index: number; tabs: Tab[] }): number {
-  const { pane, index, tabs } = d;
+export function removeTabs(pane: PaneNode, index: number, count = 1): number {
   const a = pane.active;
-  const wasActive = Math.max(0, tabs.indexOf(pane.tabs[a]));
-  pane.tabs.splice(index, tabs.length);
-  if (a >= index + tabs.length) pane.active = a - tabs.length;
+  const wasActive = Math.max(0, a - index < count ? a - index : 0);
+  pane.tabs.splice(index, count);
+  if (a >= index + count) pane.active = a - count;
   else if (a >= index) pane.active = Math.max(0, Math.min(index, pane.tabs.length - 1));
   return wasActive;
+}
+
+/** Take dragged tabs out of their pane (see `removeTabs`). */
+function detachTabs(d: { pane: PaneNode; index: number; tabs: Tab[] }): number {
+  return removeTabs(d.pane, d.index, d.tabs.length);
 }
 
 /** Works on the forest in place. Returns where the dragged thing went, or null. */
@@ -484,8 +488,8 @@ export function applyDropRaw(root: SplitNode, subject: DragSubject, target: Drop
       return { paneId: dest.id };
     }
     const active = detachTabs(d);
-    // Its pane, emptied, goes: beside it is where it already is. (Unless the pane is named: it stays.)
-    if (d.pane.tabs.length === 0 && !d.pane.name && target.kind === "side" && target.targetId === d.pane.id) return null;
+    // Its pane, emptied, goes: beside it is where it already is.
+    if (vanishes(d.pane) && target.kind === "side" && target.targetId === d.pane.id) return null;
     moving = { type: "pane", id: genId("p"), weight: 1, tabs: d.tabs, active };
   }
 
@@ -514,7 +518,7 @@ export function applyDropRaw(root: SplitNode, subject: DragSubject, target: Drop
     // Nothing goes after a fixed last child: just before it.
     const index = kind(s).lastFixed ? Math.min(target.index, s.children.length - 1) : target.index;
     // 1/N of the split, N counting the new node but not what is leaving.
-    const staying = s.children.filter((c) => c.id !== TOMB && !(c.type === "pane" && c.tabs.length === 0 && !c.name));
+    const staying = s.children.filter((c) => c.id !== TOMB && !vanishes(c));
     moving.weight = staying.length ? staying.reduce((x, c) => x + c.weight, 0) / staying.length : 1;
     s.children.splice(index, 0, moving);
   } else {

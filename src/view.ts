@@ -658,7 +658,6 @@ export class View implements DndHost {
       this.ws.emit();
       return;
     }
-    gutter.setPointerCapture(e.pointerId);
     const startY = e.clientY;
     const rect = el.getBoundingClientRect();
     const startHeight = node.size ?? rect.height;
@@ -672,7 +671,7 @@ export class View implements DndHost {
     const token = this.ws.beginResize(`cell:${node.id}`);
     this.el.classList.add("is-resizing");
     let moved = false;
-    const move = (ev: PointerEvent) => {
+    trackPointer(e, gutter, (ev) => {
       moved = true;
       const h = Math.max(MIN_CELL, Math.round(startHeight + (startY - ev.clientY) * sign));
       node.size = h;
@@ -681,19 +680,12 @@ export class View implements DndHost {
       if (scroller && scroller.scrollHeight > scroller.clientHeight) scroller.scrollTop += anchorEdge() - anchor;
       else anchor = anchorEdge(); // (not scrollable: the browser holds the view)
       this.decorate();
-    };
-    const up = () => {
-      gutter.removeEventListener("pointermove", move);
-      gutter.removeEventListener("pointerup", up);
-      gutter.removeEventListener("pointercancel", up);
+    }, () => {
       this.el.classList.remove("is-resizing");
       if (!moved) return; // a mere press (maybe half a double click): nothing to re-render
       this.ws.endResize(token);
       this.ws.emit();
-    };
-    gutter.addEventListener("pointermove", move);
-    gutter.addEventListener("pointerup", up);
-    gutter.addEventListener("pointercancel", up);
+    });
   }
 
   private renderTabBar(node: PaneNode, ctx: Ctx): HTMLElement {
@@ -823,27 +815,21 @@ export class View implements DndHost {
       const [pa, pb] = [size(ea), size(eb)];
       const wTot = a.weight + b.weight;
       const start = horiz ? e.clientX : e.clientY;
-      s.setPointerCapture(e.pointerId);
       this.el.classList.add("is-resizing");
       // Undoable; consecutive resizes of this same splitter coalesce into one step.
       const token = this.ws.beginResize(`${parent.id}:${i}`);
-      const move = (ev: PointerEvent) => {
+      trackPointer(e, s, (ev) => {
         const na = clamp(pa + (horiz ? ev.clientX : ev.clientY) - start, 30, pa + pb - 30);
         a.weight = (wTot * na) / (pa + pb);
         b.weight = wTot - a.weight;
         ea.style.flex = `${a.weight} 1 0`;
         eb.style.flex = `${b.weight} 1 0`;
         this.decorate();
-      };
-      const up = () => {
+      }, () => {
         this.el.classList.remove("is-resizing");
         this.ws.endResize(token);
-        s.removeEventListener("pointermove", move);
-        s.removeEventListener("pointerup", up);
         this.ws.emit();
-      };
-      s.addEventListener("pointermove", move);
-      s.addEventListener("pointerup", up);
+      });
     });
     return s;
   }
@@ -1036,29 +1022,17 @@ export class View implements DndHost {
     const bar = this.elOf(paneId)?.querySelector<HTMLElement>(":scope > .carreau-tabbar");
     if (p?.type !== "pane" || !bar) return;
     bar.hidden = false; // (a cell's hidden tab bar: shown while naming)
-    const input = Object.assign(document.createElement("input"), { className: "carreau-pane-name-edit", value: p.name ?? "", placeholder: "Name", spellcheck: false });
-    const fit = () => (input.size = Math.max(6, input.value.length + 1));
     const valid = () => !input.value.trim() || this.ws.canNamePane(paneId, input.value);
-    fit();
-    input.addEventListener("input", () => {
-      fit();
-      input.classList.toggle("invalid", !valid());
+    const input = inPlaceInput("carreau-pane-name-edit", p.name ?? "", 6, {
+      placeholder: "Name",
+      onInput: () => input.classList.toggle("invalid", !valid()),
+      // (Enter on an invalid name: keep editing; leaving the field with one: cancel.)
+      finish: (commit) => {
+        if (commit && !valid()) return false;
+        if (!commit || !this.ws.namePane(paneId, input.value)) this.ws.emit(); // re-render: back to how it was
+      },
+      blurCommits: valid,
     });
-    for (const ev of ["pointerdown", "click", "dblclick", "auxclick", "contextmenu"]) input.addEventListener(ev, (e) => e.stopPropagation());
-    let done = false;
-    const finish = (commit: boolean) => {
-      if (done) return;
-      if (commit && !valid()) return; // (Enter on an invalid name: keep editing)
-      done = true;
-      if (!commit || !this.ws.namePane(paneId, input.value)) this.ws.emit(); // re-render: back to how it was
-    };
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === "Escape") {
-        e.preventDefault();
-        finish(e.key === "Enter");
-      }
-    });
-    input.addEventListener("blur", () => (valid() ? finish(true) : finish(false)));
     const label = bar.querySelector(".carreau-pane-name");
     if (label) label.replaceWith(input);
     else bar.prepend(input);
@@ -1074,29 +1048,15 @@ export class View implements DndHost {
     const tab = this.el.querySelector<HTMLElement>(`.carreau-tab[data-tab="${tabId}"]`);
     const text = tab?.querySelector<HTMLElement>(".carreau-tab-short");
     if (!tab || !text || !tab.getClientRects().length) return; // hidden tab bar: nothing to edit
-    const input = Object.assign(document.createElement("input"), { className: "carreau-tab-edit", value: text.textContent ?? "", spellcheck: false });
-    const before = input.value;
-    const fit = () => (input.size = Math.max(4, input.value.length + 1));
-    fit();
-    input.addEventListener("input", fit);
-    // Interacting with the field is neither a drag nor a click on the tab.
-    for (const ev of ["pointerdown", "click", "dblclick", "auxclick"]) input.addEventListener(ev, (e) => e.stopPropagation());
-    let done = false;
-    const finish = (commit: boolean) => {
-      if (done) return;
-      done = true;
-      const title = input.value.trim();
-      if (onCancel && (!commit || !title)) onCancel();
-      else if (commit && title && title !== before) this.ws.renameTab(tabId, title);
-      else this.ws.emit(); // re-render: back to the plain title
-    };
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === "Escape") {
-        e.preventDefault();
-        finish(e.key === "Enter");
-      }
+    const before = text.textContent ?? "";
+    const input = inPlaceInput("carreau-tab-edit", before, 4, {
+      finish: (commit) => {
+        const title = input.value.trim();
+        if (onCancel && (!commit || !title)) onCancel();
+        else if (commit && title && title !== before) this.ws.renameTab(tabId, title);
+        else this.ws.emit(); // re-render: back to the plain title
+      },
     });
-    input.addEventListener("blur", () => finish(true));
     tab.replaceChild(input, text);
     tab.scrollIntoView({ block: "nearest", inline: "nearest" });
     input.focus();
@@ -1158,11 +1118,10 @@ export class View implements DndHost {
       handle.addEventListener("pointerdown", (e) => {
         e.preventDefault();
         e.stopPropagation();
-        handle.setPointerCapture(e.pointerId);
         this.el.classList.add("is-resizing");
         const start = { ...win.rect };
         const [x0, y0] = [e.clientX, e.clientY];
-        const move = (ev: PointerEvent) => {
+        trackPointer(e, handle, (ev) => {
           const { clientWidth: W, clientHeight: H } = this.el;
           const [dx, dy] = [ev.clientX - x0, ev.clientY - y0];
           const r = { ...start };
@@ -1178,15 +1137,10 @@ export class View implements DndHost {
           }
           win.rect = r;
           this.placeFloat(el, win);
-        };
-        const up = () => {
+        }, () => {
           this.el.classList.remove("is-resizing");
-          handle.removeEventListener("pointermove", move);
-          handle.removeEventListener("pointerup", up);
           this.ws.emit();
-        };
-        handle.addEventListener("pointermove", move);
-        handle.addEventListener("pointerup", up);
+        });
       });
       el.append(handle);
     }
@@ -1225,7 +1179,6 @@ export class View implements DndHost {
     e.preventDefault();
     e.stopPropagation();
     const grip = handle ?? (e.currentTarget as HTMLElement); // the title bar, or the window
-    grip.setPointerCapture(e.pointerId);
     const el = grip.closest(".carreau-float") as HTMLElement;
     const { x, y } = win.rect;
     const [x0, y0] = [e.clientX, e.clientY];
@@ -1276,23 +1229,70 @@ export class View implements DndHost {
         startHold(ev.clientX, ev.clientY);
       }
     };
-    const up = (ev: PointerEvent) => {
-      grip.removeEventListener("pointermove", moveWin);
-      grip.removeEventListener("pointerup", up);
+    trackPointer(e, grip, moveWin, (ev, cancelled) => {
       clearHold();
       // Final hit test and commit *while the window is still see-through*: otherwise the
       // hit test would find the window itself, and nothing would dock.
-      if (this.dnd.state) {
-        this.dnd.move(ev);
-        this.dnd.end(true);
-      }
+      if (this.dnd.state && !cancelled) this.dnd.move(ev);
+      if (this.dnd.state) this.dnd.end(!cancelled);
       this.el.classList.remove("is-moving-float");
       el.classList.remove("docking");
       if (!this.dnd.state) this.ws.emit();
-    };
-    grip.addEventListener("pointermove", moveWin);
-    grip.addEventListener("pointerup", up);
+    });
   }
+}
+
+/**
+ * Follow a pointer gesture (the pointer captured by `el`): `onMove` on each move, then `onEnd`
+ * once, on release, or when the browser takes the pointer away (`cancelled`).
+ */
+function trackPointer(e: PointerEvent, el: HTMLElement, onMove: (ev: PointerEvent) => void, onEnd: (ev: PointerEvent, cancelled: boolean) => void): void {
+  el.setPointerCapture(e.pointerId);
+  const end = (ev: PointerEvent) => {
+    el.removeEventListener("pointermove", onMove);
+    el.removeEventListener("pointerup", end);
+    el.removeEventListener("pointercancel", end);
+    onEnd(ev, ev.type === "pointercancel");
+  };
+  el.addEventListener("pointermove", onMove);
+  el.addEventListener("pointerup", end);
+  el.addEventListener("pointercancel", end);
+}
+
+/**
+ * A text field to edit something in place, as wide as its text (at least `minSize`). Enter
+ * commits, Escape cancels, leaving it commits (unless `blurCommits` says no: then it cancels).
+ * `finish` runs once, unless it returns false (keep editing). Clicks and drags on it go no
+ * further (they'd be clicks or drags of what it's in).
+ */
+function inPlaceInput(
+  className: string,
+  value: string,
+  minSize: number,
+  opts: { placeholder?: string; onInput?: () => void; finish: (commit: boolean) => boolean | void; blurCommits?: () => boolean },
+): HTMLInputElement {
+  const input = Object.assign(document.createElement("input"), { className, value, placeholder: opts.placeholder ?? "", spellcheck: false });
+  const fit = () => (input.size = Math.max(minSize, input.value.length + 1));
+  fit();
+  input.addEventListener("input", () => {
+    fit();
+    opts.onInput?.();
+  });
+  for (const ev of ["pointerdown", "click", "dblclick", "auxclick", "contextmenu"]) input.addEventListener(ev, (e) => e.stopPropagation());
+  let done = false;
+  const finish = (commit: boolean) => {
+    if (done) return;
+    done = true; // (first: what it does can re-render, removing the field, which blurs it)
+    if (opts.finish(commit) === false) done = false;
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === "Escape") {
+      e.preventDefault();
+      finish(e.key === "Enter");
+    }
+  });
+  input.addEventListener("blur", () => finish(opts.blurCommits?.() ?? true));
+  return input;
 }
 
 /** Move a node, preserving its state (iframes, focus, ...) where `moveBefore` exists. */

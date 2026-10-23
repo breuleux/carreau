@@ -45,9 +45,11 @@ import {
   panes,
   pathTo,
   removeNode,
+  removeTabs,
   replaceNode,
   sideAxis,
   sideIsStart,
+  staysEmpty,
   swapNodes,
   union,
 } from "./model";
@@ -478,28 +480,19 @@ export class Workspace {
   // -------------------------------------------------------------------------
   // Structural operations
 
-  /** Pull a pane of the main tree out into a floating window (not the last pane). */
+  /** Pull a pane of the main tree out into a floating window (not the last pane): a float drop. */
   float(paneId: string, rect: Rect): boolean {
     if (!this.inMain(paneId) || this.node(paneId)?.type !== "pane") return false;
-    // In one step (one render): the pane is never in no tree at all, so its contents (an
-    // iframe's state, say) are moved along, never dropped and made again.
-    return this.record(() => {
-      let pane: LayoutNode | null = null;
-      const { trees } = inForest(structuredClone(this.trees()), (forest) => {
-        pane = find(forest, paneId)!.node;
-        removeNode(forest, paneId);
-      });
-      if (!trees[0] || !pane) return false;
-      this.setTrees([...trees, pane], [...this.floating, { root: pane, rect }]);
-      return true;
-    });
+    const result = this.tryDrop({ kind: "pane", paneId }, { kind: "float", paneId });
+    if (result) this.commitDrop(result, undefined, rect);
+    return !!result;
   }
 
   /** Whether a tab can be closed: anything but the very last tab of the main tree. */
   canCloseTab(tabId: string): boolean {
     const main = panes(this.root);
-    // (The main tree's last tab: not if its pane would go. A named pane stays, empty.)
-    return !(main.length === 1 && main[0].tabs.length === 1 && main[0].tabs[0].id === tabId && !main[0].name);
+    // (The main tree's last tab: not if its pane would go.)
+    return !(main.length === 1 && main[0].tabs.length === 1 && main[0].tabs[0].id === tabId && !staysEmpty(main[0]));
   }
 
   // -------------------------------------------------------------------------
@@ -934,8 +927,7 @@ export class Workspace {
         for (const id of closed) {
           const ft = findTab(forest, id);
           if (!ft) continue;
-          ft.pane.tabs.splice(ft.index, 1);
-          if (ft.index < ft.pane.active || ft.pane.active >= ft.pane.tabs.length) ft.pane.active = Math.max(0, ft.pane.active - 1);
+          removeTabs(ft.pane, ft.index);
         }
       });
     // The selection went with what was cleared: to what's left of it (the innermost survivor).
@@ -1008,8 +1000,7 @@ export class Workspace {
       if (op.kind === "pane") return removeNode(forest, op.id);
       const ft = findTab(forest, op.id);
       if (!ft) return false;
-      ft.pane.tabs.splice(ft.index, 1);
-      if (ft.index < ft.pane.active || ft.pane.active >= ft.pane.tabs.length) ft.pane.active = Math.max(0, ft.pane.active - 1);
+      removeTabs(ft.pane, ft.index);
     };
     return this.closeChange(
       (forest) => {
@@ -1079,8 +1070,8 @@ export class Workspace {
         const inner = tab.group?.children[0];
         return { select: inner ? this.descend(inner) : pane.id, activate: { paneId: pane.id, tabId: tab.id } };
       }
-      // A named pane stays, empty (a tab of it closed): the focus too.
-      if (gone !== null && pane.name) return { select: pane.id };
+      // A pane that stays, empty (a tab of it closed): the focus too.
+      if (gone !== null && staysEmpty(pane)) return { select: pane.id };
       // The pane disappears: up until a parent has something left.
       let x: LayoutNode = pane;
       let holder: PaneNode | null = null;

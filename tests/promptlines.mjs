@@ -1,5 +1,6 @@
-// A prompt column's lines: above its first cell and below its last (above the prompt), each offers
-// inserting at that end, and as a mini line, splitting the column's pane on that side.
+// A prompt column's lines: none above its first cell when the cells don't reach the column's top
+// (not a separator: the empty space above takes drops); below its last cell, the gap above the
+// prompt: inserting there.
 import { chromium } from "playwright";
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1300, height: 800 } });
@@ -21,10 +22,5 @@ for (const [label, i, fy] of [["first top", 0, 0.004], ["last bottom", -1, 0.996
   await page.waitForTimeout(400);
   console.log("  minis:", await page.evaluate(() => (window.view.drag.minis?.items ?? []).map((m) => `${m.choice.target.kind}/${m.choice.target.side ?? ""}`).join(",")));
 }
-const m = await page.evaluate(() => { const r = window.view.drag.minis.items[0].rect; const b = window.view.el.getBoundingClientRect(); return { x: r.x + b.left + r.w / 2, y: r.y + b.top + r.h / 2 }; });
-await page.mouse.move(m.x, m.y, { steps: 3 });
-console.log("on mini:", await page.evaluate(() => JSON.stringify(window.view.drag.active?.target)));
-await page.screenshot({ path: "/tmp/minibottom.png" });
-await page.mouse.up(); await page.waitForTimeout(200);
-console.log("after drop:", await page.evaluate(() => { const s = (n) => n.type === "pane" ? n.tabs.map((t) => t.group ? s(t.group) : t.title).join("+") : n.type + "(" + (n.children ?? []).map(s).join(", ") + ")"; return s(window.ws.root); }));
+await page.keyboard.press("Escape"); await page.mouse.up();
 await browser.close();

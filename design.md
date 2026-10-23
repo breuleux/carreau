@@ -416,14 +416,13 @@ Commands:
   * For a floating window being docked, Esc returns to plain moving. The window is opaque again and docking needs a new one-second hold.
 * **Releasing** over an active choice commits it: replace all trees with the result, close emptied windows, add a window for `float`, and select the pane that received the drop.
 
-### Hovered pane
+### What's under the cursor
 
-The hovered pane is the first `.carreau-pane` under the cursor, in the main tree or in a floating window, found with `elementsFromPoint`. The topmost window wins.
+In order: a **line** (see below; lines don't depend on any pane), then the hovered pane's **tab bar**, then a **scroll split's empty space**, then the hovered pane's **zones**.
 
-* Pitfall: when the cursor is over a splitter gap, or anywhere inside the workspace that is not a pane, **keep the previously hovered pane**. Otherwise indicators flicker off while crossing borders.
-  * This includes the **gaps between a group's parts**. There, the hit test finds the holder's body, and that must count as a gap, not as hovering the whole holder.
-* Lines, tab dots and zones are rebuilt when the hovered pane changes, and when anything scrolls (see [Scroll splits](#scroll-splits)).
-* **A scroll split's empty space** (its scroller, where there's no cell: all of an empty prompt column, the space above a sticky column's cells, the gaps between cells) **takes drops itself**: there, the hovered pane is the split's **holder** (the pane showing it as a group), so that its **border lines show near the edges** (taking precedence, as usual; and since its edge thirds aren't offered there, its lines also offer **its own sides**, which at the workspace's edges, the holder being the root, is the only way to split), and elsewhere in the space, instead of the holder's own zones, the drop inserts into the split where the cursor is along its axis: before the first cell whose middle is past the cursor (an empty one: as its first cell). Preview: the empty area (`Choice.rect`); at an end, the end cell's edge third; between two cells, the straddle. A line whose hit area reaches into the space (the hovered pane's) still takes precedence. (`spaceChoice`, cached by split and index.)
+* **The hovered pane** (for its tab bar and zones) is the first `.carreau-pane` under the cursor, in the main tree or in a floating window, found with `elementsFromPoint`. The topmost window wins. Over a gap, there is none (the gap's line covers it). The **gaps between a group's parts** show the holder's body: they count as gaps, not as the holder.
+* Tab dots and zones are rebuilt when the hovered pane changes; lines once per drag, and again when anything scrolls (see [Scroll splits](#scroll-splits)).
+* **A scroll split's empty space** (its scroller, where there's no cell: all of an empty prompt column, the space above a sticky column's cells, the gaps between cells) **takes drops itself**, instead of its holder's zones (the holder: the pane showing it as a group). Near its edges (20%, `SPACE_ZONE`, on each side, except at a fixed last child's end: a prompt column's bottom): split beside the holder, like its edge third. Elsewhere: insert into the split where the cursor is along its axis, before the first cell whose middle is past the cursor (an empty one: as its first cell). Preview: the empty area (`Choice.rect`); at an end, the end cell's edge third; between two cells, the straddle. (`spaceChoice`, `spaceZone`, cached.)
 
 ### Drop targets (model)
 
@@ -497,39 +496,37 @@ type DragSubject =
 
 Every candidate choice in the UI is computed through this function, so the UI never offers pointless drops. A window being docked is always excluded from the trees.
 
-### Choices per side of the hovered pane P
+### Lines: one per separator
 
-For each side S of P, working within **P's own tree** (main or window):
+The lines are computed **once per drag** (`separators`), for every tree but a window being docked. A **separator** is:
 
-1. **The nodes on the line**: walk up from P (from a group's root to its holder pane), collecting each ancestor whose border on side S lies on P's border (within 1.5px). Stop at the first one that doesn't, or at the tree's root. A window's edges thus behave like the workspace edges.
-   * Where a scroll split is along S's axis, its border there is **where its content ends** (its end child's edge), not its box: a short scroll-column still takes insertions right below its last cell.
-   * A group holder's border coincides with its group's on the sides away from its header. Below a group (above the holder's header), the walk stops.
-2. **Between siblings**: if, on the way up, P's side borders a sibling (the parent splits along S's axis), the walk stops there, and the outermost choice is **between** those two siblings: `{between, split, index}`, sized 1/N. Its span is the extent of the node next to the gap on P's side. Call such a side a *straddling* side.
-3. **Insertions**: every node on the line whose kind takes side S gives a `side` choice on it, if the drop is valid. That includes:
-   * a scroll split along S's axis, at its start/end: inserting a first/last cell. Its preview is the third of the end cell next to the edge, consistent with the between-cells previews, and its span is the end cell's. The line's **hit area also reaches a few pixels outward** (5px), over the scroll split's border and the holder's header edge, so that aiming right at the very edge works.
-   * the holder of a group, and nodes further out, when their border is the same: they share the line (its other choices: mini lines).
-4. **Same drop, once**: choices whose results are the same layout **including sizes** (`shape(tree, true)`, all trees) are the same drop. Keep the **innermost**. Leave out those P's own edge third on S already offers, and the between choice's.
-   * Sizes matter: the top of a column whose first child is P (1/N of the column) is *not* P's own top third (half of P), so both are offered, the former on the line.
-   * P's own `side` choices are its edge thirds, never line levels. A cell of a scroll split has no thirds along the split's axis ("beside" zones would look like splits, but cells just stack): there, the lines offer the separators instead.
-   * More generally, **nothing splits a scroll split's cell, or anything inside it, along the split's axis** (`splitsInCell`, applied to every candidate drop: thirds, line levels, between): a `side` drop along the axis on a node with `inCell` set to it, or a `between` drop into a split along that axis inside a cell. Stacking something above a pane in a row that is a scroll-column's cell, or "splitting" the cell itself up or down, would be no different from inserting before or after the cell, which the scroll split's own insertions (between its cells, at its start and end) offer. Across the axis, and inside groups (their layouts are their own), splitting stays.
-5. Each choice has a `span`: its node's visible extent along the edge, in pixels. Choices are ordered **outermost first** (the between choice, then outer nodes to inner ones).
-6. While the cursor is within the current line's hit area, the hovered pane is kept, even if the pane under the cursor is another one (e.g. the holder, over its header).
+* **a gap between two siblings** of a split: its main choice is the insertion **between** them (`{between, split, index}`, sized 1/N);
+* **an edge of a tree** (the workspace's, a window's): its main choice is beside the whole tree (the root's side);
+* **a scroll split's end** along its axis, **where its holder's edge isn't** (the holder's tab bar is there; elsewhere, the holder's own separator covers it): its main choice is inserting a first/last cell.
+
+Its other choices, shown as **mini lines**, are the nodes **whose border lies on it** (within 1.5px), on either side, whose kind takes that side (`borderChoices`: a node, then what's inside it, through groups; purely geometric). On a gap, those of the node before are the line's *near* side (`levels`, after the main one), those of the node after, its *far* side (`far`). Rules:
+
+* **Same drop, once**: choices whose results are the same layout **including sizes** (`shape(tree, true)`, all trees) are the same drop; the outermost is kept (the between choice first). Sizes matter: inserting beside a node (half of it) and between it and its sibling (1/N) are different drops. A line whose main choice another line already has isn't added (a prompt column's end: the gap above the prompt has it).
+* No gap choice (a no-op, e.g. right next to the dragged pane): the near side's choices make the line; none either: the far side's.
+* **Nothing splits a scroll split's cell, or anything inside it, along the split's axis** (`splitsInCell`, applied to every candidate drop: thirds, lines, between): a `side` drop along the axis on a node with `inCell` set to it, or a `between` drop into a split along that axis inside a cell. That would be no different from inserting before or after the cell, which the scroll split's own separators offer. Across the axis, and inside groups (their layouts are their own), splitting stays.
+* A side choice on a scroll split along its axis (its start/end) is previewed on its end cell (the third next to the edge, like the between-cells previews).
+* Each choice has a `span`: its node's visible extent along the line (a gap's: its split's). The line's is the union. Choices are ordered **outermost first**.
+* A gap scrolled out of view gets no line.
 
 ### The border line
 
 A border line is shown **only while the cursor is over it**: the cursor must be within the line's band across the edge. Nothing is drawn while merely approaching a border. If two bands contain the cursor (at a corner), pick the side whose border is nearest.
 
-**Geometry**: the line is 5px thick; its hit area reaches 8px inward (easier to aim at than it looks).
+**Geometry**: the line is 5px thick; its hit area reaches 8px inward (easier to aim at than it looks), and along it, its span.
 
-* At the edge of the workspace or of a window, it lies inside P along the edge.
-* On a straddling side, P's half runs from the middle of the splitter gap inwards into P.
-* Pitfall: the **hit area** of a gap's line must cover the *whole* gap (and as far into either side): since the hovered pane is kept over gaps, a narrower one would leave part of the gap matching nothing, and the line would vanish right on the separator.
+* At an edge (a tree's, a scroll split's end), it lies inside, along the edge.
+* At a gap, it is centered on the gap, and its hit area covers **all of the gap**, and 8px from the middle into either side: there's no pane over the gap, and nothing else would take it.
 
 **The main line, and mini lines** (no dashes: the line isn't split):
 
 * **The line** is drawn solid, for its **main choice** at the cursor's position along it: the outermost choice covering that position (`mainChoice`). That's the active choice while the cursor is on the line.
-* **A gap between two siblings has one line**, centered on the gap (`LINE` thick), its hit area reaching as far into either side (8px from the middle): **the same whichever side is hovered**. Its main choice is the insertion between them; its options are both sides' own (`SideLine.far`: the far side's, from the panes across touching the gap). A line has a `key` (the gap: split and index; else the edge and its choices), the same seen from either side, so that crossing the gap neither restarts the wait nor dismisses the mini lines. (Before, each side had its own half and options, and a cursor wobbling across the gap kept restarting everything: mini lines, and dashes before them, came up inconsistently.)
-* **Mini lines**: after the cursor stays on a line for **250ms** (`MINI_DELAY`; if it has other choices there), its **other choices there pop out next to the cursor**: each a short line (44px, 6px thick) parallel to it, centered on the cursor's position along it, **on the side of what it would split** (the hovered side's choices on that side, the far side's on the other; at a workspace or window edge, inward), **the widest nearest the line**, **evenly spaced**: the same gap (3px) from the line to the first as between them. They stay where they popped out, so that the cursor can go to them.
+* A line has a `key` (the gap: split and index; an edge: its tree or scroll split and side), so that moving along it neither restarts the wait nor dismisses the mini lines.
+* **Mini lines**: after the cursor stays on a line for **250ms** (`MINI_DELAY`; if it has other choices there), its **other choices there pop out next to the cursor**: each a short line (44px, 6px thick) parallel to it, centered on the cursor's position along it, **on the side of what it would split** (the near side's choices on that side, the far side's on the other; at an edge, inward), **the widest nearest the line**, **evenly spaced**: the same gap (3px) from the line to the first as between them. They stay where they popped out, so that the cursor can go to them.
   * A mini line is **grey, with the stretch of the full line its choice covers in white** (the full line: the union of the choices' spans): a choice narrower than the line shows as such.
   * **Selecting**: on a mini line, its choice is active (preview, chevrons), and the mini line gets a **drop shadow** (`.carreau-mini.active`): no change of size or outline; while they're out, the whole **corridor** they span (the line included) belongs to the line: elsewhere in it, the main choice. Leaving the line and the corridor (or the line changing) dismisses them, and the wait starts again on the next line.
   * Pitfall: the corridor matters: between the line's hit area and the far side's mini lines, the cursor is over the neighbouring pane, which would become the hovered one and dismiss them.
@@ -916,8 +913,8 @@ In a `scroll-column`, children take their **natural height** (their content deci
 * Don't test nesting ("a pane inside a scroll split"): pass contexts down (`childContext`) and let each node decide (`paneDisplay`); ask kinds for structural rules (`sides`, `navStep`).
 * Navigate with logical rects from weights, not DOM rects.
 * An overlay with `pointer-events: none` needs manual hit-testing, and `elementsFromPoint` to find the pane underneath.
-* Keep the hovered pane while over gaps inside the workspace. Make straddling hit areas cover the whole gap.
-* Dedupe line levels by their *resulting layout, sizes included*, keeping the innermost, and leave out what the hovered pane's own thirds and the between choice already offer.
+* Lines are separators, not sides of the hovered pane: a gap's hit area must cover the whole gap.
+* Dedupe line choices by their *resulting layout, sizes included*.
 * Mini lines: keep the corridor from the line to them the line's, or they can't be reached.
 * Compute "1/N" while excluding what is leaving the split.
 * Weight swaps on pane swap keep the geometry fixed, which is what makes swap/unswap exact.

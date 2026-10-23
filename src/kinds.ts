@@ -275,6 +275,19 @@ export function isScroll(n: LayoutNode): n is SplitNode {
   return kind(n).scroll;
 }
 
+/**
+ * Whether a pane stays when it has no tabs (normalization keeps it, a drop doesn't count on its
+ * leaving): a named pane, until it's closed. The one place deciding it.
+ */
+export function staysEmpty(p: PaneNode): boolean {
+  return !!p.name;
+}
+
+/** A pane that has no tabs left and goes (see `staysEmpty`). */
+export function vanishes(n: LayoutNode): boolean {
+  return n.type === "pane" && n.tabs.length === 0 && !staysEmpty(n);
+}
+
 /** A node with children of its own (rows, columns, scroll splits, slots): not a leaf. */
 export function isSplit(n: LayoutNode): n is SplitNode {
   return !kind(n).leaf;
