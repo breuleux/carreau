@@ -1,7 +1,7 @@
 // Drag & drop: what can be dropped where (border lines, tab bar, the hovered pane's zones),
 // and the overlay showing it. Relationships come from the LayoutIndex and node kinds.
 
-import { grey, levelColor } from "./colors";
+import { grey } from "./colors";
 import {
   DragSubject,
   DropTarget,
@@ -21,6 +21,7 @@ import {
   canMerge,
   edge,
   linkedRuns,
+  opposite,
   findTab,
   inRect,
   intersect,
@@ -33,6 +34,7 @@ import {
   sideIsStart,
   slice,
   span,
+  union,
 } from "./model";
 import { Workspace } from "./workspace";
 
@@ -76,14 +78,15 @@ export interface SideLine {
   /** Hit area (same convention). Can reach past the band: across a gap between siblings, or
    *  a few pixels outward at a scroll split's start/end. */
   hit: [number, number];
-  /** The line borders the gap between two siblings. */
-  straddles: boolean;
   /**
-   * There: the insertion between them, which is the same seen from either side. It's also
-   * drawn on the far half of the gap, along the far sibling (`span`), so that both halves
-   * show it, and light up together.
+   * The line borders the gap between two siblings: it's one line, centered on the gap, the
+   * same whichever side is hovered (its main choice: the insertion between them).
    */
-  mirror?: { choice: Choice; span: [number, number] };
+  straddles: boolean;
+  /** There: the far side's own choices (its nodes' sides), shown as mini lines on that side. */
+  far: Choice[];
+  /** What line it is (the same seen from either side of a gap): to keep its mini lines. */
+  key: string;
   /** the hovered pane's edge coordinate on that side */
   edge: number;
 }
@@ -128,6 +131,9 @@ export interface DragState {
   inCenter: boolean;
   near: SideLine | null;
   active: Choice | null;
+  /** On a line: its main choice (the line itself), and its mini lines, once popped out. */
+  main?: Choice | null;
+  minis?: { line: SideLine; main: Choice; items: { choice: Choice; rect: Rect }[] } | null;
   /** Over a scroll split's empty space: inserting there (cached: computing a drop is costly). */
   space: { key: string; choice: Choice | null } | null;
   lastEvent?: PointerEvent;
@@ -138,10 +144,15 @@ const SVGNS = "http://www.w3.org/2000/svg";
 const LINE = 5;
 /** How far inward a line can be hit (more than it's thick: easier to aim at). */
 const LINE_HIT = 8;
-const DASH = 18;
-const DASH_GAP = 1;
+/** Mini lines (a line's other choices, popped out next to the cursor after a moment). */
+const MINI_DELAY = 250;
+const MINI_LEN = 44;
+const MINI_T = 6;
+const MINI_GAP = 3;
 /** How far outward a scroll split's start/end separator can be hit. */
 const EDGE_REACH = 5;
+/** The arms of the chevrons on a line choice's future parent's corners. */
+const CHEVRON = 16;
 /** At a complex's edge: how far inside it its join dot is, from the gap's plain dot. */
 const JOIN_OFFSET = 7;
 /** Center icons' radius; tab link icons' radius. */
@@ -155,6 +166,9 @@ const ESC_COOLDOWN = 500;
 
 export class DragDrop {
   state: DragState | null = null;
+  /** The line the mini lines are about to pop out of (after `MINI_DELAY`; by key), and the timer. */
+  private miniLine: string | null = null;
+  private miniTimer: ReturnType<typeof setTimeout> | null = null;
   /** The layout's index, during a drag (it doesn't change meanwhile). */
   private index: LayoutIndex | null = null;
   /** No drag may start before this time. */
@@ -178,6 +192,7 @@ export class DragDrop {
     const d = this.state;
     if (d?.lastEvent) {
       d.hoverPane = null;
+      d.minis = null;
       this.move(d.lastEvent);
     }
   }
@@ -224,6 +239,7 @@ export class DragDrop {
     if (!d) return;
     this.state = null;
     this.index = null;
+    this.waitForMinis(null);
     d.ghost.remove();
     d.sourceEl.classList.remove("carreau-drag-source");
     this.host.el.classList.remove("is-dragging");
@@ -267,6 +283,18 @@ export class DragDrop {
     const base = host.el.getBoundingClientRect();
     const px = ev.clientX - base.left;
     const py = ev.clientY - base.top;
+
+    // While mini lines are out, the corridor they span (the line included) is the line's: on a
+    // mini line, its choice; elsewhere in it, the line's main choice. (The line, and the
+    // hovered pane, stay.)
+    if (d.minis && inRect(union(d.minis.items.map((m) => grow(m.rect, MINI_GAP)))!, px, py)) {
+      const mini = d.minis.items.find((m) => inRect(grow(m.rect, MINI_GAP / 2), px, py));
+      d.near = d.minis.line;
+      d.active = mini?.choice ?? d.minis.main;
+      d.inCenter = false;
+      this.draw();
+      return;
+    }
 
     // Which pane is under the cursor? Over gaps, keep the current one. Over a scroll split's
     // empty space (its scroller, where there's no cell): the scroll split's holder (the pane
@@ -314,7 +342,8 @@ export class DragDrop {
       const onLines = d.lines.filter((l) => inLine(l, px, py));
       onLines.sort((a, b) => Math.abs(across(a.side, px, py) - a.edge) - Math.abs(across(b.side, px, py) - b.edge));
       d.near = onLines[0] ?? null;
-      if (d.near) d.active = dashAt(d.near, along(d.near.side, px, py));
+      // On a line: its main choice (the outermost one there); the others pop out as mini lines.
+      if (d.near) d.active = d.main = mainChoice(d.near, along(d.near.side, px, py));
       else if (d.tabBar && inRect(d.tabBar.rect, px, py)) {
         // Over the middle of a tab it can merge with: merge; elsewhere, the nearest gap.
         const link = d.tabBar.links.find((l) => px >= l.hit[0] && px <= l.hit[1]);
@@ -338,6 +367,51 @@ export class DragDrop {
         }
       }
     }
+    // Mini lines: they pop out after the cursor stays on a line for a moment; they go when it
+    // leaves the line (and them).
+    if (!d.near || (d.minis && d.minis.line.key !== d.near.key)) d.minis = null;
+    this.waitForMinis(d.near && d.near.levels.length + d.near.far.length > 1 ? d.near.key : null);
+    this.draw();
+  }
+
+  /** (Re)start the wait before a line's mini lines pop out (by key; null: none to wait for). */
+  private waitForMinis(line: string | null): void {
+    if (line === this.miniLine) return;
+    if (this.miniTimer) clearTimeout(this.miniTimer);
+    this.miniTimer = null;
+    this.miniLine = line;
+    if (line) this.miniTimer = setTimeout(() => this.popMinis(), MINI_DELAY);
+  }
+
+  /**
+   * Pop out the mini lines of the line the cursor is on: its other choices there, each a short
+   * line parallel to it, next to the cursor, on the side of what it would split (a gap's far
+   * side's choices on the far side), the most local ones nearest the line. They stay where they
+   * popped out, so that the cursor can go to them.
+   */
+  private popMinis(): void {
+    const d = this.state;
+    const line = d?.near;
+    this.miniTimer = null;
+    if (!d?.lastEvent || !line || line.key !== this.miniLine || !d.main || d.minis) return;
+    const base = this.host.el.getBoundingClientRect();
+    const v = along(line.side, d.lastEvent.clientX - base.left, d.lastEvent.clientY - base.top);
+    const covers = (c: Choice) => c.span[0] - 1 <= v && v <= c.span[1] + 1;
+    // Evenly spaced from the line (the same gap from it to the first as between them; while
+    // they're out, the corridor they span is the line's, so the cursor can't fall off between).
+    const [inner, outer] = [line.band[1], line.band[0]];
+    const stretch: [number, number] = [v - MINI_LEN / 2, v + MINI_LEN / 2];
+    const step = MINI_T + MINI_GAP;
+    // The widest splits nearest the line.
+    const widest = (a: Choice, b: Choice) => b.span[1] - b.span[0] - (a.span[1] - a.span[0]);
+    const near = line.levels.filter((c) => c !== d.main && covers(c)).sort(widest);
+    const far = line.far.filter(covers).sort(widest);
+    const items = [
+      ...near.map((choice, i) => ({ choice, rect: bandAt(line, inner + MINI_GAP + i * step, inner + MINI_GAP + i * step + MINI_T, stretch) })),
+      ...far.map((choice, i) => ({ choice, rect: bandAt(line, outer - MINI_GAP - i * step - MINI_T, outer - MINI_GAP - i * step, stretch) })),
+    ];
+    if (!items.length) return;
+    d.minis = { line, main: d.main, items };
     this.draw();
   }
 
@@ -515,7 +589,7 @@ export class DragDrop {
    * insertion between the two. Levels come outermost first. Insertions that are the same
    * (same resulting shape) appear once, innermost; those P's own edge thirds offer don't.
    */
-  private lines(idx: LayoutIndex, paneId: string, onlySide?: Side, ownSides = false): SideLine[] {
+  private lines(idx: LayoutIndex, paneId: string, onlySide?: Side, ownSides = false, withFar = true): SideLine[] {
     const { host } = this;
     const P = host.pxRect(paneId);
     const Pvis = host.visRect(paneId);
@@ -563,17 +637,13 @@ export class DragDrop {
       const third = ownSides ? null : this.zoneSide(pe0, side);
       if (third) seen.add(key(third.result));
       const levels: Choice[] = [];
-      let mirror: SideLine["mirror"];
       if (between) {
         const target: DropTarget = { kind: "between", splitId: between.split.id, index: between.index };
         const result = this.tryDrop(target);
         const sp = vspan((start ? between.after : between.before).id);
         if (result && sp) {
           seen.add(key(result));
-          const choice: Choice = { target, result, span: sp, straddle: [between.before.id, between.after.id] };
-          levels.push(choice);
-          const far = vspan((start ? between.before : between.after).id);
-          if (far) mirror = { choice, span: far };
+          levels.push({ target, result, span: sp, straddle: [between.before.id, between.after.id] });
         }
       }
       const sides: Choice[] = [];
@@ -592,21 +662,39 @@ export class DragDrop {
       levels.push(...sides.reverse());
       if (!levels.length) continue;
 
-      // Where the line is (inward from P's edge). Between siblings: our half starts at the
-      // middle of the gap, and the hit area covers the whole gap. At a scroll split's end, it
-      // reaches a little outward (the end can be flush with the viewport's).
+      // Where the line is (inward from P's edge). Between siblings: one line, centered on the
+      // gap, its hit area reaching as far into either side. At a scroll split's end, it reaches
+      // a little outward (the end can be flush with the viewport's).
       const inward = (c: number) => (start ? c - pe : pe - c);
       let line: [number, number] = [0, LINE];
       let hit: [number, number] = [0, LINE_HIT];
+      const far: Choice[] = [];
       if (between) {
         const [first, last]: Side[] = sideAxis[side] === "row" ? ["left", "right"] : ["top", "bottom"];
         const aEnd = edge(host.pxRect(between.before.id)!, last);
         const bStart = edge(host.pxRect(between.after.id)!, first);
         const mid = inward((aEnd + bStart) / 2);
-        line = [mid, mid + LINE];
-        hit = [inward(start ? aEnd : bStart), mid + LINE_HIT];
+        line = [mid - LINE / 2, mid + LINE / 2];
+        hit = [Math.min(mid - LINE_HIT, inward(start ? aEnd : bStart)), mid + LINE_HIT];
+        // The far side's own choices: those of the panes across, touching the gap (their
+        // nodes' sides, not the insertion between, which is this line's).
+        const other = start ? between.before : between.after;
+        const otherEdge = edge(host.pxRect(other.id)!, opposite[side]);
+        const seenFar = new Set<string>();
+        if (withFar)
+          for (const q of panes(other)) {
+            const Q = host.pxRect(q.id);
+            if (!Q || Math.abs(edge(Q, opposite[side]) - otherEdge) > 1.5) continue;
+            for (const c of this.lines(idx, q.id, opposite[side], false, false)[0]?.levels ?? []) {
+              const k = JSON.stringify(c.target);
+              if (c.target.kind === "between" || seenFar.has(k)) continue;
+              seenFar.add(k);
+              far.push(c);
+            }
+          }
       } else if (levels.some((c) => c.edge)) hit = [-EDGE_REACH, LINE_HIT];
-      out.push({ side, levels, band: line, hit, straddles: !!between, mirror, edge: pe });
+      const lineKey = between ? `b:${between.split.id}:${between.index}` : `e:${side}:${Math.round(pe)}:${levels.map((c) => JSON.stringify(c.target)).join("|")}`;
+      out.push({ side, levels, band: line, hit, straddles: !!between, far, key: lineKey, edge: pe });
     }
     return out;
   }
@@ -711,33 +799,64 @@ export class DragDrop {
       chain(g, link.x, link.y, active ? 13 : 11);
     }
 
-    // The line along the nearest border, on the cursor's side (one flat color per level); and
-    // on the far half of the gap, the insertion between the siblings, which is the same from
-    // either side: the halves touch in the middle.
+    // The line along the nearest border, on the cursor's side: its main choice, solid; and on
+    // the far half of the gap, the insertion between the siblings, which is the same from
+    // either side (the halves touch in the middle). Its other choices: mini lines.
     if (!d.near) return;
     const line = d.near;
-    const key = (c: Choice) => JSON.stringify(c.target);
-    const activeKey = d.active && key(d.active);
-    const isActive = (c: Choice) => key(c) === activeKey;
-    const fill = new Map(line.levels.map((c, k) => [c, levelColor(k, isActive(c) ? 1 : 0.8, isActive(c) ? 0.9 : 0.68)]));
+    const isActive = (c: Choice) => c === d.active;
+    const all = [...line.levels, ...line.far];
+    // White and grey only: a choice is white (outlined, darker and thicker when it's the
+    // active one); what a mini line's choice doesn't cover, grey.
+    const WHITE = "#fff";
+    const GREY = grey(0.66);
+    const edged = (c: Choice) => ({ stroke: isActive(c) ? grey(0.15) : grey(0.4), "stroke-width": isActive(c) ? 1.5 : 1 });
     const [b0, b1] = line.band;
-    const rect = (v0: number, v1: number, c: Choice) => {
-      if (v1 <= v0) return;
-      const r = bandAt(line, b0, b1, [v0, v1]);
-      mk("rect", { x: r.x, y: r.y, width: r.w, height: r.h, fill: fill.get(c)!, class: "carreau-indicator" + (isActive(c) ? " active" : "") });
-    };
-    if (line.mirror) {
-      const { choice, span: [v0, v1] } = line.mirror;
-      const r = bandAt(line, b0 - (b1 - b0), b0, [v0, v1]);
-      mk("rect", { x: r.x, y: r.y, width: r.w, height: r.h, fill: fill.get(choice)!, class: "carreau-indicator" + (isActive(choice) ? " active" : "") });
+    const main = d.minis?.main ?? d.main ?? line.levels[0];
+    const r0 = bandAt(line, b0, b1, main.span);
+    mk("rect", { x: r0.x, y: r0.y, width: r0.w, height: r0.h, fill: WHITE, ...edged(main), class: "carreau-indicator" + (isActive(main) ? " active" : "") });
+    // Mini lines: grey, with the stretch of the full line their choice covers in white.
+    const lo = Math.min(...all.map((c) => c.span[0]));
+    const hi = Math.max(...all.map((c) => c.span[1]));
+    const row = sideAxis[line.side] === "row"; // (a vertical line)
+    for (const { choice, rect: r } of d.minis?.items ?? []) {
+      const active = isActive(choice);
+      const g = mk("g", { class: "carreau-indicator carreau-mini" + (active ? " active" : "") });
+      mk("rect", { x: r.x, y: r.y, width: r.w, height: r.h, rx: 1, fill: GREY, ...edged(choice) }, g);
+      const [len0, len] = row ? [r.y, r.h] : [r.x, r.w];
+      const f0 = (Math.max(choice.span[0], lo) - lo) / (hi - lo || 1);
+      const f1 = (Math.min(choice.span[1], hi) - lo) / (hi - lo || 1);
+      const [c0, c1] = [len0 + f0 * len, len0 + f1 * len];
+      if (c1 > c0) mk("rect", row ? { x: r.x + 0.5, y: c0 + 0.5, width: r.w - 1, height: c1 - c0 - 1, fill: WHITE } : { x: c0 + 0.5, y: r.y + 0.5, width: c1 - c0 - 1, height: r.h - 1, fill: WHITE }, g);
     }
-    for (const seg of segments(line)) {
-      if (seg.levels.length === 1) rect(seg.from, seg.to, seg.levels[0]);
-      // Alternate dashes, anchored to absolute positions (with a 1px visual gap).
-      else
-        for (let k = Math.floor(seg.from / DASH); k * DASH < seg.to; k++)
-          rect(Math.max(seg.from, k * DASH), Math.min(seg.to, (k + 1) * DASH - DASH_GAP), seg.levels[mod(k, seg.levels.length)]);
+    // The node whose space the new one would take: chevrons on its four corners, in the active
+    // choice's color, as thick as the line.
+    const on = d.active;
+    const box = on ? this.containerRect(on.target) : null;
+    if (on && box) {
+      const h = LINE / 2;
+      const arm = Math.min(CHEVRON, box.w / 3, box.h / 3);
+      const [x0, y0, x1, y1] = [box.x + h, box.y + h, box.x + box.w - h, box.y + box.h - h];
+      const corners = [
+        `M ${x0} ${y0 + arm} L ${x0} ${y0} L ${x0 + arm} ${y0}`,
+        `M ${x1 - arm} ${y0} L ${x1} ${y0} L ${x1} ${y0 + arm}`,
+        `M ${x1} ${y1 - arm} L ${x1} ${y1} L ${x1 - arm} ${y1}`,
+        `M ${x0 + arm} ${y1} L ${x0} ${y1} L ${x0} ${y1 - arm}`,
+      ];
+      // (White, on a slightly wider dark casing: an outline.)
+      mk("path", { d: corners.join(" "), stroke: grey(0.15), "stroke-width": LINE + 2, fill: "none", "stroke-linejoin": "miter", class: "carreau-indicator" });
+      mk("path", { d: corners.join(" "), stroke: WHITE, "stroke-width": LINE, fill: "none", "stroke-linejoin": "miter", class: "carreau-indicator carreau-chevrons" });
     }
+  }
+
+  /**
+   * The rect of the node whose space a drop's new node would take, so that each choice shows
+   * its own: between two siblings, their split (1/N of it); on a side of a node, that node
+   * (half of it, beside it; or, a split along that side's axis, 1/N of it, at its start or end).
+   */
+  private containerRect(t: DropTarget): Rect | null {
+    const id = t.kind === "between" ? t.splitId : t.kind === "side" ? t.targetId : null;
+    return id ? this.host.visRect(id) : null;
   }
 }
 
@@ -760,22 +879,12 @@ function inLine(line: SideLine, px: number, py: number): boolean {
   return u >= line.hit[0] && u <= line.hit[1];
 }
 
-const mod = (a: number, n: number) => ((a % n) + n) % n;
-
-/** Split a line into stretches covered by the same set of choices (outermost first). */
-function segments(line: SideLine): { from: number; to: number; levels: Choice[] }[] {
-  const cuts = [...new Set(line.levels.flatMap((c) => c.span))].sort((a, b) => a - b);
-  const out: { from: number; to: number; levels: Choice[] }[] = [];
-  for (let i = 0; i + 1 < cuts.length; i++) {
-    const mid = (cuts[i] + cuts[i + 1]) / 2;
-    const levels = line.levels.filter((c) => c.span[0] <= mid && mid <= c.span[1]);
-    if (levels.length) out.push({ from: cuts[i], to: cuts[i + 1], levels });
-  }
-  return out;
+/** A line's main choice at position v along it: the outermost one covering v (else, its first). */
+function mainChoice(line: SideLine, v: number): Choice {
+  return line.levels.find((c) => c.span[0] <= v && v <= c.span[1]) ?? line.levels[0];
 }
 
-/** The choice whose dash lies at position v along the line. */
-function dashAt(line: SideLine, v: number): Choice | null {
-  const seg = segments(line).find((s) => s.from <= v && v <= s.to);
-  return seg ? seg.levels[seg.levels.length === 1 ? 0 : mod(Math.floor(v / DASH), seg.levels.length)] : null;
+function grow(r: Rect, by: number): Rect {
+  return { x: r.x - by, y: r.y - by, w: r.w + 2 * by, h: r.h + 2 * by };
 }
+

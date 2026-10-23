@@ -14,7 +14,7 @@ const ls = await cellPane("ls").boundingBox();
 await page.mouse.move(ls.x + ls.width / 2, ls.y + 3, { steps: 6 });
 console.log("top of first cell:", await levels());
 await page.screenshot({ path: "/tmp/scrollsep2.png", clip: { x: ls.x - 10, y: ls.y - 6, width: 300, height: 30 } });
-// a few positions along the line pick the different options (dashes)
+// a few positions along the line (now: the main choice there; the others pop out as mini lines, see minis.mjs)
 for (let dx = 0; dx < 60; dx += 18) {
   await page.mouse.move(ls.x + 40 + dx, ls.y + 3, { steps: 1 });
   console.log("  at +" + dx, await page.evaluate(() => { const t = window.view.drag.active?.target; return t ? `${t.kind}${t.index !== undefined ? "@" + t.index : ""}` : "none"; }));

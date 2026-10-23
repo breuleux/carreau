@@ -507,7 +507,7 @@ For each side S of P, working within **P's own tree** (main or window):
 2. **Between siblings**: if, on the way up, P's side borders a sibling (the parent splits along S's axis), the walk stops there, and the outermost choice is **between** those two siblings: `{between, split, index}`, sized 1/N. Its span is the extent of the node next to the gap on P's side. Call such a side a *straddling* side.
 3. **Insertions**: every node on the line whose kind takes side S gives a `side` choice on it, if the drop is valid. That includes:
    * a scroll split along S's axis, at its start/end: inserting a first/last cell. Its preview is the third of the end cell next to the edge, consistent with the between-cells previews, and its span is the end cell's. The line's **hit area also reaches a few pixels outward** (5px), over the scroll split's border and the holder's header edge, so that aiming right at the very edge works.
-   * the holder of a group, and nodes further out, when their border is the same: they share the line, dashed.
+   * the holder of a group, and nodes further out, when their border is the same: they share the line (its other choices: mini lines).
 4. **Same drop, once**: choices whose results are the same layout **including sizes** (`shape(tree, true)`, all trees) are the same drop. Keep the **innermost**. Leave out those P's own edge third on S already offers, and the between choice's.
    * Sizes matter: the top of a column whose first child is P (1/N of the column) is *not* P's own top third (half of P), so both are offered, the former on the line.
    * P's own `side` choices are its edge thirds, never line levels. A cell of a scroll split has no thirds along the split's axis ("beside" zones would look like splits, but cells just stack): there, the lines offer the separators instead.
@@ -523,26 +523,22 @@ A border line is shown **only while the cursor is over it**: the cursor must be 
 
 * At the edge of the workspace or of a window, it lies inside P along the edge.
 * On a straddling side, P's half runs from the middle of the splitter gap inwards into P.
-* Pitfall: the **hit area** on a straddling side must cover the *whole* gap, from the far sibling's edge to the inner end of P's half. P's drawn half only starts at the middle of the gap. Since the hovered pane is kept over gaps, a hit area equal to the drawn half would leave the far half of the gap matching nothing, and the line would vanish right on the separator.
+* Pitfall: the **hit area** of a gap's line must cover the *whole* gap (and as far into either side): since the hovered pane is kept over gaps, a narrower one would leave part of the gap matching nothing, and the line would vanish right on the separator.
 
-**Dashes**:
+**The main line, and mini lines** (no dashes: the line isn't split):
 
-* Cut the line at every choice's span endpoints. Each stretch is covered by some set of choices, ordered outermost first.
-* A stretch with one choice is drawn solid.
-* A stretch with several choices is drawn as 18px dashes cycling through them: `levels[k mod n]` for `k = floor(v / 18)`.
-  * Anchor dashes to **absolute** coordinates, so they don't shift as the line changes.
-  * Leave a **1px visual gap** at the end of each dash. Hit-testing ignores the gap.
-* **Selecting**: the active choice is the dash under the cursor's position along the edge.
-* Because P's span lies inside the span of every node on the line, P's stretch shows all of its group choices dashed. Stretches beyond P only show the outer ones.
-  * Example: a pane inside an inner group inside an outer group, whose boundaries are all distinct. Along the pane, grey (outer) and muted blue (inner) dashes alternate. Beyond the inner group, the line is solid grey. A pane whose only enclosing option is the between-siblings choice gets a plain grey line.
+* **The line** is drawn solid, for its **main choice** at the cursor's position along it: the outermost choice covering that position (`mainChoice`). That's the active choice while the cursor is on the line.
+* **A gap between two siblings has one line**, centered on the gap (`LINE` thick), its hit area reaching as far into either side (8px from the middle): **the same whichever side is hovered**. Its main choice is the insertion between them; its options are both sides' own (`SideLine.far`: the far side's, from the panes across touching the gap). A line has a `key` (the gap: split and index; else the edge and its choices), the same seen from either side, so that crossing the gap neither restarts the wait nor dismisses the mini lines. (Before, each side had its own half and options, and a cursor wobbling across the gap kept restarting everything: mini lines, and dashes before them, came up inconsistently.)
+* **Mini lines**: after the cursor stays on a line for **250ms** (`MINI_DELAY`; if it has other choices there), its **other choices there pop out next to the cursor**: each a short line (44px, 6px thick) parallel to it, centered on the cursor's position along it, **on the side of what it would split** (the hovered side's choices on that side, the far side's on the other; at a workspace or window edge, inward), **the widest nearest the line**, **evenly spaced**: the same gap (3px) from the line to the first as between them. They stay where they popped out, so that the cursor can go to them.
+  * A mini line is **grey, with the stretch of the full line its choice covers in white** (the full line: the union of the choices' spans): a choice narrower than the line shows as such.
+  * **Selecting**: on a mini line, its choice is active (preview, chevrons); while they're out, the whole **corridor** they span (the line included) belongs to the line: elsewhere in it, the main choice. Leaving the line and the corridor (or the line changing) dismisses them, and the wait starts again on the next line.
+  * Pitfall: the corridor matters: between the line's hit area and the far side's mini lines, the cursor is over the neighbouring pane, which would become the hovered one and dismiss them.
 
 **Coloring**:
 
-* Colors go by **level index** within the line, outermost first. Level 0 is **light grey** (chroma 0). Deeper levels get **low-saturation** hues (chroma 0.06), only so that the dashes of several possible insertions stand apart. A line with a single choice is therefore plain grey.
-* Each choice's rect is filled with **one flat color** (no gradient): L 0.68, or 0.9 when active (dark mode; light mode mirrors it).
+* **White and grey only** (no gradient, no hues): a choice is **white**: the line, the stretch of a mini line its choice covers, the chevrons; with a thin dark outline (so that white shows on light backgrounds), darker and thicker for the active choice (the chevrons: on a slightly wider dark casing). What a mini line's choice doesn't cover is **grey**.
 * Alpha is 0.8, or 1 when active.
-* **The cursor's side** of a border is drawn: on a straddling side, P's half, with all its choices. (The panes across it get theirs when hovered: crossing the border swaps which half shows.)
-* But the **insertion between the two siblings is the same from either side**: it's also drawn on the far half of the gap, along the far sibling (`SideLine.mirror`), so that both halves show it, touching in the middle, and light up together. Only that one: the far side's other choices (its own groups) show when it's hovered.
+* **Chevrons**: while a line's choice is active, the node **whose space the new node would take** gets **chevrons on its four corners** (L-shaped, in that choice's color, as thick as the line), so that each choice shows its own: between two siblings, their split (1/N of it); on a side of a node, that node (half of it beside it; a split along that side's axis, 1/N of it, at its start or end; at a tree's edge, the whole tree) (`containerRect`). (Not "the parent it would join": then "between" and "beside" look the same, though they share space differently.)
 
 ### Tab dots
 
@@ -901,7 +897,7 @@ In a `scroll-column`, children take their **natural height** (their content deci
 | Drag start threshold | 5px |
 | Splitter / gap | 4px; 30px minimum per neighbour |
 | Border line thickness / hit depth | 5px / 8px |
-| Dash length / gap between dashes | 18px / 1px |
+| Mini lines: delay / length / thickness / gap | 250ms / 44px / 6px / 3px |
 | Swap and cloud icon radius | 22px |
 | Tab dot radius | 3.5px, 5.5px when active |
 | Handle area minimum in the header | 24px |
@@ -922,7 +918,7 @@ In a `scroll-column`, children take their **natural height** (their content deci
 * An overlay with `pointer-events: none` needs manual hit-testing, and `elementsFromPoint` to find the pane underneath.
 * Keep the hovered pane while over gaps inside the workspace. Make straddling hit areas cover the whole gap.
 * Dedupe line levels by their *resulting layout, sizes included*, keeping the innermost, and leave out what the hovered pane's own thirds and the between choice already offer.
-* Anchor dash phases to absolute coordinates.
+* Mini lines: keep the corridor from the line to them the line's, or they can't be reached.
 * Compute "1/N" while excluding what is leaving the split.
 * Weight swaps on pane swap keep the geometry fixed, which is what makes swap/unswap exact.
 * Filter every candidate choice through the drop function, including the shape no-op test, so the UI never offers pointless drops.
